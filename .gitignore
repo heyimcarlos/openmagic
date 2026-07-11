@@ -44,3 +44,11 @@ server/venv/
 # Generated documentation / analysis artifacts
 server/repomix-output.txt
 server/plans/
+
+.reference
+.worktrees
+
+# Agent local notes
+MISTAKES.md
+DESIRES.md
+LEARNINGS.md
