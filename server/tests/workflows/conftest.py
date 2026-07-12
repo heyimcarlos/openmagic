@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from server.tests.workflows.factories import BROKER_ID, ORGANIZATION_ID
 from server.workflows import (
@@ -10,10 +13,50 @@ from server.workflows import (
     WorkflowDatabase,
     default_workflow_registry,
 )
+from server.workflows.identity_models import (
+    OrganizationMembershipRow,
+    PartyIdentifierRow,
+    PartyRow,
+)
 
 
 @pytest.fixture
-async def control_plane(migrated_postgres_url: str, clean_workflow_database):
+async def seeded_workflow_identity(migrated_postgres_url: str, clean_workflow_database):
+    engine = create_async_engine(migrated_postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    async with sessions.begin() as session:
+        session.add_all(
+            [
+                PartyRow(id=BROKER_ID, kind="person", display_name="Carlos Broker"),
+                PartyRow(
+                    id=ORGANIZATION_ID,
+                    kind="organization",
+                    display_name="Acme Brokerage",
+                ),
+            ]
+        )
+        await session.flush()
+        session.add_all(
+            [
+                PartyIdentifierRow(
+                    party_id=BROKER_ID,
+                    kind="email",
+                    value="broker@acme.example",
+                    verified_at=now,
+                ),
+                OrganizationMembershipRow(
+                    person_party_id=BROKER_ID,
+                    organization_party_id=ORGANIZATION_ID,
+                    granted_at=now,
+                ),
+            ]
+        )
+    await engine.dispose()
+
+
+@pytest.fixture
+async def control_plane(migrated_postgres_url: str, seeded_workflow_identity):
     database = WorkflowDatabase(migrated_postgres_url)
     authority = StaticWorkflowAuthority(
         grants={(BROKER_ID, ORGANIZATION_ID, RENEWAL_OUTREACH_KIND)}

@@ -1,15 +1,17 @@
 """Interaction Agent Runtime - handles LLM calls for user and agent turns."""
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Set
+from typing import Any
+from uuid import UUID, uuid4
 
-from .agent import build_system_prompt, prepare_message_with_history
-from .tools import ToolResult, get_tool_schemas, handle_tool_call
-from ...config import get_settings
-from ...services.conversation import get_conversation_log, get_working_memory_log
-from ...openrouter_client import request_chat_completion
+from ...config import Settings, get_settings
 from ...logging_config import logger
+from ...openrouter_client import request_chat_completion
+from ...services.conversation import get_conversation_log, get_working_memory_log
+from .agent import build_system_prompt, prepare_message_with_history
+from .toolbox import InteractionToolbox, InteractionToolContext, ToolResult
 
 
 @dataclass
@@ -18,7 +20,7 @@ class InteractionResult:
 
     success: bool
     response: str
-    error: Optional[str] = None
+    error: str | None = None
     execution_agents_used: int = 0
 
 
@@ -26,9 +28,9 @@ class InteractionResult:
 class _ToolCall:
     """Parsed tool invocation from an LLM response."""
 
-    identifier: Optional[str]
+    identifier: str | None
     name: str
-    arguments: Dict[str, Any]
+    arguments: dict[str, Any]
 
 
 @dataclass
@@ -36,9 +38,9 @@ class _LoopSummary:
     """Aggregate information produced by the interaction loop."""
 
     last_assistant_text: str = ""
-    user_messages: List[str] = field(default_factory=list)
-    tool_names: List[str] = field(default_factory=list)
-    execution_agents: Set[str] = field(default_factory=set)
+    user_messages: list[str] = field(default_factory=list)
+    tool_names: list[str] = field(default_factory=list)
+    execution_agents: set[str] = field(default_factory=set)
 
 
 class InteractionAgentRuntime:
@@ -47,14 +49,30 @@ class InteractionAgentRuntime:
     MAX_TOOL_ITERATIONS = 8
 
     # Initialize interaction agent runtime with settings and service dependencies
-    def __init__(self) -> None:
-        settings = get_settings()
+    def __init__(
+        self,
+        *,
+        toolbox: InteractionToolbox | None = None,
+        tool_context_factory: Callable[[str], InteractionToolContext] | None = None,
+        system_prompt_builder: Callable[[], str] = build_system_prompt,
+        message_builder: Callable[..., list[dict[str, str]]] = prepare_message_with_history,
+        settings: Settings | None = None,
+    ) -> None:
+        settings = settings or get_settings()
         self.api_key = settings.openrouter_api_key
         self.model = settings.interaction_agent_model
         self.settings = settings
         self.conversation_log = get_conversation_log()
         self.working_memory_log = get_working_memory_log()
-        self.tool_schemas = get_tool_schemas()
+        if toolbox is None:
+            from .tools import LegacyInteractionToolbox
+
+            toolbox = LegacyInteractionToolbox()
+        self.toolbox = toolbox
+        self.tool_schemas = list(self.toolbox.schemas)
+        self._tool_context_factory = tool_context_factory or self._legacy_tool_context
+        self._system_prompt_builder = system_prompt_builder
+        self._message_builder = message_builder
 
         if not self.api_key:
             raise ValueError(
@@ -69,13 +87,12 @@ class InteractionAgentRuntime:
             transcript_before = self._load_conversation_transcript()
             self.conversation_log.record_user_message(user_message)
 
-            system_prompt = build_system_prompt()
-            messages = prepare_message_with_history(
-                user_message, transcript_before, message_type="user"
-            )
+            system_prompt = self._system_prompt_builder()
+            messages = self._message_builder(user_message, transcript_before, message_type="user")
+            tool_context = self._tool_context_factory(f"message-{uuid4()}")
 
             logger.info("Processing user message through interaction agent")
-            summary = await self._run_interaction_loop(system_prompt, messages)
+            summary = await self._run_interaction_loop(system_prompt, messages, tool_context)
 
             final_response = self._finalize_response(summary)
 
@@ -104,13 +121,12 @@ class InteractionAgentRuntime:
             transcript_before = self._load_conversation_transcript()
             self.conversation_log.record_agent_message(agent_message)
 
-            system_prompt = build_system_prompt()
-            messages = prepare_message_with_history(
-                agent_message, transcript_before, message_type="agent"
-            )
+            system_prompt = self._system_prompt_builder()
+            messages = self._message_builder(agent_message, transcript_before, message_type="agent")
+            tool_context = self._tool_context_factory(f"agent-message-{uuid4()}")
 
             logger.info("Processing execution agent results")
-            summary = await self._run_interaction_loop(system_prompt, messages)
+            summary = await self._run_interaction_loop(system_prompt, messages, tool_context)
 
             final_response = self._finalize_response(summary)
 
@@ -135,13 +151,14 @@ class InteractionAgentRuntime:
     async def _run_interaction_loop(
         self,
         system_prompt: str,
-        messages: List[Dict[str, Any]],
+        messages: list[dict[str, Any]],
+        tool_context: InteractionToolContext,
     ) -> _LoopSummary:
         """Iteratively query the LLM until it issues a final response."""
 
         summary = _LoopSummary()
 
-        for iteration in range(self.MAX_TOOL_ITERATIONS):
+        for _iteration in range(self.MAX_TOOL_ITERATIONS):
             response = await self._make_llm_call(system_prompt, messages)
             assistant_message = self._extract_assistant_message(response)
 
@@ -152,7 +169,7 @@ class InteractionAgentRuntime:
             raw_tool_calls = assistant_message.get("tool_calls") or []
             parsed_tool_calls = self._parse_tool_calls(raw_tool_calls)
 
-            assistant_entry: Dict[str, Any] = {
+            assistant_entry: dict[str, Any] = {
                 "role": "assistant",
                 "content": assistant_message.get("content", "") or "",
             }
@@ -171,7 +188,7 @@ class InteractionAgentRuntime:
                     if isinstance(agent_name, str) and agent_name:
                         summary.execution_agents.add(agent_name)
 
-                result = self._execute_tool(tool_call)
+                result = await self._execute_tool(tool_call, tool_context)
 
                 if result.user_message:
                     summary.user_messages.append(result.user_message)
@@ -202,8 +219,8 @@ class InteractionAgentRuntime:
     async def _make_llm_call(
         self,
         system_prompt: str,
-        messages: List[Dict[str, Any]],
-    ) -> Dict[str, Any]:
+        messages: list[dict[str, Any]],
+    ) -> dict[str, Any]:
         """Make an LLM call via OpenRouter."""
 
         logger.debug(
@@ -219,7 +236,7 @@ class InteractionAgentRuntime:
         )
 
     # Extract the assistant's message from the OpenRouter API response structure
-    def _extract_assistant_message(self, response: Dict[str, Any]) -> Dict[str, Any]:
+    def _extract_assistant_message(self, response: dict[str, Any]) -> dict[str, Any]:
         """Return the assistant message from the raw response payload."""
 
         choice = (response.get("choices") or [{}])[0]
@@ -229,10 +246,10 @@ class InteractionAgentRuntime:
         return message
 
     # Convert raw LLM tool calls into structured _ToolCall objects with validation
-    def _parse_tool_calls(self, raw_tool_calls: List[Dict[str, Any]]) -> List[_ToolCall]:
+    def _parse_tool_calls(self, raw_tool_calls: list[dict[str, Any]]) -> list[_ToolCall]:
         """Normalize tool call payloads from the LLM."""
 
-        parsed: List[_ToolCall] = []
+        parsed: list[_ToolCall] = []
         for raw in raw_tool_calls:
             function_block = raw.get("function") or {}
             name = function_block.get("name")
@@ -252,16 +269,12 @@ class InteractionAgentRuntime:
                 )
                 continue
 
-            parsed.append(
-                _ToolCall(identifier=raw.get("id"), name=name, arguments=arguments)
-            )
+            parsed.append(_ToolCall(identifier=raw.get("id"), name=name, arguments=arguments))
 
         return parsed
 
     # Parse and validate tool arguments from various formats (dict, JSON string, etc.)
-    def _parse_tool_arguments(
-        self, raw_arguments: Any
-    ) -> tuple[Dict[str, Any], Optional[str]]:
+    def _parse_tool_arguments(self, raw_arguments: Any) -> tuple[dict[str, Any], str | None]:
         """Convert tool arguments into a dictionary, reporting errors."""
 
         if raw_arguments is None:
@@ -284,7 +297,11 @@ class InteractionAgentRuntime:
         return {}, f"unsupported argument type: {type(raw_arguments).__name__}"
 
     # Execute tool calls with error handling and logging, returning standardized results
-    def _execute_tool(self, tool_call: _ToolCall) -> ToolResult:
+    async def _execute_tool(
+        self,
+        tool_call: _ToolCall,
+        context: InteractionToolContext,
+    ) -> ToolResult:
         """Execute a tool call and convert low-level errors into structured results."""
 
         if "__invalid_arguments__" in tool_call.arguments:
@@ -294,7 +311,7 @@ class InteractionAgentRuntime:
 
         try:
             self._log_tool_invocation(tool_call, stage="start")
-            result = handle_tool_call(tool_call.name, tool_call.arguments)
+            result = await self.toolbox.invoke(tool_call.name, tool_call.arguments, context)
         except Exception as exc:  # pragma: no cover - defensive
             logger.error(
                 "Tool execution crashed",
@@ -331,7 +348,7 @@ class InteractionAgentRuntime:
     def _format_tool_result(self, tool_call: _ToolCall, result: ToolResult) -> str:
         """Render a tool execution result back to the LLM."""
 
-        payload: Dict[str, Any] = {
+        payload: dict[str, Any] = {
             "tool": tool_call.name,
             "status": "success" if result.success else "error",
             "arguments": {
@@ -362,18 +379,18 @@ class InteractionAgentRuntime:
         tool_call: _ToolCall,
         *,
         stage: str,
-        result: Optional[ToolResult] = None,
-        detail: Optional[Dict[str, Any]] = None,
+        result: ToolResult | None = None,
+        detail: dict[str, Any] | None = None,
     ) -> None:
         """Emit structured logs for tool lifecycle events."""
 
         cleaned_args = {
             key: value
             for key, value in tool_call.arguments.items()
-            if key != "__invalid_arguments__"
+            if key in {"workflow_id", "cursor", "limit"}
         }
 
-        log_payload: Dict[str, Any] = {
+        log_payload: dict[str, Any] = {
             "tool": tool_call.name,
             "stage": stage,
             "arguments": cleaned_args,
@@ -381,8 +398,12 @@ class InteractionAgentRuntime:
 
         if result is not None:
             log_payload["success"] = result.success
-            if result.payload is not None:
-                log_payload["payload"] = result.payload
+            if isinstance(result.payload, dict):
+                log_payload["result"] = {
+                    key: result.payload[key]
+                    for key in ("workflow_id", "status", "total_matches", "has_more")
+                    if key in result.payload
+                }
 
         if detail:
             log_payload.update(detail)
@@ -402,3 +423,11 @@ class InteractionAgentRuntime:
             return summary.user_messages[-1]
 
         return summary.last_assistant_text
+
+    @staticmethod
+    def _legacy_tool_context(cause_id: str) -> InteractionToolContext:
+        return InteractionToolContext(
+            actor_party_id=UUID(int=0),
+            organization_party_id=UUID(int=0),
+            cause_id=cause_id,
+        )

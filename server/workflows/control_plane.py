@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
@@ -11,7 +12,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .authority import WorkflowAuthority, WorkflowAuthorizationScope
 from .contracts import (
     CreateWorkflowCommand,
+    ProposeWorkflowJobsCommand,
     WorkflowCommandContext,
+    WorkflowProposal,
     WorkflowTrace,
     WorkflowTraceEvent,
     WorkflowTraceJob,
@@ -20,7 +23,18 @@ from .contracts import (
     WorkflowTraceWorkflow,
 )
 from .database import WorkflowDatabase
-from .errors import WorkflowAuthorizationError, WorkflowNotFoundError
+from .errors import (
+    InvalidWorkflowProposalError,
+    WorkflowAuthorizationError,
+    WorkflowLifecycleError,
+    WorkflowNotFoundError,
+)
+from .identity_models import (
+    OrganizationMembershipRow,
+    PartyIdentifierRow,
+    WorkflowParticipantRoleRow,
+    WorkflowParticipantRow,
+)
 from .models import (
     NotificationRow,
     WorkflowEventRow,
@@ -29,7 +43,7 @@ from .models import (
     WorkflowJobRunRow,
     WorkflowRow,
 )
-from .registry import WorkflowKindRegistry
+from .registry import ValidatedWorkflowProposal, WorkflowKindRegistry
 
 
 class WorkflowControlPlane:
@@ -52,10 +66,6 @@ class WorkflowControlPlane:
             raise WorkflowAuthorizationError("Party cannot create this Workflow Kind")
 
         workflow_id = uuid4()
-        job_ids = {job.key: uuid4() for job in validated.jobs}
-        job_inputs = {
-            job.key: self._registry.materialize_job_input(job, job_ids) for job in validated.jobs
-        }
 
         async with self._database.transaction() as session:
             workflow = WorkflowRow(
@@ -64,6 +74,7 @@ class WorkflowControlPlane:
                 objective=validated.objective,
                 status="active",
                 input=validated.input,
+                organization_party_id=command.context.organization_party_id,
             )
             session.add(workflow)
             await session.flush()
@@ -71,51 +82,151 @@ class WorkflowControlPlane:
             await session.execute(
                 sa.select(WorkflowRow.id).where(WorkflowRow.id == workflow_id).with_for_update()
             )
-
-            job_rows: list[WorkflowJobRow] = []
-            for job in validated.jobs:
-                status = "waiting" if job.depends_on or job.contract.requires_approval else "queued"
-                job_rows.append(
-                    WorkflowJobRow(
-                        id=job_ids[job.key],
-                        workflow_id=workflow_id,
-                        kind=job.kind,
-                        status=status,
-                        attempts=0,
-                        max_attempts=job.contract.max_attempts,
-                        input=job_inputs[job.key],
-                    )
-                )
-            session.add_all(job_rows)
-            await session.flush()
-
-            dependencies = [
-                WorkflowJobDependencyRow(
+            session.add(
+                WorkflowParticipantRow(
                     workflow_id=workflow_id,
+                    party_id=command.context.actor_party_id,
+                )
+            )
+            await session.flush()
+            session.add(
+                WorkflowParticipantRoleRow(
+                    workflow_id=workflow_id,
+                    party_id=command.context.actor_party_id,
+                    role="Broker",
+                    granted_at=datetime.now(UTC),
+                )
+            )
+
+            await self._append_job_graph(session, workflow, validated, command.context)
+            trace = await self._read_trace(session, workflow)
+
+        return trace
+
+    async def propose_jobs(self, command: ProposeWorkflowJobsCommand) -> WorkflowTrace:
+        async with self._database.transaction() as session:
+            workflow = await session.scalar(
+                sa.select(WorkflowRow)
+                .where(WorkflowRow.id == command.workflow_id)
+                .with_for_update()
+            )
+            if workflow is None:
+                raise WorkflowNotFoundError(str(command.workflow_id))
+            if not await self._has_current_broker_authority(session, command.context, workflow):
+                raise WorkflowAuthorizationError("Party cannot propose work for this Workflow")
+            if workflow.status != "active":
+                raise WorkflowLifecycleError("Workflow is not active")
+            existing_job = await session.scalar(
+                sa.select(WorkflowJobRow.id)
+                .where(WorkflowJobRow.workflow_id == workflow.id)
+                .limit(1)
+            )
+            if existing_job is not None:
+                raise WorkflowLifecycleError("Workflow already has its initial Job graph")
+
+            validated = self._registry.validate(
+                WorkflowProposal(
+                    kind=workflow.kind,
+                    objective=workflow.objective,
+                    input=workflow.input,
+                    jobs=command.jobs,
+                )
+            )
+            if validated.kind != workflow.kind:
+                raise InvalidWorkflowProposalError("Job graph does not match the Workflow Kind")
+            await self._append_job_graph(session, workflow, validated, command.context)
+            trace = await self._read_trace(session, workflow)
+        return trace
+
+    @staticmethod
+    async def _has_current_broker_authority(
+        session: AsyncSession,
+        context: WorkflowCommandContext,
+        workflow: WorkflowRow,
+    ) -> bool:
+        if context.organization_party_id != workflow.organization_party_id:
+            return False
+        predicate = sa.and_(
+            sa.exists(
+                sa.select(PartyIdentifierRow.id).where(
+                    PartyIdentifierRow.party_id == context.actor_party_id,
+                    PartyIdentifierRow.verified_at.is_not(None),
+                    PartyIdentifierRow.revoked_at.is_(None),
+                )
+            ),
+            sa.exists(
+                sa.select(OrganizationMembershipRow.id).where(
+                    OrganizationMembershipRow.person_party_id == context.actor_party_id,
+                    OrganizationMembershipRow.organization_party_id
+                    == workflow.organization_party_id,
+                    OrganizationMembershipRow.revoked_at.is_(None),
+                )
+            ),
+            sa.exists(
+                sa.select(WorkflowParticipantRoleRow.id).where(
+                    WorkflowParticipantRoleRow.workflow_id == workflow.id,
+                    WorkflowParticipantRoleRow.party_id == context.actor_party_id,
+                    WorkflowParticipantRoleRow.role == "Broker",
+                    WorkflowParticipantRoleRow.revoked_at.is_(None),
+                )
+            ),
+        )
+        return bool(await session.scalar(sa.select(predicate)))
+
+    async def _append_job_graph(
+        self,
+        session: AsyncSession,
+        workflow: WorkflowRow,
+        validated: ValidatedWorkflowProposal,
+        context: WorkflowCommandContext,
+    ) -> None:
+        job_ids = {job.key: uuid4() for job in validated.jobs}
+        job_inputs = {
+            job.key: self._registry.materialize_job_input(job, job_ids) for job in validated.jobs
+        }
+        session.add_all(
+            [
+                WorkflowJobRow(
+                    id=job_ids[job.key],
+                    workflow_id=workflow.id,
+                    kind=job.kind,
+                    status=(
+                        "waiting" if job.depends_on or job.contract.requires_approval else "queued"
+                    ),
+                    attempts=0,
+                    max_attempts=job.contract.max_attempts,
+                    input=job_inputs[job.key],
+                )
+                for job in validated.jobs
+            ]
+        )
+        await session.flush()
+        session.add_all(
+            [
+                WorkflowJobDependencyRow(
+                    workflow_id=workflow.id,
                     job_id=job_ids[job.key],
                     depends_on_job_id=job_ids[dependency],
                 )
                 for job in validated.jobs
                 for dependency in job.depends_on
             ]
-            session.add_all(dependencies)
-            event = WorkflowEventRow(
-                workflow_id=workflow_id,
+        )
+        session.add(
+            WorkflowEventRow(
+                workflow_id=workflow.id,
                 event_type="workflow_jobs_proposed",
                 actor_type="party",
-                actor_id=str(command.context.actor_party_id),
-                cause_type=command.context.cause_type,
-                cause_id=command.context.cause_id,
+                actor_id=str(context.actor_party_id),
+                cause_type=context.cause_type,
+                cause_id=context.cause_id,
                 data={
                     "job_ids": [str(job_ids[job.key]) for job in validated.jobs],
-                    "organization_party_id": str(command.context.organization_party_id),
+                    "organization_party_id": str(workflow.organization_party_id),
                 },
             )
-            session.add(event)
-            await session.flush()
-            trace = await self._read_trace(session, workflow)
-
-        return trace
+        )
+        await session.flush()
 
     async def read_workflow_trace(
         self,

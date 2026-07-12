@@ -49,6 +49,14 @@ class CreateWorkflowCommand(WorkflowContract):
     proposal: WorkflowProposal
 
 
+class ProposeWorkflowJobsCommand(WorkflowContract):
+    """Append one complete typed Job graph to an existing Workflow."""
+
+    context: WorkflowCommandContext
+    workflow_id: UUID
+    jobs: tuple[WorkflowJobProposal, ...] = Field(min_length=1)
+
+
 class WorkflowTraceWorkflow(WorkflowContract):
     id: UUID
     kind: str

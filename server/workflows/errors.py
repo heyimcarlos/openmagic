@@ -23,3 +23,15 @@ class WorkflowAuthorizationError(WorkflowError):
 
 class WorkflowNotFoundError(WorkflowError):
     """The requested Workflow is absent or unavailable to the caller."""
+
+
+class InvalidWorkflowSearchError(WorkflowError):
+    """Reject unsupported filters or invalid opaque cursors."""
+
+
+class StaleWorkflowCursorError(InvalidWorkflowSearchError):
+    """Reject a cursor whose request or ordering anchor is no longer valid."""
+
+
+class WorkflowLifecycleError(WorkflowError):
+    """The Workflow cannot accept the requested transition in its current state."""

@@ -1,17 +1,18 @@
 import asyncio
-from typing import Optional, Union
 
 from fastapi import status
 from fastapi.responses import JSONResponse, PlainTextResponse
 
-from ...agents.interaction_agent.runtime import InteractionAgentRuntime
+from ...agents.interaction_agent.factory import create_interaction_runtime
 from ...logging_config import logger
 from ...models import ChatMessage, ChatRequest
 from ...utils import error_response
 
+_BACKGROUND_TASKS: set[asyncio.Task[None]] = set()
+
 
 # Extract the most recent user message from the chat request payload
-def _extract_latest_user_message(payload: ChatRequest) -> Optional[ChatMessage]:
+def _extract_latest_user_message(payload: ChatRequest) -> ChatMessage | None:
     for message in reversed(payload.messages):
         if message.role.lower().strip() == "user" and message.content.strip():
             return message
@@ -19,7 +20,7 @@ def _extract_latest_user_message(payload: ChatRequest) -> Optional[ChatMessage]:
 
 
 # Process incoming chat requests by routing them to the interaction agent runtime
-async def handle_chat_request(payload: ChatRequest) -> Union[PlainTextResponse, JSONResponse]:
+async def handle_chat_request(payload: ChatRequest) -> PlainTextResponse | JSONResponse:
     """Handle a chat request using the InteractionAgentRuntime."""
 
     # Extract user message
@@ -32,7 +33,7 @@ async def handle_chat_request(payload: ChatRequest) -> Union[PlainTextResponse, 
     logger.info("chat request", extra={"message_length": len(user_content)})
 
     try:
-        runtime = InteractionAgentRuntime()
+        runtime = create_interaction_runtime()
     except ValueError as ve:
         # Missing API key error
         logger.error("configuration error", extra={"error": str(ve)})
@@ -44,6 +45,8 @@ async def handle_chat_request(payload: ChatRequest) -> Union[PlainTextResponse, 
         except Exception as exc:  # pragma: no cover - defensive
             logger.error("chat task failed", extra={"error": str(exc)})
 
-    asyncio.create_task(_run_interaction())
+    task = asyncio.create_task(_run_interaction())
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_TASKS.discard)
 
     return PlainTextResponse("", status_code=status.HTTP_202_ACCEPTED)

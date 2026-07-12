@@ -47,14 +47,33 @@ jobs:
       - name: Install dependencies
         run: uv sync --locked --group dev
       - name: Check formatting
-        run: uv run ruff format --check server/workflows server/tests server/migrations
+        run: >-
+          uv run ruff format --check
+          server/workflows
+          server/agents/interaction_agent
+          server/services/conversation/chat_handler.py
+          server/config.py
+          server/tests
+          server/migrations
       - name: Lint
-        run: uv run ruff check server/workflows server/tests server/migrations
+        run: >-
+          uv run ruff check
+          server/workflows
+          server/agents/interaction_agent
+          server/services/conversation/chat_handler.py
+          server/config.py
+          server/tests
+          server/migrations
       - name: Type check
-        run: uv run ty check server/workflows
+        run: >-
+          uv run ty check
+          server/workflows
+          server/agents/interaction_agent
+          server/services/conversation/chat_handler.py
+          server/config.py
       - name: Apply and verify migrations
         run: |
           uv run alembic upgrade head
           uv run alembic check
       - name: Run Workflow integration tests
-        run: uv run pytest server/tests/workflows
+        run: uv run pytest server/tests/workflows server/tests/agents server/tests/evals
