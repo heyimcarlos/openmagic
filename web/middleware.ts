@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 
-const USERNAME = 'openmagic';
+import { authorizeBrowserRequest, requiresBrowserAuthentication } from './lib/browserAuth';
 
 function unauthorized(): NextResponse {
   return new NextResponse('Authentication required', {
@@ -9,30 +9,19 @@ function unauthorized(): NextResponse {
   });
 }
 
-export function middleware(request: NextRequest): NextResponse {
-  const expectedPassword = process.env.OPENMAGIC_WORKFLOW_INTERACTION_TOKEN;
-  if (!expectedPassword) {
+export async function middleware(request: NextRequest): Promise<NextResponse> {
+  if (!requiresBrowserAuthentication(request.nextUrl.pathname)) return NextResponse.next();
+
+  const authorization = await authorizeBrowserRequest(
+    request.headers.get('authorization'),
+    process.env.OPENMAGIC_BROWSER_PASSWORD,
+  );
+  if (authorization === 'missing_configuration') {
     return new NextResponse('Workflow interaction credential is not configured', { status: 503 });
   }
-
-  const authorization = request.headers.get('authorization');
-  if (!authorization?.startsWith('Basic ')) return unauthorized();
-
-  try {
-    const credentials = atob(authorization.slice('Basic '.length));
-    const separator = credentials.indexOf(':');
-    const username = credentials.slice(0, separator);
-    const password = credentials.slice(separator + 1);
-    if (separator < 0 || username !== USERNAME || password !== expectedPassword) {
-      return unauthorized();
-    }
-  } catch {
-    return unauthorized();
-  }
-
-  return NextResponse.next();
+  return authorization === 'authorized' ? NextResponse.next() : unauthorized();
 }
 
 export const config = {
-  matcher: ['/((?!_next/static|_next/image|favicon.ico).*)'],
+  matcher: ['/:path*'],
 };
