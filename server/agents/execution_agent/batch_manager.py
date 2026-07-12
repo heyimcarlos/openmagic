@@ -6,10 +6,12 @@ import asyncio
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Any
 
-from .runtime import ExecutionAgentRuntime, ExecutionResult
 from ...logging_config import logger
+from .runtime import ExecutionAgentRuntime, ExecutionResult
+
+_INTERACTION_TASKS: set[asyncio.Task[Any]] = set()
 
 
 @dataclass
@@ -30,7 +32,7 @@ class _BatchState:
     batch_id: str
     created_at: datetime = field(default_factory=datetime.now)
     pending: int = 0
-    results: List[ExecutionResult] = field(default_factory=list)
+    results: list[ExecutionResult] = field(default_factory=list)
 
 
 class ExecutionBatchManager:
@@ -39,16 +41,16 @@ class ExecutionBatchManager:
     # Initialize batch manager with timeout and coordination state for execution agents
     def __init__(self, timeout_seconds: int = 90) -> None:
         self.timeout_seconds = timeout_seconds
-        self._pending: Dict[str, PendingExecution] = {}
+        self._pending: dict[str, PendingExecution] = {}
         self._batch_lock = asyncio.Lock()
-        self._batch_state: Optional[_BatchState] = None
+        self._batch_state: _BatchState | None = None
 
     # Run execution agent with timeout handling and batch coordination for interaction agent
     async def execute_agent(
         self,
         agent_name: str,
         instructions: str,
-        request_id: Optional[str] = None,
+        request_id: str | None = None,
     ) -> ExecutionResult:
         """Execute an agent asynchronously and buffer the result for batch dispatch."""
 
@@ -66,7 +68,7 @@ class ExecutionBatchManager:
             )
             status = "SUCCESS" if result.success else "FAILED"
             logger.info(f"[{agent_name}] Execution finished: {status}")
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.error(f"[{agent_name}] Execution timed out after {self.timeout_seconds}s")
             result = ExecutionResult(
                 agent_name=agent_name,
@@ -123,7 +125,7 @@ class ExecutionBatchManager:
     ) -> None:
         """Record the execution result and dispatch when the batch drains."""
 
-        dispatch_payload: Optional[str] = None
+        dispatch_payload: str | None = None
 
         async with self._batch_lock:
             state = self._batch_state
@@ -144,7 +146,7 @@ class ExecutionBatchManager:
             await self._dispatch_to_interaction_agent(dispatch_payload)
 
     # Return list of currently pending execution requests for monitoring purposes
-    def get_pending_executions(self) -> List[Dict[str, str]]:
+    def get_pending_executions(self) -> list[dict[str, str | float]]:
         """Expose pending executions for observability."""
 
         return [
@@ -167,10 +169,10 @@ class ExecutionBatchManager:
             self._batch_state = None
 
     # Format multiple execution results into single message for interaction agent
-    def _format_batch_payload(self, results: List[ExecutionResult]) -> str:
+    def _format_batch_payload(self, results: list[ExecutionResult]) -> str:
         """Render execution results into the interaction-agent format."""
 
-        entries: List[str] = []
+        entries: list[str] = []
         for result in results:
             status = "SUCCESS" if result.success else "FAILED"
             response_text = (result.response or "(no response provided)").strip()
@@ -181,13 +183,15 @@ class ExecutionBatchManager:
     async def _dispatch_to_interaction_agent(self, payload: str) -> None:
         """Send the aggregated execution summary to the interaction agent."""
 
-        from ..interaction_agent.runtime import InteractionAgentRuntime
+        from ..interaction_agent.factory import create_interaction_runtime
 
-        runtime = InteractionAgentRuntime()
+        runtime = create_interaction_runtime()
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             asyncio.run(runtime.handle_agent_message(payload))
             return
 
-        loop.create_task(runtime.handle_agent_message(payload))
+        task = loop.create_task(runtime.handle_agent_message(payload))
+        _INTERACTION_TASKS.add(task)
+        task.add_done_callback(_INTERACTION_TASKS.discard)

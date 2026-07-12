@@ -63,8 +63,10 @@ async def test_target_is_found_early_with_bounded_context(retrieval: WorkflowRet
     hit_at_1 = sum(rank <= 1 for rank in ranks) / len(ranks)
     hit_at_3 = sum(rank <= 3 for rank in ranks) / len(ranks)
     mean_reciprocal_rank = sum(1 / rank for rank in ranks) / len(ranks)
+    approximate_token_burdens = [size // 4 for size in response_sizes]
 
     assert hit_at_1 == 1.0
     assert hit_at_3 == 1.0
     assert mean_reciprocal_rank == 1.0
     assert max(response_sizes) < 10_000
+    assert max(approximate_token_burdens) < 2_500

@@ -23,7 +23,11 @@ from server.workflows import (
     WorkflowSearchRequest,
     default_workflow_registry,
 )
-from server.workflows.identity_models import WorkflowParticipantRoleRow
+from server.workflows.identity_models import (
+    PartyRow,
+    WorkflowParticipantRoleRow,
+    WorkflowParticipantRow,
+)
 from server.workflows.models import WorkflowEventRow, WorkflowJobRow, WorkflowJobRunRow
 
 
@@ -89,20 +93,27 @@ async def test_packet_projects_graph_and_latest_run_without_raw_execution_data(
         await session.execute(
             sa.update(WorkflowJobRow)
             .where(WorkflowJobRow.id == draft_job.id)
-            .values(status="running", attempts=1)
+            .values(status="queued", attempts=1)
         )
         session.add(
             WorkflowJobRunRow(
                 id=run_id,
                 workflow_id=TARGET_ID,
                 job_id=draft_job.id,
-                status="running",
+                status="failed",
                 worker_id="secret-worker-host",
                 lease_expires_at=now + timedelta(minutes=1),
                 runtime_instance_id=uuid4(),
                 application_build="secret-build-sha",
                 adapter_version="secret-adapter-version",
                 provider_tool_version="secret-provider-version",
+                result={
+                    "outcome": "failed",
+                    "error": {
+                        "message": "Bearer secret-token and private email body",
+                    },
+                },
+                finished_at=now,
             )
         )
         await session.flush()
@@ -131,7 +142,8 @@ async def test_packet_projects_graph_and_latest_run_without_raw_execution_data(
     send = next(job for job in packet.jobs if job.kind == "gmail.send_email.v1")
     assert draft.latest_run is not None
     assert draft.latest_run.run_id == run_id
-    assert draft.latest_run.status == "running"
+    assert draft.latest_run.status == "failed"
+    assert draft.latest_run.error_summary == "Run failed"
     assert send.depends_on_job_ids == (draft_job.id,)
     assert send.waiting_reasons == (f"dependency:{draft_job.id}",)
     encoded = packet.model_dump_json()
@@ -142,6 +154,8 @@ async def test_packet_projects_graph_and_latest_run_without_raw_execution_data(
         "secret-provider-version",
         "provider_payload",
         "must-not-appear",
+        "secret-token",
+        "private email body",
     ):
         assert hidden not in encoded
 
@@ -220,3 +234,40 @@ async def test_packet_returns_only_the_latest_twenty_interaction_events(
     assert packet.recent_events[0].event_type == "interaction_fixture_05"
     assert packet.recent_events[-1].event_type == "interaction_fixture_24"
     assert "hidden-24" not in packet.model_dump_json()
+
+
+async def test_packet_keeps_participants_without_a_current_role(
+    retrieval: WorkflowRetrieval,
+    migrated_postgres_url: str,
+):
+    roleless_party_id = uuid4()
+    engine = create_async_engine(migrated_postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    async with sessions.begin() as session:
+        session.add(
+            PartyRow(
+                id=roleless_party_id,
+                kind="person",
+                display_name="Role Pending Participant",
+            )
+        )
+        await session.flush()
+        session.add(
+            WorkflowParticipantRow(
+                workflow_id=TARGET_ID,
+                party_id=roleless_party_id,
+            )
+        )
+    await engine.dispose()
+
+    packet = await retrieval.read_workflow_packet(
+        WorkflowInspectionContext(actor_party_id=BROKER_ID),
+        TARGET_ID,
+    )
+
+    participant = next(
+        participant
+        for participant in packet.participants
+        if participant.party_id == roleless_party_id
+    )
+    assert participant.roles == ()

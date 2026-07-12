@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -21,6 +23,7 @@ from server.workflows import (
     WorkflowLifecycleError,
     default_workflow_registry,
 )
+from server.workflows.identity_models import WorkflowParticipantRoleRow
 
 
 async def job_count(database_url: str) -> int:
@@ -125,4 +128,60 @@ async def test_second_initial_graph_is_rejected_without_additional_jobs(
         await control_plane.propose_jobs(command)
 
     assert await job_count(migrated_postgres_url) == 2
+    await database.dispose()
+
+
+async def test_policyholder_revocation_between_packet_and_proposal_fails_closed(
+    migrated_postgres_url: str,
+    clean_workflow_database,
+):
+    await seed_retrieval_landscape(migrated_postgres_url)
+    engine = create_async_engine(migrated_postgres_url)
+    async with engine.begin() as connection:
+        await connection.execute(
+            sa.update(WorkflowParticipantRoleRow)
+            .where(
+                WorkflowParticipantRoleRow.workflow_id == TARGET_ID,
+                WorkflowParticipantRoleRow.role == "Policyholder",
+            )
+            .values(revoked_at=datetime.now(UTC))
+        )
+    await engine.dispose()
+    database = WorkflowDatabase(migrated_postgres_url)
+    control_plane = WorkflowControlPlane(
+        database=database,
+        registry=default_workflow_registry(),
+        authority=StaticWorkflowAuthority(grants=set()),
+    )
+
+    with pytest.raises(WorkflowLifecycleError):
+        await control_plane.propose_jobs(renewal_job_command())
+
+    assert await job_count(migrated_postgres_url) == 0
+    await database.dispose()
+
+
+async def test_unrelated_recipient_is_rejected_without_creating_jobs(
+    migrated_postgres_url: str,
+    clean_workflow_database,
+):
+    await seed_retrieval_landscape(migrated_postgres_url)
+    command = renewal_job_command()
+    draft, send = command.jobs
+    unrelated_send = send.model_copy(
+        update={"input": {**send.input, "to": ["unrelated@example.com"]}}
+    )
+    database = WorkflowDatabase(migrated_postgres_url)
+    control_plane = WorkflowControlPlane(
+        database=database,
+        registry=default_workflow_registry(),
+        authority=StaticWorkflowAuthority(grants=set()),
+    )
+
+    with pytest.raises(WorkflowLifecycleError):
+        await control_plane.propose_jobs(
+            command.model_copy(update={"jobs": (draft, unrelated_send)})
+        )
+
+    assert await job_count(migrated_postgres_url) == 0
     await database.dispose()

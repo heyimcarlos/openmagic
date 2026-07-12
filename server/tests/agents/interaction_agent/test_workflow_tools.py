@@ -20,6 +20,7 @@ from server.config import Settings
 from server.tests.workflows.retrieval_fixtures import (
     ACME_ID,
     BROKER_ID,
+    SAME_NAME_ID,
     TARGET_ID,
     seed_retrieval_landscape,
 )
@@ -128,7 +129,8 @@ async def test_workflow_tools_search_read_one_packet_then_propose(
         context,
     )
     assert packet.success is True
-    assert set(context.loaded_packets) == {TARGET_ID}
+    assert context.loaded_packet is not None
+    assert context.loaded_packet.workflow.workflow_id == TARGET_ID
 
     proposal = await workflow_toolbox.invoke(
         "propose_renewal_email",
@@ -165,6 +167,130 @@ async def test_proposal_requires_packet_in_same_interaction_turn(
 
     assert result.success is False
     assert result.payload == {"code": "workflow_packet_required"}
+
+
+async def test_one_interaction_turn_cannot_load_two_workflow_packets(
+    workflow_toolbox: WorkflowInteractionToolbox,
+):
+    context = InteractionToolContext(
+        actor_party_id=BROKER_ID,
+        organization_party_id=ACME_ID,
+        cause_id="message-one-packet",
+    )
+    await workflow_toolbox.invoke(
+        "search_workflows",
+        {
+            "query": "John Smith renewal",
+            "workflow_kind": "renewal_outreach.v1",
+            "status": "active",
+            "organization": "Acme Brokerage",
+            "renewal_period": "2026",
+        },
+        context,
+    )
+    first = await workflow_toolbox.invoke(
+        "read_workflow_packet",
+        {"workflow_id": str(TARGET_ID)},
+        context,
+    )
+    await workflow_toolbox.invoke(
+        "search_workflows",
+        {
+            "query": "John Smith renewal",
+            "workflow_kind": "renewal_outreach.v1",
+            "status": "active",
+            "organization": "Northwind Brokerage",
+            "renewal_period": "2026",
+        },
+        context,
+    )
+    second = await workflow_toolbox.invoke(
+        "read_workflow_packet",
+        {"workflow_id": str(SAME_NAME_ID)},
+        context,
+    )
+
+    assert first.success is True
+    assert second.success is False
+    assert second.payload == {"code": "workflow_packet_already_selected"}
+
+
+async def test_ambiguous_search_cannot_read_or_propose_the_first_candidate(
+    workflow_toolbox: WorkflowInteractionToolbox,
+    migrated_postgres_url: str,
+):
+    context = InteractionToolContext(
+        actor_party_id=BROKER_ID,
+        organization_party_id=ACME_ID,
+        cause_id="message-ambiguous-selection",
+    )
+    search = await workflow_toolbox.invoke(
+        "search_workflows",
+        {"query": "John renewal"},
+        context,
+    )
+    assert search.success is True
+    assert search.payload["total_matches"] > 1
+
+    packet = await workflow_toolbox.invoke(
+        "read_workflow_packet",
+        {"workflow_id": str(TARGET_ID)},
+        context,
+    )
+    proposal = await workflow_toolbox.invoke(
+        "propose_renewal_email",
+        {
+            "workflow_id": str(TARGET_ID),
+            "sender_mailbox": "broker@acme.example",
+            "recipient_email": "john@example.com",
+        },
+        context,
+    )
+
+    assert packet.success is False
+    assert packet.payload == {"code": "workflow_resolution_required"}
+    assert proposal.success is False
+    assert proposal.payload == {"code": "workflow_packet_required"}
+    engine = create_async_engine(migrated_postgres_url)
+    async with engine.connect() as connection:
+        job_count = await connection.scalar(sa.text("SELECT count(*) FROM workflow_jobs"))
+    await engine.dispose()
+    assert job_count == 0
+
+    refined = await workflow_toolbox.invoke(
+        "search_workflows",
+        {
+            "query": "John Smith renewal",
+            "workflow_kind": "renewal_outreach.v1",
+            "status": "active",
+            "organization": "Acme Brokerage",
+            "renewal_period": "2026",
+        },
+        context,
+    )
+    selected_packet = await workflow_toolbox.invoke(
+        "read_workflow_packet",
+        {"workflow_id": str(TARGET_ID)},
+        context,
+    )
+    accepted = await workflow_toolbox.invoke(
+        "propose_renewal_email",
+        {
+            "workflow_id": str(TARGET_ID),
+            "sender_mailbox": "broker@acme.example",
+            "recipient_email": "john@example.com",
+        },
+        context,
+    )
+
+    assert refined.payload["total_matches"] == 1
+    assert selected_packet.success is True
+    assert accepted.success is True
+    engine = create_async_engine(migrated_postgres_url)
+    async with engine.connect() as connection:
+        accepted_job_count = await connection.scalar(sa.text("SELECT count(*) FROM workflow_jobs"))
+    await engine.dispose()
+    assert accepted_job_count == 2
 
 
 async def test_scripted_workflow_runtime_loads_one_packet_and_never_delegates(
@@ -272,7 +398,8 @@ async def test_scripted_workflow_runtime_loads_one_packet_and_never_delegates(
     assert result.execution_agents_used == 0
     assert result.response == "The renewal work is queued."
     assert len(contexts) == 1
-    assert set(contexts[0].loaded_packets) == {TARGET_ID}
+    assert contexts[0].loaded_packet is not None
+    assert contexts[0].loaded_packet.workflow.workflow_id == TARGET_ID
     assert len(calls) == 4
     assert all("send_message_to_agent" not in json.dumps(call["tools"]) for call in calls)
     assert "<active_agents>" not in calls[0]["messages"][0]["content"]
@@ -372,7 +499,7 @@ async def test_ambiguous_or_missing_search_asks_without_loading_or_mutating(
     assert result.success is True
     assert result.response == response
     assert len(contexts) == 1
-    assert contexts[0].loaded_packets == {}
+    assert contexts[0].loaded_packet is None
     engine = create_async_engine(migrated_postgres_url)
     async with engine.connect() as connection:
         job_count = await connection.scalar(sa.text("SELECT count(*) FROM workflow_jobs"))

@@ -60,6 +60,43 @@ async def test_search_ranks_target_and_hides_unauthorized_landscape(retrieval: W
         for result in page.results
         for reason in result.match_reasons
     )
+    encoded = page.model_dump_json()
+    assert str(BROKER_ID) not in encoded
+
+
+async def test_search_accepts_full_human_request_and_relational_identifiers(
+    retrieval: WorkflowRetrieval,
+):
+    natural_language = await retrieval.search_workflows(
+        WorkflowInspectionContext(actor_party_id=BROKER_ID),
+        WorkflowSearchRequest(query="Prepare John Smith's 2026 renewal email at Acme Brokerage"),
+    )
+    identifier = await retrieval.search_workflows(
+        WorkflowInspectionContext(actor_party_id=BROKER_ID),
+        WorkflowSearchRequest(
+            participant="john@example.com",
+            workflow_kind="renewal_outreach.v1",
+            status="active",
+        ),
+    )
+
+    assert natural_language.total_matches > 0
+    assert natural_language.results[0].workflow_id == TARGET_ID
+    assert identifier.total_matches == 1
+    assert identifier.results[0].workflow_id == TARGET_ID
+    assert "exact participant identifier match" in identifier.results[0].match_reasons
+
+
+async def test_renewal_period_filter_is_scoped_to_declaring_workflow_kind(
+    retrieval: WorkflowRetrieval,
+):
+    page = await retrieval.search_workflows(
+        WorkflowInspectionContext(actor_party_id=BROKER_ID),
+        WorkflowSearchRequest(renewal_period="2026", limit=10),
+    )
+
+    assert page.total_matches == 3
+    assert {result.workflow_kind for result in page.results} == {"renewal_outreach.v1"}
 
 
 async def test_search_cursor_is_bounded_and_bound_to_normalized_request(

@@ -14,12 +14,12 @@ from server.workflows import (
     ProposeWorkflowJobsCommand,
     WorkflowCommandContext,
     WorkflowControlPlane,
+    WorkflowError,
     WorkflowInspectionContext,
     WorkflowJobProposal,
     WorkflowRetrieval,
     WorkflowSearchRequest,
 )
-from server.workflows.errors import WorkflowError
 
 from .toolbox import InteractionToolContext, ToolResult
 
@@ -119,14 +119,31 @@ class WorkflowInteractionToolbox:
                     WorkflowInspectionContext(actor_party_id=context.actor_party_id),
                     request,
                 )
+                context.resolved_workflow_id = (
+                    page.results[0].workflow_id if page.total_matches == 1 else None
+                )
                 return ToolResult(success=True, payload=page.model_dump(mode="json"))
             if name == "read_workflow_packet":
                 request = _PacketArguments.model_validate(arguments)
+                allowed_workflow_id = context.trusted_workflow_id or context.resolved_workflow_id
+                if request.workflow_id != allowed_workflow_id:
+                    return ToolResult(
+                        success=False,
+                        payload={"code": "workflow_resolution_required"},
+                    )
+                if (
+                    context.loaded_packet is not None
+                    and context.loaded_packet.workflow.workflow_id != request.workflow_id
+                ):
+                    return ToolResult(
+                        success=False,
+                        payload={"code": "workflow_packet_already_selected"},
+                    )
                 packet = await self._retrieval.read_workflow_packet(
                     WorkflowInspectionContext(actor_party_id=context.actor_party_id),
                     request.workflow_id,
                 )
-                context.loaded_packets[request.workflow_id] = packet
+                context.loaded_packet = packet
                 return ToolResult(success=True, payload=packet.model_dump(mode="json"))
             if name == "propose_renewal_email":
                 request = _ProposalArguments.model_validate(arguments)
@@ -165,8 +182,13 @@ class WorkflowInteractionToolbox:
         request: _ProposalArguments,
         context: InteractionToolContext,
     ) -> ToolResult:
-        packet = context.loaded_packets.get(request.workflow_id)
-        if packet is None:
+        packet = context.loaded_packet
+        resolved_workflow_id = context.trusted_workflow_id or context.resolved_workflow_id
+        if (
+            packet is None
+            or packet.workflow.workflow_id != request.workflow_id
+            or request.workflow_id != resolved_workflow_id
+        ):
             return ToolResult(success=False, payload={"code": "workflow_packet_required"})
         policyholders = [
             participant

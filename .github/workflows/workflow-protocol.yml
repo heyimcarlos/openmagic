@@ -51,7 +51,10 @@ jobs:
           uv run ruff format --check
           server/workflows
           server/agents/interaction_agent
+          server/agents/execution_agent/batch_manager.py
           server/services/conversation/chat_handler.py
+          server/services/gmail/importance_watcher.py
+          server/scripts
           server/config.py
           server/tests
           server/migrations
@@ -60,7 +63,10 @@ jobs:
           uv run ruff check
           server/workflows
           server/agents/interaction_agent
+          server/agents/execution_agent/batch_manager.py
           server/services/conversation/chat_handler.py
+          server/services/gmail/importance_watcher.py
+          server/scripts
           server/config.py
           server/tests
           server/migrations
@@ -69,7 +75,10 @@ jobs:
           uv run ty check
           server/workflows
           server/agents/interaction_agent
+          server/agents/execution_agent/batch_manager.py
           server/services/conversation/chat_handler.py
+          server/services/gmail/importance_watcher.py
+          server/scripts
           server/config.py
       - name: Apply and verify migrations
         run: |

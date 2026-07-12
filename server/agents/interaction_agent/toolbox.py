@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Protocol
 from uuid import UUID
 
@@ -16,7 +16,9 @@ class InteractionToolContext:
     actor_party_id: UUID
     organization_party_id: UUID
     cause_id: str
-    loaded_packets: dict[UUID, WorkflowPacket] = field(default_factory=dict)
+    trusted_workflow_id: UUID | None = None
+    resolved_workflow_id: UUID | None = None
+    loaded_packet: WorkflowPacket | None = None
 
 
 @dataclass

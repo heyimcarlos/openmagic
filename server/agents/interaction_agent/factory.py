@@ -16,6 +16,7 @@ from server.workflows import (
 
 from .runtime import InteractionAgentRuntime
 from .toolbox import InteractionToolContext
+from .tools import LegacyInteractionToolbox
 from .workflow_agent import build_workflow_system_prompt, prepare_workflow_message
 from .workflow_tools import WorkflowInteractionToolbox
 
@@ -23,7 +24,7 @@ from .workflow_tools import WorkflowInteractionToolbox
 def create_interaction_runtime(settings: Settings | None = None) -> InteractionAgentRuntime:
     settings = settings or get_settings()
     if settings.interaction_mode == "legacy":
-        return InteractionAgentRuntime(settings=settings)
+        return InteractionAgentRuntime(toolbox=LegacyInteractionToolbox(), settings=settings)
     database_url = _required(settings.database_url, "OPENMAGIC_DATABASE_URL")
     cursor_secret = _required(
         settings.workflow_cursor_secret,

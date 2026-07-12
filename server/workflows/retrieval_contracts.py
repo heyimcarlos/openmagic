@@ -10,6 +10,12 @@ from pydantic import Field, model_validator
 
 from .contracts import WorkflowContract
 
+WorkflowStatus = Literal["active", "completed", "cancelled"]
+WorkflowJobStatus = Literal["waiting", "queued", "running", "succeeded", "failed", "cancelled"]
+WorkflowRunStatus = Literal["running", "succeeded", "failed", "cancelled", "abandoned"]
+RunOutcome = Literal["succeeded", "failed", "uncertain"]
+ParticipantRole = Literal["Broker", "Reporter", "Policyholder", "Claimant"]
+
 
 class WorkflowInspectionContext(WorkflowContract):
     """Trusted Party context injected by the application boundary."""
@@ -20,7 +26,7 @@ class WorkflowInspectionContext(WorkflowContract):
 class WorkflowSearchRequest(WorkflowContract):
     query: str = Field(default="", max_length=500)
     workflow_kind: str | None = Field(default=None, max_length=255)
-    status: Literal["active", "completed", "cancelled"] | None = None
+    status: WorkflowStatus | None = None
     participant: str | None = Field(default=None, min_length=1, max_length=200)
     organization: str | None = Field(default=None, min_length=1, max_length=200)
     renewal_period: str | None = Field(default=None, pattern=r"^[0-9]{4}$")
@@ -45,16 +51,21 @@ class WorkflowSearchRequest(WorkflowContract):
 class WorkflowParticipantSummary(WorkflowContract):
     party_id: UUID
     name: str
-    roles: tuple[str, ...]
+    roles: tuple[ParticipantRole, ...]
+
+
+class WorkflowSearchParticipantSummary(WorkflowContract):
+    name: str
+    roles: tuple[ParticipantRole, ...]
 
 
 class WorkflowSearchResult(WorkflowContract):
     workflow_id: UUID
     objective: str
     workflow_kind: str
-    status: str
+    status: WorkflowStatus
     organization: str
-    participants: tuple[WorkflowParticipantSummary, ...]
+    participants: tuple[WorkflowSearchParticipantSummary, ...]
     renewal_period: str | None
     created_at: datetime
     match_reasons: tuple[str, ...]
@@ -91,7 +102,7 @@ class WorkflowPacketWorkflow(WorkflowContract):
     workflow_id: UUID
     workflow_kind: str
     objective: str
-    status: str
+    status: WorkflowStatus
     input: dict[str, Any]
     organization: str
     corrects_workflow_id: UUID | None
@@ -100,8 +111,8 @@ class WorkflowPacketWorkflow(WorkflowContract):
 
 class WorkflowPacketRun(WorkflowContract):
     run_id: UUID
-    status: str
-    outcome: str | None
+    status: WorkflowRunStatus
+    outcome: RunOutcome | None
     error_summary: str | None
     started_at: datetime
     finished_at: datetime | None
@@ -125,7 +136,7 @@ class WorkflowPacketDispatch(WorkflowContract):
 class WorkflowPacketJob(WorkflowContract):
     job_id: UUID
     kind: str
-    status: str
+    status: WorkflowJobStatus
     input: dict[str, Any]
     resolved_input: dict[str, Any] | None
     output: dict[str, Any] | None

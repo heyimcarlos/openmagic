@@ -52,7 +52,7 @@ class InteractionAgentRuntime:
     def __init__(
         self,
         *,
-        toolbox: InteractionToolbox | None = None,
+        toolbox: InteractionToolbox,
         tool_context_factory: Callable[[str], InteractionToolContext] | None = None,
         system_prompt_builder: Callable[[], str] = build_system_prompt,
         message_builder: Callable[..., list[dict[str, str]]] = prepare_message_with_history,
@@ -64,10 +64,6 @@ class InteractionAgentRuntime:
         self.settings = settings
         self.conversation_log = get_conversation_log()
         self.working_memory_log = get_working_memory_log()
-        if toolbox is None:
-            from .tools import LegacyInteractionToolbox
-
-            toolbox = LegacyInteractionToolbox()
         self.toolbox = toolbox
         self.tool_schemas = list(self.toolbox.schemas)
         self._tool_context_factory = tool_context_factory or self._legacy_tool_context

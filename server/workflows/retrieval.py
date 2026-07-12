@@ -6,13 +6,15 @@ import base64
 import hashlib
 import hmac
 import json
+import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 import sqlalchemy as sa
+from sqlalchemy.orm import aliased
 
 from .database import WorkflowDatabase
 from .errors import (
@@ -25,6 +27,7 @@ from .identity_models import (
     PartyIdentifierRow,
     PartyRow,
     WorkflowParticipantRoleRow,
+    WorkflowParticipantRow,
 )
 from .models import (
     WorkflowEventRow,
@@ -34,9 +37,12 @@ from .models import (
     WorkflowRow,
 )
 from .retrieval_contracts import (
+    ParticipantRole,
+    RunOutcome,
     WorkflowFacet,
     WorkflowFacetEntry,
     WorkflowInspectionContext,
+    WorkflowJobStatus,
     WorkflowPacket,
     WorkflowPacketApproval,
     WorkflowPacketDispatch,
@@ -46,10 +52,13 @@ from .retrieval_contracts import (
     WorkflowPacketRun,
     WorkflowPacketWorkflow,
     WorkflowParticipantSummary,
+    WorkflowRunStatus,
     WorkflowSearchFacets,
     WorkflowSearchPage,
+    WorkflowSearchParticipantSummary,
     WorkflowSearchRequest,
     WorkflowSearchResult,
+    WorkflowStatus,
 )
 
 RENEWAL_OUTREACH_KIND = "renewal_outreach.v1"
@@ -57,6 +66,21 @@ CURSOR_VERSION = 1
 FACET_LIMIT = 10
 EVENT_LIMIT = 20
 HIDDEN_EVENT_TYPES = frozenset({"lease_extended", "run_claimed", "run_started"})
+QUERY_NOISE_TERMS = frozenset(
+    {
+        "a",
+        "an",
+        "at",
+        "email",
+        "for",
+        "me",
+        "please",
+        "prepare",
+        "the",
+        "to",
+        "workflow",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -66,6 +90,12 @@ class _Candidate:
     participants: tuple[WorkflowParticipantSummary, ...]
     score: int
     match_reasons: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _WorkflowIdentifiers:
+    participants: tuple[str, ...] = ()
+    organization: tuple[str, ...] = ()
 
 
 class WorkflowRetrieval:
@@ -84,22 +114,24 @@ class WorkflowRetrieval:
     ) -> WorkflowSearchPage:
         self._validate_filters(request)
         async with self._database.read_transaction() as session:
-            rows = (await session.execute(self._authorized_workflows(context.actor_party_id))).all()
-            workflow_ids = [workflow.id for workflow, _organization in rows]
+            rows = (
+                await session.execute(self._search_workflows_query(context.actor_party_id, request))
+            ).all()
+            workflow_ids = [workflow.id for workflow, _organization, _score in rows]
             participants = await self._participants(session, workflow_ids)
+            identifiers = await self._identifiers(session, workflow_ids)
 
-        candidates = [
-            self._candidate(workflow, organization, participants[workflow.id], request)
-            for workflow, organization in rows
-        ]
-        matches = [candidate for candidate in candidates if candidate is not None]
-        matches.sort(
-            key=lambda candidate: (
-                -candidate.score,
-                -candidate.workflow.created_at.timestamp(),
-                str(candidate.workflow.id),
+        matches = [
+            self._candidate(
+                workflow,
+                organization,
+                participants[workflow.id],
+                identifiers[workflow.id],
+                request,
+                score,
             )
-        )
+            for workflow, organization, score in rows
+        ]
 
         request_digest = self._request_digest(request)
         start = self._cursor_start(matches, request.cursor, request_digest)
@@ -243,6 +275,141 @@ class WorkflowRetrieval:
             .where(verified_identifier)
         )
 
+    @classmethod
+    def _search_workflows_query(
+        cls,
+        actor_party_id: UUID,
+        request: WorkflowSearchRequest,
+    ) -> sa.Select[Any]:
+        participant = aliased(WorkflowParticipantRow)
+        participant_party = aliased(PartyRow)
+        participant_identifier = aliased(PartyIdentifierRow)
+        organization_identifier = aliased(PartyIdentifierRow)
+
+        def participant_matches(value: str) -> sa.ColumnElement[bool]:
+            pattern = f"%{value.casefold()}%"
+            return sa.exists(
+                sa.select(participant.workflow_id)
+                .select_from(participant)
+                .join(participant_party, participant_party.id == participant.party_id)
+                .outerjoin(
+                    participant_identifier,
+                    sa.and_(
+                        participant_identifier.party_id == participant.party_id,
+                        participant_identifier.verified_at.is_not(None),
+                        participant_identifier.revoked_at.is_(None),
+                    ),
+                )
+                .where(
+                    participant.workflow_id == WorkflowRow.id,
+                    sa.or_(
+                        sa.func.lower(participant_party.display_name).like(pattern),
+                        sa.func.lower(participant_identifier.value).like(pattern),
+                    ),
+                )
+            )
+
+        def organization_identifier_matches(value: str) -> sa.ColumnElement[bool]:
+            return sa.exists(
+                sa.select(organization_identifier.id).where(
+                    organization_identifier.party_id == WorkflowRow.organization_party_id,
+                    organization_identifier.verified_at.is_not(None),
+                    organization_identifier.revoked_at.is_(None),
+                    sa.func.lower(organization_identifier.value).like(f"%{value.casefold()}%"),
+                )
+            )
+
+        query = cls._authorized_workflows(actor_party_id)
+        if request.workflow_kind:
+            query = query.where(WorkflowRow.kind == request.workflow_kind)
+        if request.status:
+            query = query.where(WorkflowRow.status == request.status)
+        if request.renewal_period:
+            query = query.where(
+                WorkflowRow.kind == RENEWAL_OUTREACH_KIND,
+                WorkflowRow.input["renewal_period"].as_string() == request.renewal_period,
+            )
+        if request.participant:
+            query = query.where(participant_matches(request.participant))
+        if request.organization:
+            query = query.where(
+                sa.or_(
+                    sa.func.lower(PartyRow.display_name).like(
+                        f"%{request.organization.casefold()}%"
+                    ),
+                    organization_identifier_matches(request.organization),
+                )
+            )
+
+        normalized_query = cls._normalize_text(request.query)
+        query_terms = cls._query_terms(request.query)
+        normalized_kind = sa.func.replace(
+            sa.func.replace(sa.func.lower(WorkflowRow.kind), "_", " "),
+            ".v1",
+            "",
+        )
+        period = WorkflowRow.input["renewal_period"].as_string()
+        for term in query_terms:
+            pattern = f"%{term}%"
+            query = query.where(
+                sa.or_(
+                    sa.cast(WorkflowRow.id, sa.Text).like(pattern),
+                    sa.func.lower(WorkflowRow.objective).like(pattern),
+                    normalized_kind.like(pattern),
+                    sa.func.lower(WorkflowRow.status).like(pattern),
+                    sa.func.lower(PartyRow.display_name).like(pattern),
+                    period.like(pattern),
+                    participant_matches(term),
+                    organization_identifier_matches(term),
+                )
+            )
+
+        participant_exact_value = request.participant or normalized_query
+        organization_exact_value = request.organization or normalized_query
+        participant_exact = (
+            participant_matches(participant_exact_value) if participant_exact_value else sa.false()
+        )
+        organization_exact = (
+            sa.or_(
+                sa.func.lower(PartyRow.display_name) == organization_exact_value,
+                organization_identifier_matches(organization_exact_value),
+            )
+            if organization_exact_value
+            else sa.false()
+        )
+        score = (
+            sa.literal(len(query_terms) * 5)
+            + sa.case((sa.cast(WorkflowRow.id, sa.Text) == normalized_query, 1000), else_=0)
+            + sa.case((participant_exact, 200), else_=0)
+            + sa.case((organization_exact, 180), else_=0)
+            + sa.case(
+                (
+                    WorkflowRow.kind == request.workflow_kind
+                    if request.workflow_kind
+                    else normalized_kind == normalized_query,
+                    100,
+                ),
+                else_=0,
+            )
+            + sa.case(
+                (
+                    sa.and_(
+                        sa.literal(bool(normalized_query)),
+                        sa.func.lower(WorkflowRow.objective).like(f"%{normalized_query}%"),
+                    ),
+                    80,
+                ),
+                else_=0,
+            )
+            + sa.literal(40 if request.status else 0)
+            + sa.literal(40 if request.renewal_period else 0)
+        ).label("search_score")
+        return query.add_columns(score).order_by(
+            sa.desc(score),
+            sa.desc(WorkflowRow.created_at),
+            WorkflowRow.id,
+        )
+
     @staticmethod
     async def _participants(
         session: Any,
@@ -253,101 +420,136 @@ class WorkflowRetrieval:
             rows = (
                 await session.execute(
                     sa.select(
-                        WorkflowParticipantRoleRow.workflow_id,
+                        WorkflowParticipantRow.workflow_id,
                         PartyRow.id,
                         PartyRow.display_name,
                         WorkflowParticipantRoleRow.role,
                     )
-                    .join(PartyRow, PartyRow.id == WorkflowParticipantRoleRow.party_id)
+                    .join(PartyRow, PartyRow.id == WorkflowParticipantRow.party_id)
+                    .outerjoin(
+                        WorkflowParticipantRoleRow,
+                        sa.and_(
+                            WorkflowParticipantRoleRow.workflow_id
+                            == WorkflowParticipantRow.workflow_id,
+                            WorkflowParticipantRoleRow.party_id == WorkflowParticipantRow.party_id,
+                            WorkflowParticipantRoleRow.revoked_at.is_(None),
+                        ),
+                    )
                     .where(
-                        WorkflowParticipantRoleRow.workflow_id.in_(workflow_ids),
-                        WorkflowParticipantRoleRow.revoked_at.is_(None),
+                        WorkflowParticipantRow.workflow_id.in_(workflow_ids),
                     )
                     .order_by(PartyRow.display_name, PartyRow.id, WorkflowParticipantRoleRow.role)
                 )
             ).all()
             for workflow_id, party_id, name, role in rows:
                 current = grouped[workflow_id].setdefault(party_id, (name, []))
-                current[1].append(role)
+                if role is not None:
+                    current[1].append(role)
         return {
             workflow_id: tuple(
                 WorkflowParticipantSummary(
                     party_id=party_id,
                     name=name,
-                    roles=tuple(roles),
+                    roles=cast(tuple[ParticipantRole, ...], tuple(roles)),
                 )
                 for party_id, (name, roles) in parties.items()
             )
             for workflow_id, parties in grouped.items()
         } | {workflow_id: () for workflow_id in workflow_ids if workflow_id not in grouped}
 
+    @staticmethod
+    async def _identifiers(
+        session: Any,
+        workflow_ids: list[UUID],
+    ) -> dict[UUID, _WorkflowIdentifiers]:
+        participant_values: dict[UUID, list[str]] = defaultdict(list)
+        organization_values: dict[UUID, list[str]] = defaultdict(list)
+        if workflow_ids:
+            participant_rows = (
+                await session.execute(
+                    sa.select(WorkflowParticipantRow.workflow_id, PartyIdentifierRow.value)
+                    .join(
+                        PartyIdentifierRow,
+                        PartyIdentifierRow.party_id == WorkflowParticipantRow.party_id,
+                    )
+                    .where(
+                        WorkflowParticipantRow.workflow_id.in_(workflow_ids),
+                        PartyIdentifierRow.verified_at.is_not(None),
+                        PartyIdentifierRow.revoked_at.is_(None),
+                    )
+                )
+            ).all()
+            organization_rows = (
+                await session.execute(
+                    sa.select(WorkflowRow.id, PartyIdentifierRow.value)
+                    .join(
+                        PartyIdentifierRow,
+                        PartyIdentifierRow.party_id == WorkflowRow.organization_party_id,
+                    )
+                    .where(
+                        WorkflowRow.id.in_(workflow_ids),
+                        PartyIdentifierRow.verified_at.is_not(None),
+                        PartyIdentifierRow.revoked_at.is_(None),
+                    )
+                )
+            ).all()
+            for workflow_id, value in participant_rows:
+                participant_values[workflow_id].append(value)
+            for workflow_id, value in organization_rows:
+                organization_values[workflow_id].append(value)
+        return {
+            workflow_id: _WorkflowIdentifiers(
+                participants=tuple(participant_values[workflow_id]),
+                organization=tuple(organization_values[workflow_id]),
+            )
+            for workflow_id in workflow_ids
+        }
+
     def _candidate(
         self,
         workflow: WorkflowRow,
         organization: str,
         participants: tuple[WorkflowParticipantSummary, ...],
+        identifiers: _WorkflowIdentifiers,
         request: WorkflowSearchRequest,
-    ) -> _Candidate | None:
+        persisted_score: int,
+    ) -> _Candidate:
         period = workflow.input.get("renewal_period")
-        if request.workflow_kind and workflow.kind != request.workflow_kind:
-            return None
-        if request.status and workflow.status != request.status:
-            return None
-        if request.renewal_period and period != request.renewal_period:
-            return None
-        if request.organization and request.organization.casefold() not in organization.casefold():
-            return None
         participant_names = [participant.name for participant in participants]
-        if request.participant and not any(
-            request.participant.casefold() in name.casefold() for name in participant_names
-        ):
-            return None
+        query = self._normalize_text(request.query)
+        query_terms = self._query_terms(request.query)
 
-        searchable = " ".join(
-            [
-                str(workflow.id),
-                workflow.objective,
-                workflow.kind.replace("_", " ").replace(".v1", ""),
-                workflow.status,
-                organization,
-                str(period or ""),
-                *participant_names,
-            ]
-        ).casefold()
-        query = " ".join(request.query.casefold().split())
-        query_terms = query.split()
-        if any(term not in searchable for term in query_terms):
-            return None
-
-        score = sum(5 for term in query_terms if term in searchable)
+        score = int(persisted_score)
         reasons: list[str] = []
         if query == str(workflow.id).casefold():
-            score += 1000
             reasons.append(f"exact workflow identifier: {workflow.id}")
         for name in participant_names:
             if name.casefold() in query or (
                 request.participant and request.participant.casefold() == name.casefold()
             ):
-                score += 200
                 reasons.append(f"exact participant match: {name}")
                 break
+        if request.participant and any(
+            request.participant.casefold() == value.casefold() for value in identifiers.participants
+        ):
+            reasons.append("exact participant identifier match")
         if organization.casefold() in query or (
             request.organization and request.organization.casefold() == organization.casefold()
         ):
-            score += 180
             reasons.append(f"organization matched: {organization}")
+        elif request.organization and any(
+            request.organization.casefold() == value.casefold()
+            for value in identifiers.organization
+        ):
+            reasons.append("exact organization identifier match")
         kind_words = workflow.kind.replace("_", " ").split(".", 1)[0].casefold()
         if kind_words in query or request.workflow_kind == workflow.kind:
-            score += 100
             reasons.append(f"workflow kind matched: {workflow.kind}")
         if query and query in workflow.objective.casefold():
-            score += 80
             reasons.append("objective matched query")
         if request.status == workflow.status:
-            score += 40
             reasons.append(f"status matched: {workflow.status}")
         if request.renewal_period == period:
-            score += 40
             reasons.append(f"renewal period matched: {period}")
         if not reasons and query_terms:
             reasons.append("text terms matched authorized Workflow fields")
@@ -360,9 +562,12 @@ class WorkflowRetrieval:
             workflow_id=workflow.id,
             objective=workflow.objective,
             workflow_kind=workflow.kind,
-            status=workflow.status,
+            status=cast(WorkflowStatus, workflow.status),
             organization=candidate.organization,
-            participants=candidate.participants,
+            participants=tuple(
+                WorkflowSearchParticipantSummary(name=participant.name, roles=participant.roles)
+                for participant in candidate.participants
+            ),
             renewal_period=workflow.input.get("renewal_period"),
             created_at=workflow.created_at,
             match_reasons=candidate.match_reasons,
@@ -409,7 +614,7 @@ class WorkflowRetrieval:
         return WorkflowPacketJob(
             job_id=job.id,
             kind=job.kind,
-            status=job.status,
+            status=cast(WorkflowJobStatus, job.status),
             input=job.input,
             resolved_input=self._resolved_input(job, jobs_by_id),
             output=job.output,
@@ -454,18 +659,17 @@ class WorkflowRetrieval:
         if run is None:
             return None
         result = run.result or {}
-        error = result.get("error")
-        if isinstance(error, dict):
-            error_summary = str(error.get("message") or error.get("code") or "Run failed")
-        elif error is None:
-            error_summary = None
-        else:
-            error_summary = str(error)
+        outcome = result.get("outcome")
+        error_summary = None
+        if outcome == "uncertain":
+            error_summary = "External effect outcome is uncertain"
+        elif result.get("error") is not None:
+            error_summary = "Run failed"
         return WorkflowPacketRun(
             run_id=run.id,
-            status=run.status,
-            outcome=result.get("outcome"),
-            error_summary=error_summary[:300] if error_summary else None,
+            status=cast(WorkflowRunStatus, run.status),
+            outcome=cast(RunOutcome | None, outcome),
+            error_summary=error_summary,
             started_at=run.created_at,
             finished_at=run.finished_at,
         )
@@ -571,11 +775,23 @@ class WorkflowRetrieval:
     @staticmethod
     def _request_digest(request: WorkflowSearchRequest) -> str:
         normalized = {
-            "query": " ".join(request.query.casefold().split()),
+            "query": WorkflowRetrieval._normalize_text(request.query),
             **WorkflowRetrieval._applied_filters(request),
         }
         encoded = json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode()
         return hashlib.sha256(encoded).hexdigest()
+
+    @staticmethod
+    def _normalize_text(value: str) -> str:
+        return " ".join(re.findall(r"[a-z0-9]+", value.casefold()))
+
+    @classmethod
+    def _query_terms(cls, value: str) -> list[str]:
+        return [
+            term
+            for term in cls._normalize_text(value).split()
+            if term not in QUERY_NOISE_TERMS and len(term) > 1
+        ]
 
     def _encode_cursor(self, candidate: _Candidate, request_digest: str) -> str:
         payload = {

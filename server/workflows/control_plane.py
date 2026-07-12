@@ -32,6 +32,7 @@ from .errors import (
 from .identity_models import (
     OrganizationMembershipRow,
     PartyIdentifierRow,
+    PartyRow,
     WorkflowParticipantRoleRow,
     WorkflowParticipantRow,
 )
@@ -43,7 +44,14 @@ from .models import (
     WorkflowJobRunRow,
     WorkflowRow,
 )
-from .registry import ValidatedWorkflowProposal, WorkflowKindRegistry
+from .registry import (
+    DRAFT_RENEWAL_EMAIL_KIND,
+    GMAIL_SEND_EMAIL_KIND,
+    DraftRenewalEmailInput,
+    ProposedGmailSendEmailInput,
+    ValidatedWorkflowProposal,
+    WorkflowKindRegistry,
+)
 
 
 class WorkflowControlPlane:
@@ -134,6 +142,12 @@ class WorkflowControlPlane:
             )
             if validated.kind != workflow.kind:
                 raise InvalidWorkflowProposalError("Job graph does not match the Workflow Kind")
+            await self._validate_current_renewal_parties(
+                session,
+                workflow,
+                validated,
+                command.context,
+            )
             await self._append_job_graph(session, workflow, validated, command.context)
             trace = await self._read_trace(session, workflow)
         return trace
@@ -172,6 +186,58 @@ class WorkflowControlPlane:
             ),
         )
         return bool(await session.scalar(sa.select(predicate)))
+
+    @staticmethod
+    async def _validate_current_renewal_parties(
+        session: AsyncSession,
+        workflow: WorkflowRow,
+        validated: ValidatedWorkflowProposal,
+        context: WorkflowCommandContext,
+    ) -> None:
+        if workflow.kind != "renewal_outreach.v1":
+            return
+        policyholders = (
+            await session.execute(
+                sa.select(PartyRow.id, PartyRow.display_name)
+                .join(
+                    WorkflowParticipantRoleRow,
+                    WorkflowParticipantRoleRow.party_id == PartyRow.id,
+                )
+                .where(
+                    WorkflowParticipantRoleRow.workflow_id == workflow.id,
+                    WorkflowParticipantRoleRow.role == "Policyholder",
+                    WorkflowParticipantRoleRow.revoked_at.is_(None),
+                )
+            )
+        ).all()
+        if len(policyholders) != 1:
+            raise WorkflowLifecycleError("Workflow must have one current Policyholder")
+        policyholder_id, policyholder_name = policyholders[0]
+        identifiers = (
+            await session.execute(
+                sa.select(PartyIdentifierRow.party_id, PartyIdentifierRow.value).where(
+                    PartyIdentifierRow.party_id.in_((context.actor_party_id, policyholder_id)),
+                    PartyIdentifierRow.kind == "email",
+                    PartyIdentifierRow.verified_at.is_not(None),
+                    PartyIdentifierRow.revoked_at.is_(None),
+                )
+            )
+        ).all()
+        emails_by_party: dict[UUID, set[str]] = defaultdict(set)
+        for party_id, value in identifiers:
+            emails_by_party[party_id].add(value.casefold())
+
+        draft = next(job for job in validated.jobs if job.kind == DRAFT_RENEWAL_EMAIL_KIND)
+        send = next(job for job in validated.jobs if job.kind == GMAIL_SEND_EMAIL_KIND)
+        draft_input = DraftRenewalEmailInput.model_validate(draft.proposed_input)
+        send_input = ProposedGmailSendEmailInput.model_validate(send.proposed_input)
+        if draft_input.recipient_name != policyholder_name:
+            raise WorkflowLifecycleError("Draft recipient no longer matches the Policyholder")
+        if send_input.sender_mailbox.casefold() not in emails_by_party[context.actor_party_id]:
+            raise WorkflowAuthorizationError("Sender mailbox is not authorized for the Broker")
+        recipients = {str(recipient).casefold() for recipient in send_input.to}
+        if len(recipients) != 1 or not recipients <= emails_by_party[policyholder_id]:
+            raise WorkflowLifecycleError("Recipient no longer matches the Policyholder")
 
     async def _append_job_graph(
         self,

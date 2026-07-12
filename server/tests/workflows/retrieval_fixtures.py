@@ -71,6 +71,36 @@ async def seed_retrieval_landscape(database_url: str) -> None:
                     value="hidden@example.test",
                     verified_at=now,
                 ),
+                PartyIdentifierRow(
+                    party_id=ACME_ID,
+                    kind="organization_ref",
+                    value="acme-brokerage",
+                    verified_at=now,
+                ),
+                PartyIdentifierRow(
+                    party_id=NORTHWIND_ID,
+                    kind="organization_ref",
+                    value="northwind-brokerage",
+                    verified_at=now,
+                ),
+                PartyIdentifierRow(
+                    party_id=JOHN_ACME_ID,
+                    kind="email",
+                    value="john@example.com",
+                    verified_at=now,
+                ),
+                PartyIdentifierRow(
+                    party_id=JOHN_NORTHWIND_ID,
+                    kind="email",
+                    value="john@northwind.example",
+                    verified_at=now,
+                ),
+                PartyIdentifierRow(
+                    party_id=JANE_ID,
+                    kind="email",
+                    value="jane@example.com",
+                    verified_at=now,
+                ),
                 OrganizationMembershipRow(
                     person_party_id=BROKER_ID,
                     organization_party_id=ACME_ID,
