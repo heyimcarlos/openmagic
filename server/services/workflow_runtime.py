@@ -5,19 +5,24 @@ from __future__ import annotations
 import asyncio
 from contextlib import suppress
 from functools import lru_cache
+from uuid import UUID, uuid4
 
 from server.agents.execution_agent.workflow_draft import FreshDraftExecutionAgentFactory
-from server.agents.interaction_agent.workflow_notifications import FreshWorkflowInteractionFactory
+from server.agents.interaction_agent.workflow_notifications import (
+    ConversationApprovalPresenter,
+    FreshWorkflowInteractionFactory,
+)
 from server.config import Settings, get_settings
 from server.logging_config import logger
 from server.workflows import (
+    NotificationWorker,
     StaticWorkflowAuthority,
     WorkflowControlPlane,
     WorkflowDatabase,
     WorkflowRetrieval,
+    WorkflowWorker,
     default_workflow_registry,
 )
-from server.workflows.worker import NotificationWorker, WorkflowWorker
 
 
 class WorkflowRuntimeService:
@@ -42,6 +47,9 @@ class WorkflowRuntimeService:
                 "Workflow runtime disabled because PostgreSQL configuration is incomplete"
             )
             return
+        if not self._settings.workflow_broker_party_id:
+            logger.warning("Workflow runtime disabled because Broker identity is incomplete")
+            return
         database = WorkflowDatabase(self._settings.database_url)
         control_plane = WorkflowControlPlane(
             database=database,
@@ -55,14 +63,22 @@ class WorkflowRuntimeService:
         self._database = database
         self._job_worker = WorkflowWorker(
             control_plane=control_plane,
-            draft_runtimes=FreshDraftExecutionAgentFactory(self._settings),
-            worker_id="workflow-worker",
+            executors={
+                "renewal_email_drafter": FreshDraftExecutionAgentFactory(self._settings),
+            },
+            worker_id=f"workflow-worker:{uuid4()}",
             application_build=self._settings.app_version,
         )
         self._notification_worker = NotificationWorker(
             control_plane=control_plane,
-            interactions=FreshWorkflowInteractionFactory(database=database, retrieval=retrieval),
-            worker_id="notification-worker",
+            interactions=FreshWorkflowInteractionFactory(
+                control_plane=control_plane,
+                retrieval=retrieval,
+                presenter=ConversationApprovalPresenter(
+                    UUID(self._settings.workflow_broker_party_id)
+                ),
+            ),
+            worker_id=f"notification-worker:{uuid4()}",
         )
         self._running = True
         self._task = asyncio.create_task(self._run(), name="workflow-runtime")

@@ -10,7 +10,9 @@ from .contracts import (
     CommittedRunResult,
     CreateWorkflowCommand,
     NotificationDeliveryPacket,
+    NotificationPresentationContext,
     ProposeWorkflowJobsCommand,
+    ReportNotificationFailureCommand,
     ReportRunResultCommand,
     RunResult,
     WorkflowCommandContext,
@@ -41,6 +43,7 @@ from .registry import (
     DRAFT_RENEWAL_EMAIL_KIND,
     GMAIL_SEND_EMAIL_KIND,
     RENEWAL_OUTREACH_KIND,
+    DraftRenewalEmailOutput,
     ExecutionStrategy,
     WorkflowKindContract,
     WorkflowKindRegistry,
@@ -53,6 +56,7 @@ from .retrieval_contracts import (
     WorkflowSearchPage,
     WorkflowSearchRequest,
 )
+from .worker import NotificationWorker, WorkflowWorker
 
 __all__ = [
     "DRAFT_RENEWAL_EMAIL_KIND",
@@ -63,12 +67,16 @@ __all__ = [
     "ClaimWorkflowJobCommand",
     "CommittedRunResult",
     "CreateWorkflowCommand",
+    "DraftRenewalEmailOutput",
     "ExecutionStrategy",
     "InvalidWorkflowProposalError",
     "InvalidWorkflowSearchError",
     "NotificationDeliveryPacket",
     "NotificationLifecycleError",
+    "NotificationPresentationContext",
+    "NotificationWorker",
     "ProposeWorkflowJobsCommand",
+    "ReportNotificationFailureCommand",
     "ReportRunResultCommand",
     "RunResult",
     "RunResultConflictError",
@@ -98,6 +106,7 @@ __all__ = [
     "WorkflowSearchPage",
     "WorkflowSearchRequest",
     "WorkflowTrace",
+    "WorkflowWorker",
     "default_workflow_registry",
     "seed_v0_demo",
 ]

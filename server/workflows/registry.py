@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from datetime import timedelta
 from enum import StrEnum
 from types import MappingProxyType
 from typing import Any, TypeVar
@@ -97,7 +98,12 @@ class JobKindContract:
     run_data_schema: type[KindSchema]
     materialize_input: Callable[[KindSchema, Mapping[str, UUID]], KindSchema]
     execution_strategy: ExecutionStrategy
+    executor_key: str
     max_attempts: int
+    success_event_type: str
+    success_notification_kind: str | None
+    retryable_error_codes: frozenset[str]
+    retry_backoff: timedelta
     requires_approval: bool = False
 
 
@@ -345,7 +351,12 @@ def default_workflow_registry() -> WorkflowKindRegistry:
         run_data_schema=DraftRenewalEmailOutput,
         materialize_input=_keep_validated_input,
         execution_strategy=ExecutionStrategy.FRESH_EXECUTION_AGENT,
+        executor_key="renewal_email_drafter",
         max_attempts=2,
+        success_event_type="draft_ready",
+        success_notification_kind="approval_required",
+        retryable_error_codes=frozenset({"executor_unavailable", "invalid_draft_output"}),
+        retry_backoff=timedelta(seconds=2),
     )
     send = JobKindContract(
         kind=GMAIL_SEND_EMAIL_KIND,
@@ -355,7 +366,12 @@ def default_workflow_registry() -> WorkflowKindRegistry:
         run_data_schema=GmailSendEmailOutput,
         materialize_input=_materialize_gmail_input,
         execution_strategy=ExecutionStrategy.DETERMINISTIC_ADAPTER,
+        executor_key="composio_gmail_send",
         max_attempts=1,
+        success_event_type="email_send_succeeded",
+        success_notification_kind="send_confirmed",
+        retryable_error_codes=frozenset(),
+        retry_backoff=timedelta(seconds=2),
         requires_approval=True,
     )
     renewal = WorkflowKindContract(

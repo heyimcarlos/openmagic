@@ -18,6 +18,7 @@ from server.workflows import (
     AcknowledgeNotificationCommand,
     ClaimNotificationCommand,
     ClaimWorkflowJobCommand,
+    NotificationLifecycleError,
     ReportRunResultCommand,
     RunResult,
     RunResultConflictError,
@@ -26,7 +27,13 @@ from server.workflows import (
     WorkflowDatabase,
     WorkflowRetrieval,
 )
-from server.workflows.models import WorkflowJobRunRow
+from server.workflows.identity_models import WorkflowParticipantRoleRow
+from server.workflows.models import (
+    NotificationRow,
+    WorkflowEventRow,
+    WorkflowJobRow,
+    WorkflowJobRunRow,
+)
 from server.workflows.worker import NotificationWorker, WorkflowWorker
 
 
@@ -35,6 +42,7 @@ def claim_command(worker_id: str = "worker-one") -> ClaimWorkflowJobCommand:
         worker_id=worker_id,
         application_build="test-build",
         lease_duration=timedelta(minutes=5),
+        executor_keys=("renewal_email_drafter",),
     )
 
 
@@ -143,6 +151,94 @@ async def test_expired_run_cannot_publish_output(
     assert draft.output is None
 
 
+@pytest.mark.parametrize("run_status", ["cancelled", "abandoned"])
+async def test_terminal_run_cannot_submit_late_result(
+    control_plane: WorkflowControlPlane,
+    migrated_postgres_url: str,
+    run_status: str,
+):
+    await control_plane.create_workflow(create_command())
+    packet = await control_plane.claim_job(claim_command())
+    assert packet is not None
+    engine = create_async_engine(migrated_postgres_url)
+    async with engine.begin() as connection:
+        await connection.execute(
+            sa.update(WorkflowJobRunRow)
+            .where(WorkflowJobRunRow.id == packet.run_id)
+            .values(status=run_status, finished_at=datetime.now(UTC))
+        )
+        await connection.execute(
+            sa.update(WorkflowJobRow)
+            .where(WorkflowJobRow.id == packet.job_id)
+            .values(status="cancelled" if run_status == "cancelled" else "queued")
+        )
+    await engine.dispose()
+
+    with pytest.raises(StaleRunError):
+        await control_plane.report_run_result(
+            ReportRunResultCommand(run_id=packet.run_id, result=successful_draft())
+        )
+
+
+async def test_claim_revalidates_current_broker_authority(
+    control_plane: WorkflowControlPlane,
+    migrated_postgres_url: str,
+):
+    created = await control_plane.create_workflow(create_command())
+    engine = create_async_engine(migrated_postgres_url)
+    async with engine.begin() as connection:
+        await connection.execute(
+            sa.update(WorkflowParticipantRoleRow)
+            .where(WorkflowParticipantRoleRow.workflow_id == created.workflow.id)
+            .values(revoked_at=datetime.now(UTC))
+        )
+    await engine.dispose()
+
+    assert await control_plane.claim_job(claim_command()) is None
+    trace = await control_plane.read_workflow_trace(created.workflow.id, create_command().context)
+    assert all(job.attempts == 0 for job in trace.jobs)
+    assert trace.runs == ()
+
+
+async def test_retryable_draft_failure_uses_persisted_attempt_budget(
+    control_plane: WorkflowControlPlane,
+    migrated_postgres_url: str,
+):
+    created = await control_plane.create_workflow(create_command())
+    first = await control_plane.claim_job(claim_command())
+    assert first is not None
+    failure = RunResult(
+        outcome="failed",
+        evidence=({"type": "agent_output_rejected"},),
+        error={"code": "invalid_draft_output"},
+    )
+    await control_plane.report_run_result(
+        ReportRunResultCommand(run_id=first.run_id, result=failure)
+    )
+    trace = await control_plane.read_workflow_trace(created.workflow.id, create_command().context)
+    draft = next(job for job in trace.jobs if job.kind == DRAFT_RENEWAL_EMAIL_KIND)
+    assert draft.status == "queued"
+    assert draft.attempts == 1
+
+    engine = create_async_engine(migrated_postgres_url)
+    async with engine.begin() as connection:
+        await connection.execute(
+            sa.update(WorkflowJobRow)
+            .where(WorkflowJobRow.id == draft.id)
+            .values(available_at=datetime.now(UTC) - timedelta(seconds=1))
+        )
+    await engine.dispose()
+    second = await control_plane.claim_job(claim_command())
+    assert second is not None
+    await control_plane.report_run_result(
+        ReportRunResultCommand(run_id=second.run_id, result=failure)
+    )
+    trace = await control_plane.read_workflow_trace(created.workflow.id, create_command().context)
+    draft = next(job for job in trace.jobs if job.kind == DRAFT_RENEWAL_EMAIL_KIND)
+    assert draft.status == "failed"
+    assert draft.attempts == 2
+
+
 class _DraftRuntime:
     def __init__(self, runtime_instance_id: UUID, seen: list[tuple[UUID, dict[str, object]]]):
         self.runtime_instance_id = runtime_instance_id
@@ -175,7 +271,7 @@ async def test_worker_uses_disposable_registry_selected_runtime(
     factory = _DraftRuntimeFactory()
     worker = WorkflowWorker(
         control_plane=control_plane,
-        draft_runtimes=factory,
+        executors={"renewal_email_drafter": factory},
         worker_id="draft-worker",
         application_build="test-build",
     )
@@ -189,6 +285,51 @@ async def test_worker_uses_disposable_registry_selected_runtime(
     assert next(job for job in trace.jobs if job.kind == DRAFT_RENEWAL_EMAIL_KIND).status == (
         "succeeded"
     )
+
+
+async def test_draft_only_worker_leaves_unsupported_send_job_unclaimed(
+    control_plane: WorkflowControlPlane,
+    migrated_postgres_url: str,
+):
+    created = await control_plane.create_workflow(create_command())
+    draft_packet = await control_plane.claim_job(claim_command())
+    assert draft_packet is not None
+    await control_plane.report_run_result(
+        ReportRunResultCommand(run_id=draft_packet.run_id, result=successful_draft())
+    )
+    trace = await control_plane.read_workflow_trace(created.workflow.id, create_command().context)
+    send = next(job for job in trace.jobs if job.kind != DRAFT_RENEWAL_EMAIL_KIND)
+    engine = create_async_engine(migrated_postgres_url)
+    async with engine.begin() as connection:
+        await connection.execute(
+            sa.update(WorkflowJobRow).where(WorkflowJobRow.id == send.id).values(status="queued")
+        )
+        await connection.execute(
+            sa.insert(WorkflowEventRow).values(
+                workflow_id=created.workflow.id,
+                job_id=send.id,
+                event_type="approval_granted",
+                actor_type="party",
+                actor_id=str(create_command().context.actor_party_id),
+                cause_type="message",
+                cause_id="approval-fixture",
+                data={},
+            )
+        )
+    await engine.dispose()
+    worker = WorkflowWorker(
+        control_plane=control_plane,
+        executors={"renewal_email_drafter": _DraftRuntimeFactory()},
+        worker_id="draft-only-worker",
+        application_build="test-build",
+    )
+
+    assert await worker.run_once() is None
+    trace = await control_plane.read_workflow_trace(created.workflow.id, create_command().context)
+    send = next(job for job in trace.jobs if job.id == send.id)
+    assert send.status == "queued"
+    assert send.attempts == 0
+    assert len(trace.runs) == 1
 
 
 class _NotificationInteraction:
@@ -216,6 +357,17 @@ class _NotificationInteractionFactory:
             yield _NotificationInteraction(self.calls)
         finally:
             self.live -= 1
+
+
+class _FailingNotificationInteraction:
+    async def handle(self, *_ids: UUID) -> None:
+        raise RuntimeError("delivery failed")
+
+
+class _FailingNotificationInteractionFactory:
+    @asynccontextmanager
+    async def create(self):
+        yield _FailingNotificationInteraction()
 
 
 async def test_notification_hands_off_only_ids_and_acknowledges_idempotently(
@@ -249,6 +401,7 @@ async def test_notification_hands_off_only_ids_and_acknowledges_idempotently(
         AcknowledgeNotificationCommand(
             notification_id=delivered.notification_id,
             worker_id="notification-worker",
+            delivery_attempt=delivered.delivery_attempt,
         )
     )
     assert replay == delivered
@@ -265,11 +418,105 @@ async def test_notification_hands_off_only_ids_and_acknowledges_idempotently(
     assert trace.notifications[0].status == "delivered"
 
 
+async def test_notification_failure_requeues_and_expired_claim_is_fenced(
+    control_plane: WorkflowControlPlane,
+    migrated_postgres_url: str,
+):
+    await control_plane.create_workflow(create_command())
+    packet = await control_plane.claim_job(claim_command())
+    assert packet is not None
+    await control_plane.report_run_result(
+        ReportRunResultCommand(run_id=packet.run_id, result=successful_draft())
+    )
+    failing_worker = NotificationWorker(
+        control_plane=control_plane,
+        interactions=_FailingNotificationInteractionFactory(),
+        worker_id="failed-delivery-worker",
+    )
+    with pytest.raises(RuntimeError):
+        await failing_worker.run_once()
+
+    engine = create_async_engine(migrated_postgres_url)
+    async with engine.begin() as connection:
+        notification_id, status, attempts = (
+            await connection.execute(
+                sa.select(NotificationRow.id, NotificationRow.status, NotificationRow.attempts)
+            )
+        ).one()
+        assert status == "queued"
+        assert attempts == 1
+        await connection.execute(
+            sa.update(NotificationRow)
+            .where(NotificationRow.id == notification_id)
+            .values(available_at=datetime.now(UTC) - timedelta(seconds=1))
+        )
+    first = await control_plane.claim_notification(
+        ClaimNotificationCommand(
+            worker_id="crashed-worker",
+            lease_duration=timedelta(minutes=5),
+        )
+    )
+    assert first is not None
+    async with engine.begin() as connection:
+        await connection.execute(
+            sa.update(NotificationRow)
+            .where(NotificationRow.id == first.notification_id)
+            .values(lease_expires_at=datetime.now(UTC) - timedelta(seconds=1))
+        )
+    assert (
+        await control_plane.claim_notification(
+            ClaimNotificationCommand(worker_id="new-worker", lease_duration=timedelta(minutes=5))
+        )
+        is None
+    )
+    async with engine.begin() as connection:
+        await connection.execute(
+            sa.update(NotificationRow)
+            .where(NotificationRow.id == first.notification_id)
+            .values(available_at=datetime.now(UTC) - timedelta(seconds=1))
+        )
+    second = await control_plane.claim_notification(
+        ClaimNotificationCommand(worker_id="new-worker", lease_duration=timedelta(minutes=5))
+    )
+    assert second is not None
+    assert second.delivery_attempt == first.delivery_attempt + 1
+    with pytest.raises(NotificationLifecycleError):
+        await control_plane.acknowledge_notification(
+            AcknowledgeNotificationCommand(
+                notification_id=first.notification_id,
+                worker_id="crashed-worker",
+                delivery_attempt=first.delivery_attempt,
+            )
+        )
+    delivered = await control_plane.acknowledge_notification(
+        AcknowledgeNotificationCommand(
+            notification_id=second.notification_id,
+            worker_id="new-worker",
+            delivery_attempt=second.delivery_attempt,
+        )
+    )
+    assert delivered == second
+    with pytest.raises(NotificationLifecycleError):
+        await control_plane.acknowledge_notification(
+            AcknowledgeNotificationCommand(
+                notification_id=second.notification_id,
+                worker_id="other-worker",
+                delivery_attempt=second.delivery_attempt,
+            )
+        )
+    await engine.dispose()
+
+
 class _ApprovalPresenter:
     def __init__(self) -> None:
         self.effects: list[dict[str, object]] = []
 
-    async def present(self, effect: dict[str, object]) -> None:
+    async def present(
+        self,
+        _notification_id: UUID,
+        _destination_party_id: UUID,
+        effect: dict[str, object],
+    ) -> None:
         self.effects.append(effect)
 
 
@@ -287,7 +534,7 @@ async def test_fresh_interaction_reloads_packet_and_presents_exact_send_input(
     retrieval = WorkflowRetrieval(database=database, cursor_secret=b"notification-test")
     presenter = _ApprovalPresenter()
     factory = FreshWorkflowInteractionFactory(
-        database=database,
+        control_plane=control_plane,
         retrieval=retrieval,
         presenter=presenter,
     )

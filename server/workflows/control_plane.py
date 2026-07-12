@@ -17,9 +17,10 @@ from .contracts import (
     CommittedRunResult,
     CreateWorkflowCommand,
     NotificationDeliveryPacket,
+    NotificationPresentationContext,
     ProposeWorkflowJobsCommand,
+    ReportNotificationFailureCommand,
     ReportRunResultCommand,
-    RunResult,
     WorkflowCommandContext,
     WorkflowExecutionPacket,
     WorkflowProposal,
@@ -33,13 +34,11 @@ from .contracts import (
 from .database import WorkflowDatabase
 from .errors import (
     InvalidWorkflowProposalError,
-    NotificationLifecycleError,
-    RunResultConflictError,
-    StaleRunError,
     WorkflowAuthorizationError,
     WorkflowLifecycleError,
     WorkflowNotFoundError,
 )
+from .execution_protocol import WorkflowExecutionProtocol
 from .identity_models import (
     OrganizationMembershipRow,
     PartyIdentifierRow,
@@ -55,11 +54,11 @@ from .models import (
     WorkflowJobRunRow,
     WorkflowRow,
 )
+from .notification_protocol import WorkflowNotificationProtocol
 from .registry import (
     DRAFT_RENEWAL_EMAIL_KIND,
     GMAIL_SEND_EMAIL_KIND,
     DraftRenewalEmailInput,
-    ExecutionStrategy,
     ProposedGmailSendEmailInput,
     ValidatedWorkflowProposal,
     WorkflowKindRegistry,
@@ -79,6 +78,12 @@ class WorkflowControlPlane:
         self._database = database
         self._registry = registry
         self._authority = authority
+        self._execution = WorkflowExecutionProtocol(
+            database=database,
+            registry=registry,
+            has_current_broker_authority=self._has_current_broker_authority,
+        )
+        self._notification_delivery = WorkflowNotificationProtocol(database)
 
     async def create_workflow(self, command: CreateWorkflowCommand) -> WorkflowTrace:
         validated = self._registry.validate(command.proposal)
@@ -168,371 +173,40 @@ class WorkflowControlPlane:
         self,
         command: ClaimWorkflowJobCommand,
     ) -> WorkflowExecutionPacket | None:
-        """Claim one due Job without allowing the Worker to select its executor."""
-
-        now = datetime.now(UTC)
-        async with self._database.transaction() as session:
-            candidates = (
-                await session.execute(
-                    sa.select(WorkflowJobRow.id, WorkflowJobRow.workflow_id)
-                    .where(
-                        WorkflowJobRow.status == "queued",
-                        WorkflowJobRow.available_at <= now,
-                        WorkflowJobRow.attempts < WorkflowJobRow.max_attempts,
-                    )
-                    .order_by(
-                        WorkflowJobRow.available_at,
-                        WorkflowJobRow.created_at,
-                        WorkflowJobRow.id,
-                    )
-                    .limit(20)
-                )
-            ).all()
-            for job_id, workflow_id in candidates:
-                workflow = await session.scalar(
-                    sa.select(WorkflowRow).where(WorkflowRow.id == workflow_id).with_for_update()
-                )
-                if workflow is None or workflow.status != "active":
-                    continue
-                job = await session.scalar(
-                    sa.select(WorkflowJobRow)
-                    .where(
-                        WorkflowJobRow.workflow_id == workflow_id,
-                        WorkflowJobRow.id == job_id,
-                    )
-                    .with_for_update()
-                )
-                if job is None or not await self._job_is_eligible(session, job, now):
-                    continue
-
-                contract = self._registry.job_contract(job.kind)
-                execution_input = self._registry.validate_job_input(job.kind, job.input)
-                runtime_instance_id = (
-                    uuid4()
-                    if contract.execution_strategy == ExecutionStrategy.FRESH_EXECUTION_AGENT
-                    else None
-                )
-                lease_expires_at = now + command.lease_duration
-                run = WorkflowJobRunRow(
-                    id=uuid4(),
-                    workflow_id=workflow.id,
-                    job_id=job.id,
-                    status="running",
-                    worker_id=command.worker_id,
-                    lease_expires_at=lease_expires_at,
-                    runtime_instance_id=runtime_instance_id,
-                    application_build=command.application_build,
-                )
-                job.attempts += 1
-                job.status = "running"
-                session.add(run)
-                await session.flush()
-                session.add(
-                    WorkflowEventRow(
-                        workflow_id=workflow.id,
-                        job_id=job.id,
-                        run_id=run.id,
-                        event_type="run_started",
-                        actor_type="worker",
-                        actor_id=command.worker_id,
-                        cause_type="job",
-                        cause_id=str(job.id),
-                        data={"attempt": job.attempts},
-                    )
-                )
-                await session.flush()
-                return WorkflowExecutionPacket(
-                    workflow_id=workflow.id,
-                    job_id=job.id,
-                    run_id=run.id,
-                    job_kind=job.kind,
-                    execution_strategy=contract.execution_strategy.value,
-                    input=execution_input,
-                    runtime_instance_id=runtime_instance_id,
-                    lease_expires_at=lease_expires_at,
-                )
-        return None
+        return await self._execution.claim_job(command)
 
     async def report_run_result(
         self,
         command: ReportRunResultCommand,
     ) -> CommittedRunResult:
-        """Publish one write-once Run Result through current derived authority."""
-
-        async with self._database.transaction() as session:
-            run_locator = await session.execute(
-                sa.select(WorkflowJobRunRow.workflow_id, WorkflowJobRunRow.job_id).where(
-                    WorkflowJobRunRow.id == command.run_id
-                )
-            )
-            locator = run_locator.one_or_none()
-            if locator is None:
-                raise StaleRunError("Run does not exist")
-            workflow_id, job_id = locator
-            workflow = await session.scalar(
-                sa.select(WorkflowRow).where(WorkflowRow.id == workflow_id).with_for_update()
-            )
-            job = await session.scalar(
-                sa.select(WorkflowJobRow)
-                .where(WorkflowJobRow.workflow_id == workflow_id, WorkflowJobRow.id == job_id)
-                .with_for_update()
-            )
-            run = await session.scalar(
-                sa.select(WorkflowJobRunRow)
-                .where(
-                    WorkflowJobRunRow.workflow_id == workflow_id,
-                    WorkflowJobRunRow.job_id == job_id,
-                    WorkflowJobRunRow.id == command.run_id,
-                )
-                .with_for_update()
-            )
-            if workflow is None or job is None or run is None:
-                raise StaleRunError("Run aggregate no longer exists")
-
-            normalized_result = command.result.model_dump(mode="json")
-            if run.result is not None:
-                if run.result != normalized_result:
-                    raise RunResultConflictError("Run already has a different result")
-                return self._committed_result(workflow, job, run)
-            if (
-                workflow.status != "active"
-                or job.status != "running"
-                or run.status != "running"
-                or run.lease_expires_at < datetime.now(UTC)
-            ):
-                raise StaleRunError("Run no longer has Execution Authority")
-
-            now = datetime.now(UTC)
-            run.result = normalized_result
-            run.finished_at = now
-            if command.result.outcome == "succeeded":
-                output = self._registry.validate_success_data(job.kind, command.result.data)
-                if job.output is not None:
-                    raise RunResultConflictError("Job output was already published")
-                run.status = "succeeded"
-                job.output = output
-                job.status = "succeeded"
-                await self._record_success(session, workflow, job, run)
-            elif command.result.outcome == "uncertain":
-                run.status = "failed"
-                job.status = "waiting"
-                session.add(
-                    WorkflowEventRow(
-                        workflow_id=workflow.id,
-                        job_id=job.id,
-                        run_id=run.id,
-                        event_type="run_outcome_uncertain",
-                        actor_type="run",
-                        actor_id=str(run.id),
-                        cause_type="job",
-                        cause_id=str(job.id),
-                        data={},
-                    )
-                )
-            else:
-                run.status = "failed"
-                job.status = "failed"
-                session.add(
-                    WorkflowEventRow(
-                        workflow_id=workflow.id,
-                        job_id=job.id,
-                        run_id=run.id,
-                        event_type="run_failed",
-                        actor_type="run",
-                        actor_id=str(run.id),
-                        cause_type="job",
-                        cause_id=str(job.id),
-                        data={},
-                    )
-                )
-            await session.flush()
-            return self._committed_result(workflow, job, run)
+        return await self._execution.report_run_result(command)
 
     async def claim_notification(
         self,
         command: ClaimNotificationCommand,
     ) -> NotificationDeliveryPacket | None:
-        """Lease one outbox record without loading Workflow content."""
-
-        now = datetime.now(UTC)
-        async with self._database.transaction() as session:
-            notification = await session.scalar(
-                sa.select(NotificationRow)
-                .where(
-                    NotificationRow.status == "queued",
-                    NotificationRow.available_at <= now,
-                    NotificationRow.attempts < NotificationRow.max_attempts,
-                )
-                .order_by(
-                    NotificationRow.available_at,
-                    NotificationRow.created_at,
-                    NotificationRow.id,
-                )
-                .with_for_update(skip_locked=True)
-                .limit(1)
-            )
-            if notification is None:
-                return None
-            notification.status = "delivering"
-            notification.attempts += 1
-            notification.claimed_by = command.worker_id
-            notification.lease_expires_at = now + command.lease_duration
-            await session.flush()
-            return NotificationDeliveryPacket(
-                notification_id=notification.id,
-                workflow_event_id=notification.workflow_event_id,
-                workflow_id=notification.workflow_id,
-            )
+        return await self._notification_delivery.claim_notification(command)
 
     async def acknowledge_notification(
         self,
         command: AcknowledgeNotificationCommand,
     ) -> NotificationDeliveryPacket:
-        """Acknowledge a delivery once, accepting identical post-commit replay."""
+        return await self._notification_delivery.acknowledge_notification(command)
 
-        async with self._database.transaction() as session:
-            notification = await session.scalar(
-                sa.select(NotificationRow)
-                .where(NotificationRow.id == command.notification_id)
-                .with_for_update()
-            )
-            if notification is None:
-                raise NotificationLifecycleError("Notification does not exist")
-            if notification.status == "delivered":
-                return self._notification_packet(notification)
-            if (
-                notification.status != "delivering"
-                or notification.claimed_by != command.worker_id
-                or notification.lease_expires_at is None
-                or notification.lease_expires_at < datetime.now(UTC)
-            ):
-                raise NotificationLifecycleError("Notification delivery lease is stale")
-            notification.status = "delivered"
-            notification.claimed_by = None
-            notification.lease_expires_at = None
-            notification.delivered_at = datetime.now(UTC)
-            await session.flush()
-            return self._notification_packet(notification)
-
-    async def _job_is_eligible(
+    async def report_notification_failure(
         self,
-        session: AsyncSession,
-        job: WorkflowJobRow,
-        now: datetime,
-    ) -> bool:
-        if job.status != "queued" or job.available_at > now or job.attempts >= job.max_attempts:
-            return False
-        unresolved_dependency = await session.scalar(
-            sa.select(WorkflowJobDependencyRow.job_id)
-            .join(
-                WorkflowJobRow,
-                sa.and_(
-                    WorkflowJobRow.workflow_id == WorkflowJobDependencyRow.workflow_id,
-                    WorkflowJobRow.id == WorkflowJobDependencyRow.depends_on_job_id,
-                ),
-            )
-            .where(
-                WorkflowJobDependencyRow.workflow_id == job.workflow_id,
-                WorkflowJobDependencyRow.job_id == job.id,
-                WorkflowJobRow.status != "succeeded",
-            )
-            .limit(1)
-        )
-        if unresolved_dependency is not None:
-            return False
-        if self._registry.requires_approval(job.kind):
-            approval = await session.scalar(
-                sa.select(WorkflowEventRow.id)
-                .where(
-                    WorkflowEventRow.workflow_id == job.workflow_id,
-                    WorkflowEventRow.job_id == job.id,
-                    WorkflowEventRow.event_type == "approval_granted",
-                )
-                .limit(1)
-            )
-            if approval is None:
-                return False
-        dispatched = await session.scalar(
-            sa.select(WorkflowEventRow.id)
-            .where(
-                WorkflowEventRow.workflow_id == job.workflow_id,
-                WorkflowEventRow.job_id == job.id,
-                WorkflowEventRow.event_type == "external_effect_dispatch_started",
-            )
-            .limit(1)
-        )
-        return dispatched is None
+        command: ReportNotificationFailureCommand,
+    ) -> NotificationDeliveryPacket:
+        return await self._notification_delivery.report_failure(command)
 
-    async def _record_success(
+    async def resolve_notification_presentation(
         self,
-        session: AsyncSession,
-        workflow: WorkflowRow,
-        job: WorkflowJobRow,
-        run: WorkflowJobRunRow,
-    ) -> None:
-        event_type = "draft_ready" if job.kind == DRAFT_RENEWAL_EMAIL_KIND else "job_succeeded"
-        event = WorkflowEventRow(
-            workflow_id=workflow.id,
-            job_id=job.id,
-            run_id=run.id,
-            event_type=event_type,
-            actor_type="run",
-            actor_id=str(run.id),
-            cause_type="job",
-            cause_id=str(job.id),
-            data={"outcome": "succeeded"},
-        )
-        session.add(event)
-        await session.flush()
-        if job.kind != DRAFT_RENEWAL_EMAIL_KIND:
-            return
-        broker_party_id = await session.scalar(
-            sa.select(WorkflowParticipantRoleRow.party_id)
-            .where(
-                WorkflowParticipantRoleRow.workflow_id == workflow.id,
-                WorkflowParticipantRoleRow.role == "Broker",
-                WorkflowParticipantRoleRow.revoked_at.is_(None),
-            )
-            .order_by(WorkflowParticipantRoleRow.granted_at)
-            .limit(1)
-        )
-        if broker_party_id is None:
-            raise WorkflowAuthorizationError("Workflow has no current Broker destination")
-        session.add(
-            NotificationRow(
-                workflow_id=workflow.id,
-                workflow_event_id=event.id,
-                kind="approval_required",
-                destination_type="party",
-                destination_id=str(broker_party_id),
-                status="queued",
-                max_attempts=3,
-            )
-        )
-
-    @staticmethod
-    def _committed_result(
-        workflow: WorkflowRow,
-        job: WorkflowJobRow,
-        run: WorkflowJobRunRow,
-    ) -> CommittedRunResult:
-        if run.result is None:
-            raise StaleRunError("Run has no committed result")
-        return CommittedRunResult(
-            workflow_id=workflow.id,
-            job_id=job.id,
-            run_id=run.id,
-            run_status=run.status,
-            job_status=job.status,
-            result=RunResult.model_validate(run.result),
-        )
-
-    @staticmethod
-    def _notification_packet(notification: NotificationRow) -> NotificationDeliveryPacket:
-        return NotificationDeliveryPacket(
-            notification_id=notification.id,
-            workflow_event_id=notification.workflow_event_id,
-            workflow_id=notification.workflow_id,
+        notification_id: UUID,
+        workflow_event_id: UUID,
+        workflow_id: UUID,
+    ) -> NotificationPresentationContext:
+        return await self._notification_delivery.resolve_presentation(
+            notification_id, workflow_event_id, workflow_id
         )
 
     @staticmethod

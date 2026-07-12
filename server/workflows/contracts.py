@@ -63,6 +63,7 @@ class ClaimWorkflowJobCommand(WorkflowContract):
     worker_id: str = Field(min_length=1, max_length=255)
     application_build: str = Field(min_length=1, max_length=255)
     lease_duration: timedelta = Field(gt=timedelta(0), le=timedelta(minutes=30))
+    executor_keys: tuple[str, ...] = Field(min_length=1)
 
 
 class RunResult(WorkflowContract):
@@ -89,6 +90,7 @@ class WorkflowExecutionPacket(WorkflowContract):
     run_id: UUID
     job_kind: str
     execution_strategy: str
+    executor_key: str
     input: dict[str, Any]
     runtime_instance_id: UUID | None
     lease_expires_at: datetime
@@ -118,6 +120,7 @@ class NotificationDeliveryPacket(WorkflowContract):
     notification_id: UUID
     workflow_event_id: UUID
     workflow_id: UUID
+    delivery_attempt: int
 
 
 class AcknowledgeNotificationCommand(WorkflowContract):
@@ -125,6 +128,22 @@ class AcknowledgeNotificationCommand(WorkflowContract):
 
     notification_id: UUID
     worker_id: str = Field(min_length=1, max_length=255)
+    delivery_attempt: int = Field(gt=0)
+
+
+class ReportNotificationFailureCommand(WorkflowContract):
+    """Release one failed delivery attempt through its current lease."""
+
+    notification_id: UUID
+    worker_id: str = Field(min_length=1, max_length=255)
+    delivery_attempt: int = Field(gt=0)
+    error_code: str = Field(pattern=r"^[a-z][a-z0-9_]{0,63}$")
+
+
+class NotificationPresentationContext(WorkflowContract):
+    """Trusted destination resolved from stable Notification identifiers."""
+
+    destination_party_id: UUID
 
 
 class WorkflowTraceWorkflow(WorkflowContract):

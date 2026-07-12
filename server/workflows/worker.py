@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from contextlib import AbstractAsyncContextManager
 from datetime import timedelta
 from typing import Protocol
@@ -12,12 +13,12 @@ from .contracts import (
     ClaimNotificationCommand,
     ClaimWorkflowJobCommand,
     NotificationDeliveryPacket,
+    ReportNotificationFailureCommand,
     ReportRunResultCommand,
     RunResult,
     WorkflowExecutionPacket,
 )
 from .control_plane import WorkflowControlPlane
-from .registry import DRAFT_RENEWAL_EMAIL_KIND, ExecutionStrategy
 
 
 class DraftExecutionRuntime(Protocol):
@@ -62,13 +63,15 @@ class WorkflowWorker:
         self,
         *,
         control_plane: WorkflowControlPlane,
-        draft_runtimes: DraftExecutionRuntimeFactory,
+        executors: Mapping[str, DraftExecutionRuntimeFactory],
         worker_id: str,
         application_build: str,
         lease_duration: timedelta = timedelta(minutes=5),
     ) -> None:
         self._control_plane = control_plane
-        self._draft_runtimes = draft_runtimes
+        self._executors = dict(executors)
+        if not self._executors:
+            raise ValueError("Workflow Worker requires at least one installed executor")
         self._worker_id = worker_id
         self._application_build = application_build
         self._lease_duration = lease_duration
@@ -81,21 +84,26 @@ class WorkflowWorker:
                 worker_id=self._worker_id,
                 application_build=self._application_build,
                 lease_duration=self._lease_duration,
+                executor_keys=tuple(self._executors),
             )
         )
         if packet is None:
             return None
-        if (
-            packet.job_kind != DRAFT_RENEWAL_EMAIL_KIND
-            or packet.execution_strategy != ExecutionStrategy.FRESH_EXECUTION_AGENT.value
-            or packet.runtime_instance_id is None
-        ):
-            raise RuntimeError(f"No V0 executor is installed for {packet.job_kind!r}")
+        factory = self._executors.get(packet.executor_key)
+        if factory is None or packet.runtime_instance_id is None:
+            raise RuntimeError(f"No executor is installed for {packet.executor_key!r}")
 
-        async with self._draft_runtimes.create(packet.runtime_instance_id) as runtime:
-            if runtime.runtime_instance_id != packet.runtime_instance_id:
-                raise RuntimeError("Draft runtime identity does not match the claimed Run")
-            result = await runtime.execute(packet.input)
+        try:
+            async with factory.create(packet.runtime_instance_id) as runtime:
+                if runtime.runtime_instance_id != packet.runtime_instance_id:
+                    raise RuntimeError("Runtime identity does not match the claimed Run")
+                result = await runtime.execute(packet.input)
+        except Exception:
+            result = RunResult(
+                outcome="failed",
+                evidence=({"type": "executor_failed"},),
+                error={"code": "executor_unavailable"},
+            )
 
         await self._control_plane.report_run_result(
             ReportRunResultCommand(run_id=packet.run_id, result=result)
@@ -128,15 +136,27 @@ class NotificationWorker:
         )
         if packet is None:
             return None
-        async with self._interactions.create() as interaction:
-            await interaction.handle(
-                packet.notification_id,
-                packet.workflow_event_id,
-                packet.workflow_id,
+        try:
+            async with self._interactions.create() as interaction:
+                await interaction.handle(
+                    packet.notification_id,
+                    packet.workflow_event_id,
+                    packet.workflow_id,
+                )
+        except Exception:
+            await self._control_plane.report_notification_failure(
+                ReportNotificationFailureCommand(
+                    notification_id=packet.notification_id,
+                    worker_id=self._worker_id,
+                    delivery_attempt=packet.delivery_attempt,
+                    error_code="interaction_delivery_failed",
+                )
             )
+            raise
         return await self._control_plane.acknowledge_notification(
             AcknowledgeNotificationCommand(
                 notification_id=packet.notification_id,
                 worker_id=self._worker_id,
+                delivery_attempt=packet.delivery_attempt,
             )
         )

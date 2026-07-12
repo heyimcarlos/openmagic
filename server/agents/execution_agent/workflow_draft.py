@@ -11,8 +11,7 @@ from pydantic import ValidationError
 
 from server.config import Settings, get_settings
 from server.openrouter_client import request_chat_completion
-from server.workflows import RunResult
-from server.workflows.registry import DraftRenewalEmailOutput
+from server.workflows import DraftRenewalEmailOutput, RunResult
 
 _SYSTEM_PROMPT = """You draft one concise insurance renewal email.
 Use only the supplied recipient name and renewal period. Do not claim coverage,
@@ -41,25 +40,37 @@ class FreshDraftExecutionAgent:
         if self._used:
             raise RuntimeError("A Draft execution runtime may execute only once")
         self._used = True
-        response = await request_chat_completion(
-            model=self._settings.execution_agent_model,
-            messages=[
-                {
-                    "role": "user",
-                    "content": json.dumps(execution_input, sort_keys=True),
-                }
-            ],
-            system=_SYSTEM_PROMPT,
-            api_key=self._settings.openrouter_api_key,
-            tools=[_PUBLISH_DRAFT_TOOL],
-        )
         try:
+            response = await request_chat_completion(
+                model=self._settings.execution_agent_model,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": json.dumps(execution_input, sort_keys=True),
+                    }
+                ],
+                system=_SYSTEM_PROMPT,
+                api_key=self._settings.openrouter_api_key,
+                tools=[_PUBLISH_DRAFT_TOOL],
+            )
             draft = self._extract_draft(response)
-        except (KeyError, TypeError, ValueError, ValidationError) as exc:
+        except ValidationError as exc:
             return RunResult(
                 outcome="failed",
                 evidence=({"type": "agent_output_rejected"},),
-                error={"code": "invalid_draft_output", "message": str(exc)},
+                error={"code": "invalid_draft_output", "validation_errors": exc.error_count()},
+            )
+        except (AttributeError, IndexError, KeyError, TypeError, ValueError):
+            return RunResult(
+                outcome="failed",
+                evidence=({"type": "agent_output_rejected"},),
+                error={"code": "invalid_draft_output"},
+            )
+        except Exception:
+            return RunResult(
+                outcome="failed",
+                evidence=({"type": "executor_failed"},),
+                error={"code": "executor_unavailable"},
             )
         return RunResult(
             outcome="succeeded",
