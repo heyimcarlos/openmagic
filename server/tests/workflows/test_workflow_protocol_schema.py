@@ -10,7 +10,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from server.tests.workflows.factories import create_command
-from server.workflows import WorkflowControlPlane
+from server.workflows import WorkflowControlPlane, WorkflowDatabase
 
 PROTOCOL_TABLES = {
     "workflows",
@@ -211,3 +211,68 @@ async def test_database_rejects_attempts_above_persisted_budget(
             )
         await transaction.rollback()
     await engine.dispose()
+
+
+async def test_approval_grant_reference_cannot_cross_workflow(
+    control_plane: WorkflowControlPlane,
+    migrated_postgres_url: str,
+):
+    first = await control_plane.create_workflow(create_command())
+    second = await control_plane.create_workflow(create_command())
+    first_send = next(job for job in first.jobs if job.status == "waiting")
+    second_send = next(job for job in second.jobs if job.status == "waiting")
+    approval_grant_id = uuid4()
+
+    engine = create_async_engine(migrated_postgres_url)
+    async with engine.connect() as connection:
+        await connection.execute(
+            sa.text(
+                "INSERT INTO workflow_events "
+                "(id, workflow_id, job_id, event_type, actor_type, actor_id, "
+                "cause_type, cause_id) VALUES "
+                "(:id, :workflow_id, :job_id, 'approval_granted', 'party', "
+                "'broker', 'message', 'approval-message')"
+            ),
+            {
+                "id": approval_grant_id,
+                "workflow_id": first.workflow.id,
+                "job_id": first_send.id,
+            },
+        )
+        await connection.commit()
+
+        transaction = await connection.begin()
+        with pytest.raises(IntegrityError):
+            await connection.execute(
+                sa.text(
+                    "INSERT INTO workflow_events "
+                    "(id, workflow_id, job_id, event_type, actor_type, actor_id, "
+                    "cause_type, cause_id, approval_grant_id) VALUES "
+                    "(:id, :workflow_id, :job_id, 'approval_invalidated', 'system', "
+                    "'control-plane', 'job', :cause_id, :approval_grant_id)"
+                ),
+                {
+                    "id": uuid4(),
+                    "workflow_id": second.workflow.id,
+                    "job_id": second_send.id,
+                    "cause_id": str(second_send.id),
+                    "approval_grant_id": approval_grant_id,
+                },
+            )
+        await transaction.rollback()
+    await engine.dispose()
+
+
+async def test_workflow_reads_use_one_repeatable_snapshot(
+    control_plane: WorkflowControlPlane,
+    migrated_postgres_url: str,
+):
+    database = WorkflowDatabase(migrated_postgres_url)
+    async with database.read_transaction() as session:
+        before = await session.scalar(sa.text("SELECT count(*) FROM workflows"))
+        await control_plane.create_workflow(create_command())
+        after_concurrent_commit = await session.scalar(sa.text("SELECT count(*) FROM workflows"))
+
+    assert before == 0
+    assert after_concurrent_commit == before
+    await database.dispose()

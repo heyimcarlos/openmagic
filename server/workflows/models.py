@@ -221,7 +221,21 @@ class WorkflowEventRow(Base):
             ],
             name="fk_workflow_events_run",
         ),
+        sa.ForeignKeyConstraint(
+            ["workflow_id", "approval_grant_id"],
+            ["workflow_events.workflow_id", "workflow_events.id"],
+            name="fk_workflow_events_approval_grant",
+        ),
         sa.CheckConstraint("run_id IS NULL OR job_id IS NOT NULL", name="run_requires_job"),
+        sa.CheckConstraint(
+            "event_type NOT IN ('approval_granted', 'external_effect_dispatch_started') "
+            "OR job_id IS NOT NULL",
+            name="approval_and_dispatch_require_job",
+        ),
+        sa.CheckConstraint(
+            "event_type <> 'approval_invalidated' OR approval_grant_id IS NOT NULL",
+            name="invalidation_requires_grant",
+        ),
         sa.Index("ix_workflow_events_timeline", "workflow_id", "occurred_at", "id"),
         sa.Index("ix_workflow_events_job", "workflow_id", "job_id", "occurred_at"),
         sa.Index("ix_workflow_events_run", "workflow_id", "run_id", "occurred_at"),
@@ -260,11 +274,7 @@ class WorkflowEventRow(Base):
     actor_id: Mapped[str] = mapped_column(sa.Text, nullable=False)
     cause_type: Mapped[str] = mapped_column(sa.Text, nullable=False)
     cause_id: Mapped[str] = mapped_column(sa.Text, nullable=False)
-    approval_grant_id: Mapped[UUID | None] = mapped_column(
-        PGUUID(as_uuid=True),
-        sa.ForeignKey("workflow_events.id", name="fk_workflow_events_approval_grant"),
-        nullable=True,
-    )
+    approval_grant_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True), nullable=True)
     data: Mapped[dict[str, Any]] = mapped_column(
         JSONB,
         nullable=False,

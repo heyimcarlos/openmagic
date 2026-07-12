@@ -21,6 +21,12 @@ class WorkflowAuthority(Protocol):
         workflow_kind: str,
     ) -> bool: ...
 
+    async def can_read_workflow(
+        self,
+        context: WorkflowCommandContext,
+        workflow_kind: str,
+    ) -> bool: ...
+
 
 @dataclass(frozen=True, init=False)
 class StaticWorkflowAuthority:
@@ -32,6 +38,14 @@ class StaticWorkflowAuthority:
         object.__setattr__(self, "grants", frozenset(grants))
 
     async def can_create_workflow(
+        self,
+        context: WorkflowCommandContext,
+        workflow_kind: str,
+    ) -> bool:
+        grant = (context.actor_party_id, context.organization_party_id, workflow_kind)
+        return grant in self.grants
+
+    async def can_read_workflow(
         self,
         context: WorkflowCommandContext,
         workflow_kind: str,

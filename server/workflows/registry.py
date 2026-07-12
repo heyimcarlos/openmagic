@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from types import MappingProxyType
@@ -50,36 +51,28 @@ class JobOutputReference(KindSchema):
     field: str = Field(min_length=1, max_length=64)
 
 
-class ProposedGmailSendEmailInput(KindSchema):
+class GmailMessageEnvelope(KindSchema):
     sender_mailbox: EmailStr
     to: tuple[EmailStr, ...]
     cc: tuple[EmailStr, ...] = ()
     bcc: tuple[EmailStr, ...] = ()
+
+    @field_validator("to")
+    @classmethod
+    def require_recipient(cls, value: tuple[EmailStr, ...]) -> tuple[EmailStr, ...]:
+        if not value:
+            raise ValueError("at least one recipient is required")
+        return value
+
+
+class ProposedGmailSendEmailInput(GmailMessageEnvelope):
     subject: ProposedJobOutputReference
     body: ProposedJobOutputReference
 
-    @field_validator("to")
-    @classmethod
-    def require_recipient(cls, value: tuple[EmailStr, ...]) -> tuple[EmailStr, ...]:
-        if not value:
-            raise ValueError("at least one recipient is required")
-        return value
 
-
-class GmailSendEmailInput(KindSchema):
-    sender_mailbox: EmailStr
-    to: tuple[EmailStr, ...]
-    cc: tuple[EmailStr, ...] = ()
-    bcc: tuple[EmailStr, ...] = ()
+class GmailSendEmailInput(GmailMessageEnvelope):
     subject: JobOutputReference
     body: JobOutputReference
-
-    @field_validator("to")
-    @classmethod
-    def require_recipient(cls, value: tuple[EmailStr, ...]) -> tuple[EmailStr, ...]:
-        if not value:
-            raise ValueError("at least one recipient is required")
-        return value
 
 
 class GmailSendEmailOutput(KindSchema):
@@ -96,8 +89,10 @@ class ExecutionStrategy(StrEnum):
 class JobKindContract:
     kind: str
     input_schema: type[KindSchema]
+    proposal_input_schema: type[KindSchema]
     output_schema: type[KindSchema]
     run_data_schema: type[KindSchema]
+    materialize_input: Callable[[KindSchema, Mapping[str, UUID]], KindSchema]
     execution_strategy: ExecutionStrategy
     max_attempts: int
     requires_approval: bool = False
@@ -164,12 +159,7 @@ class WorkflowKindRegistry:
                 )
             self._validate_dependencies(job, known_keys)
             try:
-                schema = (
-                    ProposedGmailSendEmailInput
-                    if job.kind == GMAIL_SEND_EMAIL_KIND
-                    else contract.input_schema
-                )
-                proposed_input = schema.model_validate(job.input)
+                proposed_input = contract.proposal_input_schema.model_validate(job.input)
             except ValidationError as exc:
                 raise InvalidWorkflowProposalError(f"invalid input for Job {job.key!r}") from exc
             validated_jobs.append(
@@ -184,7 +174,7 @@ class WorkflowKindRegistry:
 
         self._reject_cycles(tuple(validated_jobs))
         if proposal.kind == RENEWAL_OUTREACH_KIND:
-            self._validate_renewal_graph(tuple(validated_jobs))
+            self._validate_renewal_graph(tuple(validated_jobs), workflow_input)
 
         return ValidatedWorkflowProposal(
             kind=proposal.kind,
@@ -198,25 +188,14 @@ class WorkflowKindRegistry:
         job: ValidatedJobProposal,
         job_ids: dict[str, UUID],
     ) -> dict[str, Any]:
-        if job.kind != GMAIL_SEND_EMAIL_KIND:
-            return job.proposed_input.model_dump(mode="json")
-
-        proposed = ProposedGmailSendEmailInput.model_validate(job.proposed_input)
-        materialized = GmailSendEmailInput(
-            sender_mailbox=proposed.sender_mailbox,
-            to=proposed.to,
-            cc=proposed.cc,
-            bcc=proposed.bcc,
-            subject=JobOutputReference(
-                job_output=job_ids[proposed.subject.job_output],
-                field=proposed.subject.field,
-            ),
-            body=JobOutputReference(
-                job_output=job_ids[proposed.body.job_output],
-                field=proposed.body.field,
-            ),
-        )
+        materialized = job.contract.materialize_input(job.proposed_input, job_ids)
         return materialized.model_dump(mode="json")
+
+    def requires_approval(self, job_kind: str) -> bool:
+        contract = self._job_kinds.get(job_kind)
+        if contract is None:
+            raise UnknownWorkflowJobKindError(job_kind)
+        return contract.requires_approval
 
     @staticmethod
     def _validate_dependencies(job: WorkflowJobProposal, known_keys: set[str]) -> None:
@@ -251,7 +230,10 @@ class WorkflowKindRegistry:
             visit(key)
 
     @staticmethod
-    def _validate_renewal_graph(jobs: tuple[ValidatedJobProposal, ...]) -> None:
+    def _validate_renewal_graph(
+        jobs: tuple[ValidatedJobProposal, ...],
+        workflow_input: KindSchema,
+    ) -> None:
         drafts = [job for job in jobs if job.kind == DRAFT_RENEWAL_EMAIL_KIND]
         sends = [job for job in jobs if job.kind == GMAIL_SEND_EMAIL_KIND]
         if len(jobs) != 2 or len(drafts) != 1 or len(sends) != 1:
@@ -259,6 +241,12 @@ class WorkflowKindRegistry:
                 "renewal_outreach.v1 requires one Draft Job and one Send Job"
             )
         draft, send = drafts[0], sends[0]
+        renewal = RenewalOutreachInput.model_validate(workflow_input)
+        draft_input = DraftRenewalEmailInput.model_validate(draft.proposed_input)
+        if draft_input.renewal_period != renewal.renewal_period:
+            raise InvalidWorkflowProposalError(
+                "the Draft Job renewal period must match the Workflow renewal period"
+            )
         if draft.depends_on or send.depends_on != (draft.key,):
             raise InvalidWorkflowProposalError("the Send Job must depend only on the Draft Job")
         send_input = ProposedGmailSendEmailInput.model_validate(send.proposed_input)
@@ -268,22 +256,54 @@ class WorkflowKindRegistry:
             raise InvalidWorkflowProposalError("Send body must reference the Draft body")
 
 
+def _keep_validated_input(
+    input_value: KindSchema,
+    _job_ids: Mapping[str, UUID],
+) -> KindSchema:
+    return input_value
+
+
+def _materialize_gmail_input(
+    input_value: KindSchema,
+    job_ids: Mapping[str, UUID],
+) -> KindSchema:
+    proposed = ProposedGmailSendEmailInput.model_validate(input_value)
+    return GmailSendEmailInput(
+        sender_mailbox=proposed.sender_mailbox,
+        to=proposed.to,
+        cc=proposed.cc,
+        bcc=proposed.bcc,
+        subject=JobOutputReference(
+            job_output=job_ids[proposed.subject.job_output],
+            field=proposed.subject.field,
+        ),
+        body=JobOutputReference(
+            job_output=job_ids[proposed.body.job_output],
+            field=proposed.body.field,
+        ),
+    )
+
+
 def default_workflow_registry() -> WorkflowKindRegistry:
     """Build the V0 registry without exposing mutable global state."""
 
     draft = JobKindContract(
         kind=DRAFT_RENEWAL_EMAIL_KIND,
         input_schema=DraftRenewalEmailInput,
+        proposal_input_schema=DraftRenewalEmailInput,
         output_schema=DraftRenewalEmailOutput,
         run_data_schema=DraftRenewalEmailOutput,
+        materialize_input=_keep_validated_input,
         execution_strategy=ExecutionStrategy.FRESH_EXECUTION_AGENT,
         max_attempts=2,
     )
     send = JobKindContract(
         kind=GMAIL_SEND_EMAIL_KIND,
         input_schema=GmailSendEmailInput,
+        proposal_input_schema=ProposedGmailSendEmailInput,
         output_schema=GmailSendEmailOutput,
         run_data_schema=GmailSendEmailOutput,
+        materialize_input=_materialize_gmail_input,
         execution_strategy=ExecutionStrategy.DETERMINISTIC_ADAPTER,
         max_attempts=1,
         requires_approval=True,

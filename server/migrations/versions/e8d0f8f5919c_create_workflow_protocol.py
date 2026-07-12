@@ -218,8 +218,19 @@ def upgrade() -> None:
         sa.CheckConstraint(
             "run_id IS NULL OR job_id IS NOT NULL", name=op.f("ck_workflow_events_run_requires_job")
         ),
+        sa.CheckConstraint(
+            "event_type NOT IN ('approval_granted', 'external_effect_dispatch_started') "
+            "OR job_id IS NOT NULL",
+            name=op.f("ck_workflow_events_approval_and_dispatch_require_job"),
+        ),
+        sa.CheckConstraint(
+            "event_type <> 'approval_invalidated' OR approval_grant_id IS NOT NULL",
+            name=op.f("ck_workflow_events_invalidation_requires_grant"),
+        ),
         sa.ForeignKeyConstraint(
-            ["approval_grant_id"], ["workflow_events.id"], name="fk_workflow_events_approval_grant"
+            ["workflow_id", "approval_grant_id"],
+            ["workflow_events.workflow_id", "workflow_events.id"],
+            name="fk_workflow_events_approval_grant",
         ),
         sa.ForeignKeyConstraint(
             ["workflow_id", "job_id", "run_id"],

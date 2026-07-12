@@ -10,6 +10,7 @@ import sqlalchemy as sa
 from .authority import WorkflowAuthority
 from .contracts import (
     CreateWorkflowCommand,
+    WorkflowCommandContext,
     WorkflowTrace,
     WorkflowTraceEvent,
     WorkflowTraceJob,
@@ -27,7 +28,7 @@ from .models import (
     WorkflowJobRunRow,
     WorkflowRow,
 )
-from .registry import GMAIL_SEND_EMAIL_KIND, WorkflowKindRegistry
+from .registry import WorkflowKindRegistry
 
 
 class WorkflowControlPlane:
@@ -109,13 +110,19 @@ class WorkflowControlPlane:
                 )
             )
 
-        return await self.read_workflow_trace(workflow_id)
+        return await self.read_workflow_trace(workflow_id, command.context)
 
-    async def read_workflow_trace(self, workflow_id: UUID) -> WorkflowTrace:
-        async with self._database.session() as session:
+    async def read_workflow_trace(
+        self,
+        workflow_id: UUID,
+        context: WorkflowCommandContext,
+    ) -> WorkflowTrace:
+        async with self._database.read_transaction() as session:
             workflow = await session.get(WorkflowRow, workflow_id)
             if workflow is None:
                 raise WorkflowNotFoundError(str(workflow_id))
+            if not await self._authority.can_read_workflow(context, workflow.kind):
+                raise WorkflowAuthorizationError("Party cannot read this Workflow")
 
             jobs = (
                 await session.scalars(
@@ -230,8 +237,8 @@ class WorkflowControlPlane:
             ),
         )
 
-    @staticmethod
     def _waiting_reasons(
+        self,
         job: WorkflowJobRow,
         dependency_ids: list[UUID],
         status_by_job: dict[UUID, str],
@@ -246,6 +253,6 @@ class WorkflowControlPlane:
         )
         if unresolved:
             return unresolved
-        if job.kind == GMAIL_SEND_EMAIL_KIND and job.id not in approved_job_ids:
+        if self._registry.requires_approval(job.kind) and job.id not in approved_job_ids:
             return ("exact_approval",)
         return ()

@@ -18,6 +18,7 @@ from .errors import (
     WorkflowError,
     WorkflowNotFoundError,
 )
+from .models import Base as WorkflowModelBase
 from .registry import (
     DRAFT_RENEWAL_EMAIL_KIND,
     GMAIL_SEND_EMAIL_KIND,
@@ -45,6 +46,7 @@ __all__ = [
     "WorkflowError",
     "WorkflowJobProposal",
     "WorkflowKindRegistry",
+    "WorkflowModelBase",
     "WorkflowNotFoundError",
     "WorkflowProposal",
     "WorkflowTrace",

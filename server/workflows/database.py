@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+import sqlalchemy as sa
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -30,8 +31,11 @@ class WorkflowDatabase:
             yield session
 
     @asynccontextmanager
-    async def session(self) -> AsyncIterator[AsyncSession]:
-        async with self._sessions() as session:
+    async def read_transaction(self) -> AsyncIterator[AsyncSession]:
+        """Read one aggregate from a stable PostgreSQL snapshot."""
+
+        async with self._sessions() as session, session.begin():
+            await session.execute(sa.text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"))
             yield session
 
     async def dispose(self) -> None:

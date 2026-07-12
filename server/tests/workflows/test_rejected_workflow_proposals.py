@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from uuid import uuid4
+
 import pytest
 import sqlalchemy as sa
 from pydantic import ValidationError
@@ -18,6 +20,7 @@ from server.workflows import (
     UnknownWorkflowJobKindError,
     UnknownWorkflowKindError,
     WorkflowAuthorizationError,
+    WorkflowCommandContext,
     WorkflowControlPlane,
     WorkflowDatabase,
     WorkflowJobProposal,
@@ -103,6 +106,42 @@ async def test_rejects_unauthorized_creation_without_mutation(
 
     assert await workflow_count(migrated_postgres_url) == 0
     await database.dispose()
+
+
+async def test_rejects_unauthorized_trace_read(
+    control_plane: WorkflowControlPlane,
+):
+    trace = await control_plane.create_workflow(create_command())
+    unauthorized_context = WorkflowCommandContext(
+        actor_party_id=uuid4(),
+        organization_party_id=uuid4(),
+        cause_type="message",
+        cause_id="unauthorized-read",
+    )
+
+    with pytest.raises(WorkflowAuthorizationError):
+        await control_plane.read_workflow_trace(trace.workflow.id, unauthorized_context)
+
+
+async def test_rejects_mismatched_renewal_period_without_mutation(
+    control_plane: WorkflowControlPlane,
+    migrated_postgres_url: str,
+):
+    original = renewal_proposal()
+    draft = original.jobs[0].model_copy(
+        update={
+            "input": {
+                "recipient_name": "John Smith",
+                "renewal_period": "2025",
+            }
+        }
+    )
+    proposal = original.model_copy(update={"jobs": (draft, original.jobs[1])})
+
+    with pytest.raises(InvalidWorkflowProposalError, match="renewal period"):
+        await control_plane.create_workflow(create_command(proposal))
+
+    assert await workflow_count(migrated_postgres_url) == 0
 
 
 def test_job_proposal_rejects_caller_selected_execution_configuration():

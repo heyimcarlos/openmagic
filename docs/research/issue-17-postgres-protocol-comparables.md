@@ -13,8 +13,10 @@ This note records the implementation convergence used by
 - [SQLAlchemy constraint and index definitions](https://docs.sqlalchemy.org/en/20/core/constraints.html).
 - [Alembic asyncio cookbook](https://alembic.sqlalchemy.org/en/latest/cookbook.html#using-asyncio-with-alembic).
 - [Testcontainers PostgreSQL module](https://testcontainers-python.readthedocs.io/en/latest/modules/postgres/README.html).
-- Open SWE `pyproject.toml` at the local reference snapshot.
-- Deep Agents `libs/deepagents/pyproject.toml` at the local reference snapshot.
+- Open SWE `pyproject.toml` at commit
+  `30832d29bcfa12c5669c374add585e8b829a8ac2`.
+- Deep Agents `libs/deepagents/pyproject.toml` at commit
+  `14f384fc0083c07a7f44f97543b40b74cf93c13f`.
 
 ## Observed convergence
 

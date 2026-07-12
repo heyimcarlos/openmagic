@@ -47,4 +47,7 @@ async def test_creates_atomic_renewal_workflow_graph(control_plane: WorkflowCont
 
     assert trace.runs == ()
     assert trace.notifications == ()
-    assert await control_plane.read_workflow_trace(trace.workflow.id) == trace
+    assert (
+        await control_plane.read_workflow_trace(trace.workflow.id, create_command().context)
+        == trace
+    )
