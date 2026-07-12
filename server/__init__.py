@@ -1,3 +1,5 @@
-"""OpenPoke Python server package."""
+"""OpenMagic server package.
 
-from .app import app
+Import the FastAPI application from :mod:`server.app`. Keeping package imports
+side-effect free lets domain modules and migration tooling load independently.
+"""
