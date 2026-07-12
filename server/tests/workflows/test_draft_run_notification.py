@@ -34,6 +34,7 @@ from server.workflows.identity_models import WorkflowParticipantRoleRow
 from server.workflows.models import (
     NotificationRow,
     WorkflowEventRow,
+    WorkflowJobDependencyRow,
     WorkflowJobRow,
     WorkflowJobRunRow,
 )
@@ -638,7 +639,6 @@ async def test_fresh_interaction_reloads_packet_and_presents_exact_send_input(
                 ]
             }
         if calls == 2:
-            send = next(job for job in created.jobs if job.kind != DRAFT_RENEWAL_EMAIL_KIND)
             return {
                 "choices": [
                     {
@@ -649,7 +649,7 @@ async def test_fresh_interaction_reloads_packet_and_presents_exact_send_input(
                                     "id": "present",
                                     "function": {
                                         "name": "present_approval_request",
-                                        "arguments": json.dumps({"send_job_id": str(send.id)}),
+                                        "arguments": "{}",
                                     },
                                 }
                             ],
@@ -692,4 +692,184 @@ async def test_fresh_interaction_reloads_packet_and_presents_exact_send_input(
     async with factory.create("notification-worker", 2) as second:
         second_runtime_id = second.runtime_instance_id
     assert first_runtime_id != second_runtime_id
+    await database.dispose()
+
+
+async def test_interaction_revalidates_delivery_lease_before_presentation(
+    control_plane: WorkflowControlPlane,
+    migrated_postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    created = await control_plane.create_workflow(create_command())
+    claimed = await control_plane.claim_job(claim_command())
+    assert claimed is not None
+    await control_plane.report_run_result(
+        ReportRunResultCommand(run_id=claimed.run_id, result=successful_draft())
+    )
+    llm_calls = 0
+
+    async def fake_llm_call(self, _system_prompt, _messages):
+        nonlocal llm_calls
+        llm_calls += 1
+        if llm_calls == 1:
+            name = "read_workflow_packet"
+            arguments = {"workflow_id": str(created.workflow.id)}
+        elif llm_calls == 2:
+            name = "present_approval_request"
+            arguments = {}
+        else:
+            return {"choices": [{"message": {"content": "Unable.", "tool_calls": []}}]}
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": name,
+                                "function": {
+                                    "name": name,
+                                    "arguments": json.dumps(arguments),
+                                },
+                            }
+                        ],
+                    }
+                }
+            ]
+        }
+
+    monkeypatch.setattr(InteractionAgentRuntime, "_make_llm_call", fake_llm_call)
+    original_resolve = control_plane.resolve_notification_presentation
+    resolve_calls = 0
+
+    async def stale_on_presentation(*args):
+        nonlocal resolve_calls
+        resolve_calls += 1
+        if resolve_calls > 1:
+            raise NotificationLifecycleError("Notification delivery lease is stale")
+        return await original_resolve(*args)
+
+    monkeypatch.setattr(control_plane, "resolve_notification_presentation", stale_on_presentation)
+    database = WorkflowDatabase(migrated_postgres_url)
+    presenter = _ApprovalPresenter()
+    worker = NotificationWorker(
+        control_plane=control_plane,
+        interactions=FreshWorkflowInteractionFactory(
+            control_plane=control_plane,
+            retrieval=WorkflowRetrieval(database=database, cursor_secret=b"stale-presentation"),
+            presenter=presenter,
+            settings=Settings(openrouter_api_key="test-key"),
+            organization_party_id=ORGANIZATION_ID,
+        ),
+        worker_id="notification-worker",
+    )
+
+    with pytest.raises(NotificationLifecycleError):
+        await worker.run_once()
+
+    assert presenter.effects == []
+    trace = await control_plane.read_workflow_trace(created.workflow.id, create_command().context)
+    assert trace.notifications[0].status == "queued"
+    await database.dispose()
+
+
+async def test_presentation_resolves_current_replacement_send_job(
+    control_plane: WorkflowControlPlane,
+    migrated_postgres_url: str,
+):
+    created = await control_plane.create_workflow(create_command())
+    claimed = await control_plane.claim_job(claim_command())
+    assert claimed is not None
+    await control_plane.report_run_result(
+        ReportRunResultCommand(run_id=claimed.run_id, result=successful_draft())
+    )
+    delivery = await control_plane.claim_notification(
+        ClaimNotificationCommand(
+            worker_id="notification-worker",
+            lease_duration=timedelta(minutes=5),
+        )
+    )
+    assert delivery is not None
+    database = WorkflowDatabase(migrated_postgres_url)
+    async with database.transaction() as session:
+        old_send = await session.scalar(
+            sa.select(WorkflowJobRow).where(
+                WorkflowJobRow.workflow_id == created.workflow.id,
+                WorkflowJobRow.kind != DRAFT_RENEWAL_EMAIL_KIND,
+            )
+        )
+        assert old_send is not None
+        old_send.status = "cancelled"
+        replacement = WorkflowJobRow(
+            workflow_id=old_send.workflow_id,
+            kind=old_send.kind,
+            status="waiting",
+            attempts=0,
+            max_attempts=old_send.max_attempts,
+            input=old_send.input,
+            revises_job_id=old_send.id,
+        )
+        session.add(replacement)
+        await session.flush()
+        session.add(
+            WorkflowJobDependencyRow(
+                workflow_id=old_send.workflow_id,
+                job_id=replacement.id,
+                depends_on_job_id=claimed.job_id,
+            )
+        )
+        replacement_id = replacement.id
+
+    presentation = await control_plane.resolve_notification_presentation(
+        delivery.notification_id,
+        delivery.workflow_event_id,
+        delivery.workflow_id,
+        "notification-worker",
+        delivery.delivery_attempt,
+    )
+
+    assert presentation.draft_job_id == claimed.job_id
+    assert presentation.send_job_id == replacement_id
+    await database.dispose()
+
+
+async def test_presentation_rejects_send_job_that_no_longer_waits_for_approval(
+    control_plane: WorkflowControlPlane,
+    migrated_postgres_url: str,
+):
+    created = await control_plane.create_workflow(create_command())
+    claimed = await control_plane.claim_job(claim_command())
+    assert claimed is not None
+    await control_plane.report_run_result(
+        ReportRunResultCommand(run_id=claimed.run_id, result=successful_draft())
+    )
+    delivery = await control_plane.claim_notification(
+        ClaimNotificationCommand(
+            worker_id="notification-worker",
+            lease_duration=timedelta(minutes=5),
+        )
+    )
+    assert delivery is not None
+    database = WorkflowDatabase(migrated_postgres_url)
+    async with database.transaction() as session:
+        send = await session.scalar(
+            sa.select(WorkflowJobRow).where(
+                WorkflowJobRow.workflow_id == created.workflow.id,
+                WorkflowJobRow.kind != DRAFT_RENEWAL_EMAIL_KIND,
+            )
+        )
+        assert send is not None
+        send.status = "queued"
+
+    with pytest.raises(
+        NotificationLifecycleError,
+        match="does not identify one current Send Job",
+    ):
+        await control_plane.resolve_notification_presentation(
+            delivery.notification_id,
+            delivery.workflow_event_id,
+            delivery.workflow_id,
+            "notification-worker",
+            delivery.delivery_attempt,
+        )
     await database.dispose()

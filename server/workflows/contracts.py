@@ -141,9 +141,11 @@ class ReportNotificationFailureCommand(WorkflowContract):
 
 
 class NotificationPresentationContext(WorkflowContract):
-    """Trusted destination resolved from stable Notification identifiers."""
+    """Trusted presentation target resolved from durable Workflow state."""
 
     destination_party_id: UUID
+    draft_job_id: UUID
+    send_job_id: UUID
 
 
 class WorkflowTraceWorkflow(WorkflowContract):

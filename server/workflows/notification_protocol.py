@@ -17,7 +17,12 @@ from .contracts import (
 )
 from .database import WorkflowDatabase
 from .errors import NotificationLifecycleError
-from .models import NotificationRow, WorkflowEventRow
+from .models import (
+    NotificationRow,
+    WorkflowEventRow,
+    WorkflowJobDependencyRow,
+    WorkflowJobRow,
+)
 
 
 class WorkflowNotificationProtocol:
@@ -143,21 +148,93 @@ class WorkflowNotificationProtocol:
                     )
                 )
             ).one_or_none()
-        if row is None:
-            raise NotificationLifecycleError("Notification identifiers do not match")
-        notification, event = row
-        self._require_current_lease(notification, worker_id, delivery_attempt)
-        if (
-            notification.kind != "approval_required"
-            or notification.destination_type != "party"
-            or event.event_type != "draft_ready"
-        ):
-            raise NotificationLifecycleError("Notification is not deliverable for approval")
-        try:
-            destination_party_id = UUID(notification.destination_id)
-        except ValueError as exc:
-            raise NotificationLifecycleError("Notification destination is invalid") from exc
-        return NotificationPresentationContext(destination_party_id=destination_party_id)
+            if row is None:
+                raise NotificationLifecycleError("Notification identifiers do not match")
+            notification, event = row
+            self._require_current_lease(notification, worker_id, delivery_attempt)
+            if (
+                notification.kind != "approval_required"
+                or notification.destination_type != "party"
+                or event.event_type != "draft_ready"
+                or event.job_id is None
+            ):
+                raise NotificationLifecycleError("Notification is not deliverable for approval")
+            try:
+                destination_party_id = UUID(notification.destination_id)
+            except ValueError as exc:
+                raise NotificationLifecycleError("Notification destination is invalid") from exc
+
+            draft = await session.scalar(
+                sa.select(WorkflowJobRow).where(
+                    WorkflowJobRow.workflow_id == workflow_id,
+                    WorkflowJobRow.id == event.job_id,
+                    WorkflowJobRow.status == "succeeded",
+                )
+            )
+            candidates = (
+                await session.scalars(
+                    sa.select(WorkflowJobRow)
+                    .join(
+                        WorkflowJobDependencyRow,
+                        sa.and_(
+                            WorkflowJobDependencyRow.workflow_id == WorkflowJobRow.workflow_id,
+                            WorkflowJobDependencyRow.job_id == WorkflowJobRow.id,
+                        ),
+                    )
+                    .where(
+                        WorkflowJobRow.workflow_id == workflow_id,
+                        WorkflowJobRow.kind == "gmail.send_email.v1",
+                        WorkflowJobRow.status == "waiting",
+                        WorkflowJobDependencyRow.depends_on_job_id == event.job_id,
+                        ~sa.exists(
+                            sa.select(WorkflowEventRow.id).where(
+                                WorkflowEventRow.workflow_id == workflow_id,
+                                WorkflowEventRow.job_id == WorkflowJobRow.id,
+                                WorkflowEventRow.event_type == "approval_granted",
+                            )
+                        ),
+                    )
+                    .order_by(WorkflowJobRow.created_at, WorkflowJobRow.id)
+                )
+            ).all()
+            eligible = [
+                job
+                for job in candidates
+                if await self._dependencies_succeeded(session, workflow_id, job.id)
+            ]
+            if draft is None or len(eligible) != 1:
+                raise NotificationLifecycleError(
+                    "Notification does not identify one current Send Job awaiting approval"
+                )
+            return NotificationPresentationContext(
+                destination_party_id=destination_party_id,
+                draft_job_id=draft.id,
+                send_job_id=eligible[0].id,
+            )
+
+    @staticmethod
+    async def _dependencies_succeeded(
+        session: AsyncSession,
+        workflow_id: UUID,
+        job_id: UUID,
+    ) -> bool:
+        unresolved = await session.scalar(
+            sa.select(WorkflowJobDependencyRow.job_id)
+            .join(
+                WorkflowJobRow,
+                sa.and_(
+                    WorkflowJobRow.workflow_id == WorkflowJobDependencyRow.workflow_id,
+                    WorkflowJobRow.id == WorkflowJobDependencyRow.depends_on_job_id,
+                ),
+            )
+            .where(
+                WorkflowJobDependencyRow.workflow_id == workflow_id,
+                WorkflowJobDependencyRow.job_id == job_id,
+                WorkflowJobRow.status != "succeeded",
+            )
+            .limit(1)
+        )
+        return unresolved is None
 
     @staticmethod
     async def _recover_expired(session: AsyncSession, now: datetime) -> None:

@@ -65,7 +65,7 @@ class _ReadPacketArguments(_NotificationArguments):
 
 
 class _PresentArguments(_NotificationArguments):
-    send_job_id: UUID
+    pass
 
 
 _NOTIFICATION_TOOLS: tuple[dict[str, Any], ...] = (
@@ -81,15 +81,15 @@ _NOTIFICATION_TOOLS: tuple[dict[str, Any], ...] = (
         "type": "function",
         "function": {
             "name": "present_approval_request",
-            "description": "Present the exact resolved Send Job input for explicit approval.",
+            "description": "Present the exact Control Plane-selected Send Job for approval.",
             "parameters": _PresentArguments.model_json_schema(),
         },
     },
 )
 
 _NOTIFICATION_PROMPT = """You handle one Workflow Notification in a fresh context.
-Read the supplied Workflow Packet, find the one waiting Gmail Send Job, then call
-present_approval_request with its Job ID. Do not approve, edit, summarize, or
+Read the supplied Workflow Packet, verify that approval is required, then call
+present_approval_request. Do not approve, edit, summarize, select a Job, or
 paraphrase the email. You have no previous conversation context."""
 
 
@@ -98,14 +98,24 @@ class _NotificationToolbox:
         self,
         *,
         retrieval: WorkflowRetrieval,
+        control_plane: WorkflowControlPlane,
         presenter: ApprovalPresenter,
         notification_id: UUID,
+        workflow_event_id: UUID,
+        workflow_id: UUID,
         destination_party_id: UUID,
+        worker_id: str,
+        delivery_attempt: int,
     ) -> None:
         self._retrieval = retrieval
+        self._control_plane = control_plane
         self._presenter = presenter
         self._notification_id = notification_id
+        self._workflow_event_id = workflow_event_id
+        self._workflow_id = workflow_id
         self._destination_party_id = destination_party_id
+        self._worker_id = worker_id
+        self._delivery_attempt = delivery_attempt
 
     @property
     def schemas(self) -> tuple[dict[str, Any], ...]:
@@ -128,14 +138,25 @@ class _NotificationToolbox:
             context.loaded_packet = packet
             return ToolResult(success=True, payload=packet.model_dump(mode="json"))
         if name == "present_approval_request":
-            request = _PresentArguments.model_validate(arguments)
+            _PresentArguments.model_validate(arguments)
             packet = context.loaded_packet
             if packet is None:
                 return ToolResult(success=False, payload={"code": "workflow_packet_required"})
+            presentation = await self._control_plane.resolve_notification_presentation(
+                self._notification_id,
+                self._workflow_event_id,
+                self._workflow_id,
+                self._worker_id,
+                self._delivery_attempt,
+            )
+            if presentation.destination_party_id != self._destination_party_id:
+                return ToolResult(success=False, payload={"code": "destination_changed"})
             send_jobs = [
                 job
                 for job in packet.jobs
-                if job.kind == GMAIL_SEND_EMAIL_KIND and job.job_id == request.send_job_id
+                if job.kind == GMAIL_SEND_EMAIL_KIND
+                and job.job_id == presentation.send_job_id
+                and job.status == "waiting"
             ]
             if len(send_jobs) != 1 or send_jobs[0].resolved_input is None:
                 return ToolResult(success=False, payload={"code": "resolved_send_required"})
@@ -207,9 +228,14 @@ class FreshWorkflowInteraction:
         )
         toolbox = _NotificationToolbox(
             retrieval=self._retrieval,
+            control_plane=self._control_plane,
             presenter=self._presenter,
             notification_id=notification_id,
+            workflow_event_id=workflow_event_id,
+            workflow_id=workflow_id,
             destination_party_id=presentation.destination_party_id,
+            worker_id=self._worker_id,
+            delivery_attempt=self._delivery_attempt,
         )
         runtime = InteractionAgentRuntime(
             toolbox=toolbox,
