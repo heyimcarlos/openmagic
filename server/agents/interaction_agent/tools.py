@@ -2,23 +2,13 @@
 
 import asyncio
 import json
-from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any
 
 from ...logging_config import logger
 from ...services.conversation import get_conversation_log
 from ...services.execution import get_agent_roster, get_execution_agent_logs
 from ..execution_agent.batch_manager import ExecutionBatchManager
-
-
-@dataclass
-class ToolResult:
-    """Standardized payload returned by interaction-agent tools."""
-
-    success: bool
-    payload: Any = None
-    user_message: Optional[str] = None
-    recorded_reply: bool = False
+from .toolbox import InteractionToolContext, ToolResult
 
 # Tool schemas for OpenRouter
 TOOL_SCHEMAS = [
@@ -32,9 +22,12 @@ TOOL_SCHEMAS = [
                 "properties": {
                     "agent_name": {
                         "type": "string",
-                        "description": "Human-readable agent name describing its purpose (e.g., 'Vercel Job Offer', 'Email to Sharanjeet'). This name will be used to identify and potentially reuse the agent."
+                        "description": "Human-readable agent name describing its purpose (e.g., 'Vercel Job Offer', 'Email to Sharanjeet'). This name will be used to identify and potentially reuse the agent.",
                     },
-                    "instructions": {"type": "string", "description": "Instructions for the agent to execute."},
+                    "instructions": {
+                        "type": "string",
+                        "description": "Instructions for the agent to execute.",
+                    },
                 },
                 "required": ["agent_name", "instructions"],
                 "additionalProperties": False,
@@ -106,6 +99,7 @@ TOOL_SCHEMAS = [
 ]
 
 _EXECUTION_BATCH_MANAGER = ExecutionBatchManager()
+_BACKGROUND_TASKS: set[asyncio.Task[None]] = set()
 
 
 # Create or reuse execution agent and dispatch instructions asynchronously
@@ -130,7 +124,7 @@ def send_message_to_agent(agent_name: str, instructions: str) -> ToolResult:
             status = "SUCCESS" if result.success else "FAILED"
             logger.info(f"Agent '{agent_name}' completed: {status}")
         except Exception as exc:  # pragma: no cover - defensive
-            logger.error(f"Agent '{agent_name}' failed: {str(exc)}")
+            logger.error(f"Agent '{agent_name}' failed: {exc!s}")
 
     try:
         loop = asyncio.get_running_loop()
@@ -138,7 +132,9 @@ def send_message_to_agent(agent_name: str, instructions: str) -> ToolResult:
         logger.error("No running event loop available for async execution")
         return ToolResult(success=False, payload={"error": "No event loop available"})
 
-    loop.create_task(_execute_async())
+    task = loop.create_task(_execute_async())
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_TASKS.discard)
 
     return ToolResult(
         success=True,
@@ -193,10 +189,9 @@ def send_draft(
 def wait(reason: str) -> ToolResult:
     """Wait silently and add a wait log entry that is not visible to the user."""
     log = get_conversation_log()
-    
+
     # Record a dedicated wait entry so the UI knows to ignore it
     log.record_wait(reason)
-    
 
     return ToolResult(
         success=True,
@@ -243,3 +238,20 @@ def handle_tool_call(name: str, arguments: Any) -> ToolResult:
     except Exception as exc:  # pragma: no cover - defensive
         logger.error("tool call failed", extra={"tool": name, "error": str(exc)})
         return ToolResult(success=False, payload={"error": "Failed to execute"})
+
+
+class LegacyInteractionToolbox:
+    """Preserve the inherited named-agent tools as an explicit baseline."""
+
+    @property
+    def schemas(self) -> tuple[dict[str, Any], ...]:
+        return tuple(TOOL_SCHEMAS)
+
+    async def invoke(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        context: InteractionToolContext,
+    ) -> ToolResult:
+        del context
+        return handle_tool_call(name, arguments)

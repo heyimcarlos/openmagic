@@ -2,7 +2,6 @@
 
 from html import escape
 from pathlib import Path
-from typing import Dict, List
 
 from ...services.execution import get_agent_roster
 
@@ -21,9 +20,9 @@ def prepare_message_with_history(
     latest_text: str,
     transcript: str,
     message_type: str = "user",
-) -> List[Dict[str, str]]:
+) -> list[dict[str, str]]:
     """Compose a message that bundles history, roster, and the latest turn."""
-    sections: List[str] = []
+    sections: list[str] = []
 
     sections.append(_render_conversation_history(transcript))
     sections.append(f"<active_agents>\n{_render_active_agents()}\n</active_agents>")
@@ -50,7 +49,7 @@ def _render_active_agents() -> str:
     if not agents:
         return "None"
 
-    rendered: List[str] = []
+    rendered: list[str] = []
     for agent_name in agents:
         name = escape(agent_name or "agent", quote=True)
         rendered.append(f'<agent name="{name}" />')

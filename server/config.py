@@ -3,7 +3,7 @@
 import os
 from functools import lru_cache
 from pathlib import Path
-from typing import List, Optional
+from typing import Literal, cast
 
 from pydantic import BaseModel, Field
 
@@ -39,6 +39,13 @@ def _env_int(name: str, fallback: int) -> int:
         return fallback
 
 
+def _interaction_mode() -> Literal["workflow", "legacy"]:
+    value = os.getenv("OPENMAGIC_INTERACTION_MODE", "workflow")
+    if value not in {"workflow", "legacy"}:
+        raise ValueError("OPENMAGIC_INTERACTION_MODE must be 'workflow' or 'legacy'")
+    return cast(Literal["workflow", "legacy"], value)
+
+
 class Settings(BaseModel):
     """Application settings with lightweight env fallbacks."""
 
@@ -58,28 +65,43 @@ class Settings(BaseModel):
     email_classifier_model: str = Field(default="anthropic/claude-sonnet-4")
 
     # Credentials / integrations
-    openrouter_api_key: Optional[str] = Field(default=os.getenv("OPENROUTER_API_KEY"))
-    composio_gmail_auth_config_id: Optional[str] = Field(default=os.getenv("COMPOSIO_GMAIL_AUTH_CONFIG_ID"))
-    composio_api_key: Optional[str] = Field(default=os.getenv("COMPOSIO_API_KEY"))
+    openrouter_api_key: str | None = Field(default=os.getenv("OPENROUTER_API_KEY"))
+    composio_gmail_auth_config_id: str | None = Field(
+        default=os.getenv("COMPOSIO_GMAIL_AUTH_CONFIG_ID")
+    )
+    composio_api_key: str | None = Field(default=os.getenv("COMPOSIO_API_KEY"))
+    database_url: str | None = Field(default=os.getenv("OPENMAGIC_DATABASE_URL"))
+    workflow_cursor_secret: str | None = Field(
+        default=os.getenv("OPENMAGIC_WORKFLOW_CURSOR_SECRET")
+    )
+    workflow_broker_party_id: str | None = Field(
+        default=os.getenv("OPENMAGIC_WORKFLOW_BROKER_PARTY_ID")
+    )
+    workflow_organization_party_id: str | None = Field(
+        default=os.getenv("OPENMAGIC_WORKFLOW_ORGANIZATION_PARTY_ID")
+    )
+    interaction_mode: Literal["workflow", "legacy"] = Field(default_factory=_interaction_mode)
 
     # HTTP behaviour
     cors_allow_origins_raw: str = Field(default=os.getenv("OPENPOKE_CORS_ALLOW_ORIGINS", "*"))
     enable_docs: bool = Field(default=os.getenv("OPENPOKE_ENABLE_DOCS", "1") != "0")
-    docs_url: Optional[str] = Field(default=os.getenv("OPENPOKE_DOCS_URL", "/docs"))
+    docs_url: str | None = Field(default=os.getenv("OPENPOKE_DOCS_URL", "/docs"))
 
     # Summarisation controls
     conversation_summary_threshold: int = Field(default=100)
     conversation_summary_tail_size: int = Field(default=10)
 
     @property
-    def cors_allow_origins(self) -> List[str]:
+    def cors_allow_origins(self) -> list[str]:
         """Parse CORS origins from comma-separated string."""
         if self.cors_allow_origins_raw.strip() in {"", "*"}:
             return ["*"]
-        return [origin.strip() for origin in self.cors_allow_origins_raw.split(",") if origin.strip()]
+        return [
+            origin.strip() for origin in self.cors_allow_origins_raw.split(",") if origin.strip()
+        ]
 
     @property
-    def resolved_docs_url(self) -> Optional[str]:
+    def resolved_docs_url(self) -> str | None:
         """Return documentation URL when docs are enabled."""
         return (self.docs_url or "/docs") if self.enable_docs else None
 

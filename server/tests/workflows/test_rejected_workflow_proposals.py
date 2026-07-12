@@ -131,7 +131,7 @@ async def test_rejects_unauthorized_trace_read(
 
 async def test_rejects_authorized_cross_organization_trace_read(
     migrated_postgres_url: str,
-    clean_workflow_database,
+    seeded_workflow_identity,
 ):
     other_broker_id = uuid4()
     other_organization_id = uuid4()
@@ -163,7 +163,7 @@ async def test_rejects_authorized_cross_organization_trace_read(
 
 async def test_create_result_does_not_depend_on_post_commit_read_authority(
     migrated_postgres_url: str,
-    clean_workflow_database,
+    seeded_workflow_identity,
 ):
     class CreateOnlyAuthority:
         async def can_create_workflow(self, context, workflow_kind):

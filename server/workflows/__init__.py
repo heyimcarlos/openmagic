@@ -1,8 +1,11 @@
 """Public Workflow Control Plane interface."""
 
+# Import relational identity mappings so the shared Alembic metadata is complete.
+from . import identity_models as _identity_models  # noqa: F401
 from .authority import StaticWorkflowAuthority, WorkflowAuthority, WorkflowAuthorizationScope
 from .contracts import (
     CreateWorkflowCommand,
+    ProposeWorkflowJobsCommand,
     WorkflowCommandContext,
     WorkflowJobProposal,
     WorkflowProposal,
@@ -10,12 +13,16 @@ from .contracts import (
 )
 from .control_plane import WorkflowControlPlane
 from .database import WorkflowDatabase
+from .demo_seed import seed_v0_demo
 from .errors import (
     InvalidWorkflowProposalError,
+    InvalidWorkflowSearchError,
+    StaleWorkflowCursorError,
     UnknownWorkflowJobKindError,
     UnknownWorkflowKindError,
     WorkflowAuthorizationError,
     WorkflowError,
+    WorkflowLifecycleError,
     WorkflowNotFoundError,
 )
 from .models import Base as WorkflowModelBase
@@ -28,6 +35,13 @@ from .registry import (
     WorkflowKindRegistry,
     default_workflow_registry,
 )
+from .retrieval import WorkflowRetrieval
+from .retrieval_contracts import (
+    WorkflowInspectionContext,
+    WorkflowPacket,
+    WorkflowSearchPage,
+    WorkflowSearchRequest,
+)
 
 __all__ = [
     "DRAFT_RENEWAL_EMAIL_KIND",
@@ -36,6 +50,9 @@ __all__ = [
     "CreateWorkflowCommand",
     "ExecutionStrategy",
     "InvalidWorkflowProposalError",
+    "InvalidWorkflowSearchError",
+    "ProposeWorkflowJobsCommand",
+    "StaleWorkflowCursorError",
     "StaticWorkflowAuthority",
     "UnknownWorkflowJobKindError",
     "UnknownWorkflowKindError",
@@ -46,12 +63,19 @@ __all__ = [
     "WorkflowControlPlane",
     "WorkflowDatabase",
     "WorkflowError",
+    "WorkflowInspectionContext",
     "WorkflowJobProposal",
     "WorkflowKindContract",
     "WorkflowKindRegistry",
+    "WorkflowLifecycleError",
     "WorkflowModelBase",
     "WorkflowNotFoundError",
+    "WorkflowPacket",
     "WorkflowProposal",
+    "WorkflowRetrieval",
+    "WorkflowSearchPage",
+    "WorkflowSearchRequest",
     "WorkflowTrace",
     "default_workflow_registry",
+    "seed_v0_demo",
 ]

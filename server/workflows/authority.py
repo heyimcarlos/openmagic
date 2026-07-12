@@ -58,10 +58,11 @@ class StaticWorkflowAuthority:
     async def can_read_workflow(
         self,
         context: WorkflowCommandContext,
-        _workflow_id: UUID,
+        workflow_id: UUID,
         workflow_kind: str,
         scope: WorkflowAuthorizationScope,
     ) -> bool:
+        del workflow_id
         grant = (context.actor_party_id, context.organization_party_id, workflow_kind)
         return (
             grant in self.grants

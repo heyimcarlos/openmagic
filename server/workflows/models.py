@@ -42,6 +42,11 @@ class WorkflowRow(Base):
     objective: Mapped[str] = mapped_column(sa.Text, nullable=False)
     status: Mapped[str] = mapped_column(sa.Text, nullable=False)
     input: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    organization_party_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        sa.ForeignKey("parties.id", name="fk_workflows_organization_party"),
+        nullable=False,
+    )
     corrects_workflow_id: Mapped[UUID | None] = mapped_column(
         PGUUID(as_uuid=True),
         sa.ForeignKey("workflows.id", name="fk_workflows_correction"),

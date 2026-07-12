@@ -3,16 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
-from typing import Optional, Set
+from contextlib import suppress
+from datetime import UTC, datetime
 
 from ..agents.execution_agent.batch_manager import ExecutionBatchManager
-from ..agents.execution_agent.runtime import ExecutionResult
+from ..config import get_settings
 from ..logging_config import logger
 from .triggers import TriggerRecord, get_trigger_service
-
-
-UTC = timezone.utc
 
 
 def _utc_now() -> datetime:
@@ -29,13 +26,17 @@ class TriggerScheduler:
     def __init__(self, poll_interval_seconds: float = 10.0) -> None:
         self._poll_interval = poll_interval_seconds
         self._service = get_trigger_service()
-        self._task: Optional[asyncio.Task[None]] = None
+        self._task: asyncio.Task[None] | None = None
+        self._execution_tasks: set[asyncio.Task[None]] = set()
         self._running = False
-        self._in_flight: Set[int] = set()
+        self._in_flight: set[int] = set()
         self._lock = asyncio.Lock()
 
     async def start(self) -> None:
         async with self._lock:
+            if get_settings().interaction_mode != "legacy":
+                logger.info("Legacy Trigger scheduler disabled in Workflow mode")
+                return
             if self._task and not self._task.done():
                 return
             loop = asyncio.get_running_loop()
@@ -48,12 +49,17 @@ class TriggerScheduler:
             self._running = False
             if self._task:
                 self._task.cancel()
-                try:
+                with suppress(asyncio.CancelledError):
                     await self._task
-                except asyncio.CancelledError:
-                    pass
                 self._task = None
-                logger.info("Trigger scheduler stopped")
+            tasks = tuple(self._execution_tasks)
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            self._execution_tasks.clear()
+            self._in_flight.clear()
+            logger.info("Trigger scheduler stopped")
 
     async def _run(self) -> None:
         try:
@@ -66,6 +72,8 @@ class TriggerScheduler:
             logger.exception("Trigger scheduler loop crashed", extra={"error": str(exc)})
 
     async def _poll_once(self) -> None:
+        if get_settings().interaction_mode != "legacy":
+            return
         now = _utc_now()
         due_triggers = self._service.get_due_triggers(before=now)
         if not due_triggers:
@@ -75,7 +83,12 @@ class TriggerScheduler:
             if trigger.id in self._in_flight:
                 continue
             self._in_flight.add(trigger.id)
-            asyncio.create_task(self._execute_trigger(trigger), name=f"trigger-{trigger.id}")
+            task = asyncio.create_task(
+                self._execute_trigger(trigger),
+                name=f"trigger-{trigger.id}",
+            )
+            self._execution_tasks.add(task)
+            task.add_done_callback(self._execution_tasks.discard)
 
     async def _execute_trigger(self, trigger: TriggerRecord) -> None:
         try:
@@ -149,7 +162,7 @@ class TriggerScheduler:
         )
 
 
-_scheduler_instance: Optional[TriggerScheduler] = None
+_scheduler_instance: TriggerScheduler | None = None
 
 
 def get_trigger_scheduler() -> TriggerScheduler:

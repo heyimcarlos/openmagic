@@ -5,7 +5,8 @@ OpenMagic is a simplified, open-source take on [Interaction Company’s](https:/
 - Multi-agent FastAPI backend that mirrors Poke's interaction/execution split, powered by [OpenRouter](https://openrouter.ai/).
 - Gmail tooling via [Composio](https://composio.dev/) for drafting/replying/forwarding without leaving chat.
 - Trigger scheduler and background watchers for reminders and "important email" alerts.
-- Next.js web UI that proxies everything through the shared `.env`, so plugging in API keys is the only setup.
+- Next.js web UI that proxies through the shared `.env`, with PostgreSQL and an
+  explicit local identity seed for the durable Workflow path.
 
 ## Requirements
 - Python 3.11+
@@ -50,19 +51,28 @@ OpenMagic is a simplified, open-source take on [Interaction Company’s](https:/
    uv sync --locked --group dev
    uv run alembic upgrade head
    ```
-6. **Install frontend dependencies:**
+6. **Seed the local V0 Workflow and trusted demo identity:**
+   ```bash
+   uv run python -m server.scripts.seed_v0_demo
+   ```
+   This explicit local seed creates the Broker, Organization Membership,
+   Policyholder, active renewal Workflow, and verified identifiers referenced
+   by `.env.example`. Migrations never infer current authority from historical
+   Workflow Events. A production environment must provision these records from
+   its trusted identity source instead of using the demo seed.
+7. **Install frontend dependencies:**
    ```bash
    npm install --prefix web
    ```
-7. **Start the FastAPI server:**
+8. **Start the FastAPI server:**
    ```bash
    uv run python -m server.server --reload
    ```
-8. **Start the Next.js app (new terminal):**
+9. **Start the Next.js app (new terminal):**
    ```bash
    npm run dev --prefix web
    ```
-9. **Connect Gmail for email workflows.** With both services running, open [http://localhost:3000](http://localhost:3000), head to *Settings → Gmail*, and complete the Composio OAuth flow. This step is required for email drafting, replies, and the important-email monitor.
+10. **Connect Gmail for email workflows.** With both services running, open [http://localhost:3000](http://localhost:3000), head to *Settings → Gmail*, and complete the Composio OAuth flow. This step is required for email drafting, replies, and the important-email monitor.
 
 The web app proxies API calls to the Python server using the values in `.env`, so keeping both processes running is required for end-to-end flows.
 
@@ -78,10 +88,10 @@ The Workflow integration suite requires PostgreSQL. If
 PostgreSQL 17 container.
 
 ```bash
-uv run ruff format --check server/workflows server/tests server/migrations
-uv run ruff check server/workflows server/tests server/migrations
-uv run ty check server/workflows
-uv run pytest server/tests/workflows
+uv run ruff format --check server/workflows server/agents/interaction_agent server/tests server/migrations
+uv run ruff check server/workflows server/agents/interaction_agent server/tests server/migrations
+uv run ty check server/workflows server/agents/interaction_agent
+uv run pytest
 ```
 
 ## License

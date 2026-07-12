@@ -13,7 +13,12 @@ from server.tests.workflows.factories import create_command
 from server.workflows import WorkflowControlPlane, WorkflowDatabase
 
 PROTOCOL_TABLES = {
+    "parties",
+    "party_identifiers",
+    "organization_memberships",
     "workflows",
+    "workflow_participants",
+    "workflow_participant_roles",
     "workflow_jobs",
     "workflow_job_dependencies",
     "workflow_job_runs",
@@ -22,6 +27,9 @@ PROTOCOL_TABLES = {
 }
 
 EXPECTED_INDEXES = {
+    "party_identifiers": {"uq_party_identifiers_current_value"},
+    "organization_memberships": {"uq_organization_memberships_current"},
+    "workflow_participant_roles": {"uq_workflow_participant_roles_current"},
     "workflow_jobs": {
         "ix_workflow_jobs_claim",
         "uq_workflow_jobs_revises_job_id",
