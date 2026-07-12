@@ -58,9 +58,10 @@ operations relevance, testing quality, and maintainability signal.
 - Observed shape: external-provider tests use normal pytest tests with explicit
   credential-based skip conditions. Deterministic contract tests remain fast and
   runnable without provider access.
-- OpenMagic choice: use a module-level opt-in skip so collection is safe in CI,
-  while a missing required variable during an explicitly enabled run fails with
-  only the missing variable names.
+- OpenMagic choice: put a test-level opt-in skip only on the credentialed
+  journey, while deterministic recipient-evidence tests remain active in the
+  ordinary suite. An explicitly enabled run with missing configuration fails
+  with only the missing variable names.
 
 ## Language and Standards Guidance
 
@@ -82,7 +83,9 @@ operations relevance, testing quality, and maintainability signal.
   `SecretStr`.
 - Generate the correlation subject and durable identities per run.
 - Snapshot recipient message IDs before dispatch, then poll for one new message
-  matching both the in-memory subject and configured sender.
+  whose detailed sender, To, Cc, Bcc, subject, plain-text body, and body format
+  match the exact presented effect. Hold a short settlement window after the
+  first match so a duplicate fails acceptance.
 - Assert exact event counts, one adapter invocation, successful Run and Job,
   completed Workflow, delivered confirmation Notification, normalized receipt,
   and independent recipient observation.
@@ -113,3 +116,4 @@ provider Kinds require the same operational machinery.
 - [Pytest conditional skipping](https://docs.pytest.org/en/stable/how-to/skipping.html), accessed 2026-07-12
 - [HTTPX timeout guidance](https://www.python-httpx.org/advanced/timeouts/), accessed 2026-07-12
 - [Python event loop time](https://docs.python.org/3/library/asyncio-eventloop.html#asyncio.loop.time), accessed 2026-07-12
+- [AgentMail Get Message API](https://docs.agentmail.to/api-reference/inboxes/messages/get), accessed 2026-07-12

@@ -2,20 +2,20 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
-import httpx
 import pytest
 from composio import Composio
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, SecretStr
+from pydantic import BaseModel, ConfigDict, EmailStr, SecretStr
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from server.agents.interaction_agent.runtime import InteractionAgentRuntime
+from server.agents.interaction_agent.workflow_notifications import FreshWorkflowInteractionFactory
+from server.config import Settings
+from server.tests.live.agentmail import AgentMailRecipient
 from server.workflows import (
     DRAFT_RENEWAL_EMAIL_KIND,
     GMAIL_SEND_EMAIL_KIND,
@@ -27,6 +27,7 @@ from server.workflows import (
     ComposioGmailSendAdapter,
     ComposioMailboxBinding,
     CreateWorkflowCommand,
+    EmailSendEffectV1,
     NotificationWorker,
     RecordInteractionCauseCommand,
     ReportRunResultCommand,
@@ -37,6 +38,7 @@ from server.workflows import (
     WorkflowDatabase,
     WorkflowJobProposal,
     WorkflowProposal,
+    WorkflowRetrieval,
     WorkflowWorker,
     default_workflow_registry,
 )
@@ -45,14 +47,6 @@ from server.workflows.identity_models import (
     PartyIdentifierRow,
     PartyRow,
 )
-
-pytestmark = [
-    pytest.mark.skipif(
-        os.getenv("OPENMAGIC_RUN_LIVE_EMAIL_SMOKE") != "1",
-        reason="credentialed live email smoke is opt-in",
-    ),
-    pytest.mark.timeout(180),
-]
 
 
 class _LiveSettings(BaseModel):
@@ -82,134 +76,24 @@ class _LiveSettings(BaseModel):
         return cls.model_validate(values)
 
 
-class _AgentMailInbox(BaseModel):
-    model_config = ConfigDict(extra="ignore", frozen=True)
-
-    inbox_id: str
-    email: EmailStr
-
-
-class _AgentMailInboxPage(BaseModel):
-    model_config = ConfigDict(extra="ignore", frozen=True)
-
-    inboxes: tuple[_AgentMailInbox, ...]
-
-
-class _AgentMailMessage(BaseModel):
-    model_config = ConfigDict(extra="ignore", frozen=True)
-
-    message_id: str
-    subject: str
-    sender: object = Field(alias="from")
-
-
-class _AgentMailMessagePage(BaseModel):
-    model_config = ConfigDict(extra="ignore", frozen=True)
-
-    messages: tuple[_AgentMailMessage, ...]
-
-
-class _AgentMailRecipient:
-    def __init__(self, api_key: SecretStr, recipient: EmailStr) -> None:
-        self._recipient = recipient
-        self._client = httpx.AsyncClient(
-            base_url="https://api.agentmail.to/v0",
-            headers={"Authorization": f"Bearer {api_key.get_secret_value()}"},
-            timeout=20,
-        )
-
-    async def close(self) -> None:
-        await self._client.aclose()
-
-    async def message_ids(self) -> set[str]:
-        return {message.message_id for message in await self._messages()}
-
-    async def wait_for_message(
-        self,
-        *,
-        subject: str,
-        sender: EmailStr,
-        previous_ids: set[str],
-        wait_limit: timedelta,
-    ) -> bool:
-        deadline = asyncio.get_running_loop().time() + wait_limit.total_seconds()
-        while True:
-            for message in await self._messages():
-                sender_shape = json.dumps(message.sender, sort_keys=True).lower()
-                if (
-                    message.message_id not in previous_ids
-                    and message.subject == subject
-                    and str(sender).lower() in sender_shape
-                ):
-                    return True
-            if asyncio.get_running_loop().time() >= deadline:
-                return False
-            await asyncio.sleep(2)
-
-    async def _messages(self) -> tuple[_AgentMailMessage, ...]:
-        try:
-            inboxes_response = await self._client.get("/inboxes")
-            inboxes_response.raise_for_status()
-            inboxes = _AgentMailInboxPage.model_validate(inboxes_response.json()).inboxes
-        except (httpx.HTTPError, ValueError):
-            raise RuntimeError("AgentMail inbox response is unavailable or malformed") from None
-        inbox = next((item for item in inboxes if item.email == self._recipient), None)
-        if inbox is None:
-            raise RuntimeError("Configured AgentMail recipient does not exist")
-        try:
-            messages_response = await self._client.get(f"/inboxes/{inbox.inbox_id}/messages")
-            messages_response.raise_for_status()
-            return _AgentMailMessagePage.model_validate(messages_response.json()).messages
-        except (httpx.HTTPError, ValueError):
-            raise RuntimeError("AgentMail message response is unavailable or malformed") from None
-
-
-class _ConfirmationInteraction:
-    def __init__(
-        self,
-        control_plane: WorkflowControlPlane,
-        worker_id: str,
-        delivery_attempt: int,
-        messages: list[str],
-    ) -> None:
-        self._control_plane = control_plane
-        self._worker_id = worker_id
-        self._delivery_attempt = delivery_attempt
-        self._messages = messages
-
-    async def handle(
+class _UnusedApprovalPresenter:
+    async def present(
         self,
         notification_id: UUID,
-        workflow_event_id: UUID,
-        workflow_id: UUID,
-    ) -> None:
-        status = await self._control_plane.resolve_notification_status(
-            notification_id,
-            workflow_event_id,
-            workflow_id,
-            self._worker_id,
-            self._delivery_attempt,
-        )
-        self._messages.append(status.message)
+        destination_party_id: UUID,
+        effect: dict[str, object],
+    ) -> str:
+        del notification_id, destination_party_id, effect
+        raise AssertionError("send confirmation must not present another approval")
 
 
-class _ConfirmationInteractionFactory:
-    def __init__(self, control_plane: WorkflowControlPlane) -> None:
-        self._control_plane = control_plane
+class _ConversationSink:
+    def __init__(self) -> None:
         self.messages: list[str] = []
 
-    @asynccontextmanager
-    async def create(
-        self,
-        worker_id: str,
-        delivery_attempt: int,
-    ) -> AsyncIterator[_ConfirmationInteraction]:
-        yield _ConfirmationInteraction(
-            self._control_plane,
-            worker_id,
-            delivery_attempt,
-            self.messages,
-        )
+    def record_reply_once(self, _delivery_id: str, message: str) -> bool:
+        self.messages.append(message)
+        return True
 
 
 async def _seed_broker_identity(
@@ -222,35 +106,37 @@ async def _seed_broker_identity(
 ) -> None:
     engine = create_async_engine(database_url)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
-    async with sessions.begin() as session:
-        session.add_all(
-            [
-                PartyRow(id=broker_id, kind="person", display_name="Live Smoke Broker"),
-                PartyRow(
-                    id=organization_id,
-                    kind="organization",
-                    display_name="Live Smoke Organization",
-                ),
-            ]
-        )
-        await session.flush()
-        session.add_all(
-            [
-                PartyIdentifierRow(
-                    id=mailbox_id,
-                    party_id=broker_id,
-                    kind="email",
-                    value=str(sender),
-                    verified_at=datetime.now(UTC),
-                ),
-                OrganizationMembershipRow(
-                    person_party_id=broker_id,
-                    organization_party_id=organization_id,
-                    granted_at=datetime.now(UTC),
-                ),
-            ]
-        )
-    await engine.dispose()
+    try:
+        async with sessions.begin() as session:
+            session.add_all(
+                [
+                    PartyRow(id=broker_id, kind="person", display_name="Live Smoke Broker"),
+                    PartyRow(
+                        id=organization_id,
+                        kind="organization",
+                        display_name="Live Smoke Organization",
+                    ),
+                ]
+            )
+            await session.flush()
+            session.add_all(
+                [
+                    PartyIdentifierRow(
+                        id=mailbox_id,
+                        party_id=broker_id,
+                        kind="email",
+                        value=str(sender),
+                        verified_at=datetime.now(UTC),
+                    ),
+                    OrganizationMembershipRow(
+                        person_party_id=broker_id,
+                        organization_party_id=organization_id,
+                        granted_at=datetime.now(UTC),
+                    ),
+                ]
+            )
+    finally:
+        await engine.dispose()
 
 
 def _assert_active_gmail_connection(client: Composio, settings: _LiveSettings) -> None:
@@ -270,40 +156,63 @@ def _assert_active_gmail_connection(client: Composio, settings: _LiveSettings) -
         raise RuntimeError("Live email smoke requires one matching active Gmail connection")
 
 
+@pytest.mark.skipif(
+    os.getenv("OPENMAGIC_RUN_LIVE_EMAIL_SMOKE") != "1",
+    reason="credentialed live email smoke is opt-in",
+)
+@pytest.mark.timeout(180)
 @pytest.mark.usefixtures("clean_workflow_database")
 async def test_exact_approved_email_reaches_the_authorized_recipient(
     migrated_postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = _LiveSettings.from_environment()
     client = Composio(api_key=settings.composio_api_key.get_secret_value())
     _assert_active_gmail_connection(client, settings)
 
-    recipient = _AgentMailRecipient(settings.agentmail_api_key, settings.recipient)
+    async with AgentMailRecipient(settings.agentmail_api_key, settings.recipient) as recipient:
+        await _run_live_email_acceptance(
+            settings=settings,
+            client=client,
+            recipient=recipient,
+            database_url=migrated_postgres_url,
+            monkeypatch=monkeypatch,
+        )
+
+
+async def _run_live_email_acceptance(
+    *,
+    settings: _LiveSettings,
+    client: Composio,
+    recipient: AgentMailRecipient,
+    database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     previous_message_ids = await recipient.message_ids()
     broker_id, organization_id, mailbox_id = uuid4(), uuid4(), uuid4()
     await _seed_broker_identity(
-        migrated_postgres_url,
+        database_url,
         broker_id=broker_id,
         organization_id=organization_id,
         mailbox_id=mailbox_id,
         sender=settings.sender,
     )
 
-    database = WorkflowDatabase(migrated_postgres_url)
-    context = WorkflowCommandContext(
-        actor_party_id=broker_id,
-        organization_party_id=organization_id,
-        cause_type="message",
-        cause_id=f"live-request:{uuid4()}",
-    )
-    control_plane = WorkflowControlPlane(
-        database=database,
-        registry=default_workflow_registry(),
-        authority=StaticWorkflowAuthority(
-            grants={(broker_id, organization_id, RENEWAL_OUTREACH_KIND)}
-        ),
-    )
+    database = WorkflowDatabase(database_url)
     try:
+        context = WorkflowCommandContext(
+            actor_party_id=broker_id,
+            organization_party_id=organization_id,
+            cause_type="message",
+            cause_id=f"live-request:{uuid4()}",
+        )
+        control_plane = WorkflowControlPlane(
+            database=database,
+            registry=default_workflow_registry(),
+            authority=StaticWorkflowAuthority(
+                grants={(broker_id, organization_id, RENEWAL_OUTREACH_KIND)}
+            ),
+        )
         created = await control_plane.create_workflow(
             CreateWorkflowCommand(
                 context=context,
@@ -374,6 +283,7 @@ async def test_exact_approved_email_reaches_the_authorized_recipient(
         )
         if presentation.effect.get("subject") != correlation:
             raise AssertionError("Presented email does not carry the Send Job correlation")
+        approved_effect = EmailSendEffectV1.model_validate(presentation.effect)
         await control_plane.acknowledge_notification(
             AcknowledgeNotificationCommand(
                 notification_id=approval_notification.notification_id,
@@ -414,14 +324,57 @@ async def test_exact_approved_email_reaches_the_authorized_recipient(
         ).run_once()
         assert execution is not None
 
-        interactions = _ConfirmationInteractionFactory(control_plane)
+        calls = 0
+
+        async def controlled_notification_llm(self, _system_prompt, _messages):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                name = "read_workflow_packet"
+                arguments = {"workflow_id": str(created.workflow.id)}
+            elif calls == 2:
+                name = "present_status_update"
+                arguments = {}
+            else:
+                return {"choices": [{"message": {"content": "Done.", "tool_calls": []}}]}
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "id": name,
+                                    "function": {
+                                        "name": name,
+                                        "arguments": json.dumps(arguments),
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                ]
+            }
+
+        conversation = _ConversationSink()
+        monkeypatch.setattr(InteractionAgentRuntime, "_make_llm_call", controlled_notification_llm)
+        monkeypatch.setattr(
+            "server.agents.interaction_agent.workflow_notifications.get_conversation_log",
+            lambda: conversation,
+        )
         delivered = await NotificationWorker(
             control_plane=control_plane,
-            interactions=interactions,
+            interactions=FreshWorkflowInteractionFactory(
+                control_plane=control_plane,
+                retrieval=WorkflowRetrieval(database=database, cursor_secret=b"live-email-smoke"),
+                presenter=_UnusedApprovalPresenter(),
+                settings=Settings(openrouter_api_key="controlled-live-smoke"),
+                organization_party_id=organization_id,
+            ),
             worker_id="live-confirmation-worker",
         ).run_once()
         assert delivered is not None
-        assert interactions.messages == ["The renewal email was sent successfully."]
+        assert conversation.messages == ["The renewal email was sent successfully."]
 
         trace = await control_plane.read_workflow_trace(created.workflow.id, context)
         send_job = next(job for job in trace.jobs if job.kind == GMAIL_SEND_EMAIL_KIND)
@@ -433,7 +386,7 @@ async def test_exact_approved_email_reaches_the_authorized_recipient(
             if notification.kind == "send_confirmed"
         )
 
-        assert adapter.invocation_count == 1
+        assert adapter.execute_call_count == 1
         assert send_job.id == created_send_job.id
         assert event_types.count("approval_granted") == 1
         assert event_types.count("external_effect_dispatch_started") == 1
@@ -446,12 +399,10 @@ async def test_exact_approved_email_reaches_the_authorized_recipient(
         assert send_job.output.get("message_id")
         assert trace.workflow.status == "completed"
         assert send_notification.status == "delivered"
-        assert await recipient.wait_for_message(
-            subject=correlation,
-            sender=settings.sender,
+        assert await recipient.wait_for_exactly_one_message(
+            effect=approved_effect,
             previous_ids=previous_message_ids,
             wait_limit=timedelta(seconds=90),
         )
     finally:
-        await recipient.close()
         await database.dispose()
