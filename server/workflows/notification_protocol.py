@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
@@ -14,12 +12,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .contracts import (
     AcknowledgeNotificationCommand,
     ClaimNotificationCommand,
+    NotificationAudienceContext,
     NotificationDeliveryPacket,
     NotificationPresentationContext,
+    NotificationStatusContext,
     ReportNotificationFailureCommand,
     WorkflowCommandContext,
 )
 from .database import WorkflowDatabase
+from .email_effects import fingerprint_email_effect, resolve_email_effect
 from .errors import NotificationLifecycleError
 from .models import (
     NotificationRow,
@@ -255,8 +256,8 @@ class WorkflowNotificationProtocol:
                     "Notification does not identify one current Send Job awaiting approval"
                 )
             send = eligible[0]
-            effect = await self._resolve_effect(session, workflow_id, send)
-            fingerprint = self._fingerprint(effect)
+            effect = await resolve_email_effect(session, workflow_id, send)
+            fingerprint = fingerprint_email_effect(effect)
             session.add(
                 WorkflowEventRow(
                     workflow_id=workflow_id,
@@ -269,6 +270,7 @@ class WorkflowNotificationProtocol:
                     data={
                         "draft_job_id": str(draft.id),
                         "effect_fingerprint": fingerprint,
+                        "sender_mailbox_id": str(effect.sender_mailbox_id),
                     },
                 )
             )
@@ -278,7 +280,119 @@ class WorkflowNotificationProtocol:
                 draft_job_id=draft.id,
                 send_job_id=send.id,
                 effect_fingerprint=fingerprint,
-                effect=effect,
+                effect=effect.model_dump(mode="json"),
+            )
+
+    async def resolve_audience(
+        self,
+        notification_id: UUID,
+        workflow_event_id: UUID,
+        workflow_id: UUID,
+        worker_id: str,
+        delivery_attempt: int,
+    ) -> NotificationAudienceContext:
+        async with self._database.read_transaction() as session:
+            row = (
+                await session.execute(
+                    sa.select(NotificationRow, WorkflowEventRow)
+                    .join(
+                        WorkflowEventRow,
+                        sa.and_(
+                            WorkflowEventRow.workflow_id == NotificationRow.workflow_id,
+                            WorkflowEventRow.id == NotificationRow.workflow_event_id,
+                        ),
+                    )
+                    .where(
+                        NotificationRow.id == notification_id,
+                        NotificationRow.workflow_event_id == workflow_event_id,
+                        NotificationRow.workflow_id == workflow_id,
+                    )
+                )
+            ).one_or_none()
+        if row is None:
+            raise NotificationLifecycleError("Notification identifiers do not match")
+        notification, event = row
+        self._require_current_lease(notification, worker_id, delivery_attempt)
+        expected_event = {
+            "approval_required": "draft_ready",
+            "send_confirmed": "email_send_succeeded",
+        }.get(notification.kind)
+        if (
+            notification.destination_type != "party"
+            or expected_event is None
+            or event.event_type != expected_event
+        ):
+            raise NotificationLifecycleError("Notification is not deliverable")
+        try:
+            destination_party_id = UUID(notification.destination_id)
+        except ValueError as exc:
+            raise NotificationLifecycleError("Notification destination is invalid") from exc
+        return NotificationAudienceContext(
+            destination_party_id=destination_party_id,
+            kind=notification.kind,
+        )
+
+    async def resolve_status(
+        self,
+        notification_id: UUID,
+        workflow_event_id: UUID,
+        workflow_id: UUID,
+        worker_id: str,
+        delivery_attempt: int,
+    ) -> NotificationStatusContext:
+        audience = await self.resolve_audience(
+            notification_id,
+            workflow_event_id,
+            workflow_id,
+            worker_id,
+            delivery_attempt,
+        )
+        if audience.kind != "send_confirmed":
+            raise NotificationLifecycleError("Notification is not a send confirmation")
+        async with self._database.transaction() as session:
+            workflow = await session.scalar(
+                sa.select(WorkflowRow).where(WorkflowRow.id == workflow_id).with_for_update()
+            )
+            notification = await session.scalar(
+                sa.select(NotificationRow).where(NotificationRow.id == notification_id)
+            )
+            event = await session.scalar(
+                sa.select(WorkflowEventRow).where(
+                    WorkflowEventRow.workflow_id == workflow_id,
+                    WorkflowEventRow.id == workflow_event_id,
+                )
+            )
+            if workflow is None or notification is None or event is None:
+                raise NotificationLifecycleError("Notification aggregate does not exist")
+            self._require_current_lease(notification, worker_id, delivery_attempt)
+            if workflow.status != "completed" or event.job_id is None:
+                raise NotificationLifecycleError("Workflow send is not completed")
+            job = await session.scalar(
+                sa.select(WorkflowJobRow).where(
+                    WorkflowJobRow.workflow_id == workflow_id,
+                    WorkflowJobRow.id == event.job_id,
+                    WorkflowJobRow.status == "succeeded",
+                )
+            )
+            if job is None or event.event_type != "email_send_succeeded":
+                raise NotificationLifecycleError("Send confirmation evidence is invalid")
+            authority_context = WorkflowCommandContext(
+                actor_party_id=audience.destination_party_id,
+                organization_party_id=workflow.organization_party_id,
+                cause_type="message",
+                cause_id=f"notification:{notification_id}",
+            )
+            if not await self._has_current_broker_authority(
+                session,
+                authority_context,
+                workflow,
+            ):
+                raise NotificationLifecycleError(
+                    "Notification destination no longer has Broker authority"
+                )
+            return NotificationStatusContext(
+                destination_party_id=audience.destination_party_id,
+                message="The renewal email was sent successfully.",
             )
 
     @classmethod
@@ -303,47 +417,23 @@ class WorkflowNotificationProtocol:
         )
         if send is None:
             raise NotificationLifecycleError("Committed presentation Send Job is missing")
-        effect = await cls._resolve_effect(session, event.workflow_id, send)
-        if cls._fingerprint(effect) != fingerprint:
+        sender_mailbox_id = event.data.get("sender_mailbox_id")
+        effect = await resolve_email_effect(
+            session,
+            event.workflow_id,
+            send,
+            sender_mailbox_id=UUID(str(sender_mailbox_id)) if sender_mailbox_id else None,
+            require_current_sender=False,
+        )
+        if fingerprint_email_effect(effect) != fingerprint:
             raise NotificationLifecycleError("Committed presentation fingerprint is invalid")
         return NotificationPresentationContext(
             destination_party_id=destination_party_id,
             draft_job_id=draft_job_id,
             send_job_id=send.id,
             effect_fingerprint=fingerprint,
-            effect=effect,
+            effect=effect.model_dump(mode="json"),
         )
-
-    @staticmethod
-    async def _resolve_effect(
-        session: AsyncSession,
-        workflow_id: UUID,
-        send: WorkflowJobRow,
-    ) -> dict[str, object]:
-        resolved = dict(send.input)
-        for field, value in send.input.items():
-            if not isinstance(value, dict) or set(value) != {"job_output", "field"}:
-                continue
-            try:
-                source_id = UUID(str(value["job_output"]))
-                source_field = str(value["field"])
-            except (KeyError, TypeError, ValueError) as exc:
-                raise NotificationLifecycleError("Send Job input reference is invalid") from exc
-            source = await session.scalar(
-                sa.select(WorkflowJobRow).where(
-                    WorkflowJobRow.workflow_id == workflow_id,
-                    WorkflowJobRow.id == source_id,
-                )
-            )
-            if source is None or source.output is None or source_field not in source.output:
-                raise NotificationLifecycleError("Send Job input reference is unresolved")
-            resolved[field] = source.output[source_field]
-        return resolved
-
-    @staticmethod
-    def _fingerprint(effect: dict[str, object]) -> str:
-        encoded = json.dumps(effect, sort_keys=True, separators=(",", ":")).encode()
-        return hashlib.sha256(encoded).hexdigest()
 
     @staticmethod
     async def _dependencies_succeeded(

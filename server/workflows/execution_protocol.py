@@ -18,10 +18,10 @@ from .contracts import (
     WorkflowExecutionPacket,
 )
 from .database import WorkflowDatabase
+from .email_effects import resolve_email_effect
 from .errors import (
     RunResultConflictError,
     StaleRunError,
-    WorkflowAuthorizationError,
 )
 from .models import (
     NotificationRow,
@@ -31,7 +31,12 @@ from .models import (
     WorkflowJobRunRow,
     WorkflowRow,
 )
-from .registry import ExecutionStrategy, WorkflowKindRegistry
+from .registry import (
+    ExecutionStrategy,
+    WorkflowCompletionJob,
+    WorkflowCompletionView,
+    WorkflowKindRegistry,
+)
 
 CurrentBrokerAuthority = Callable[
     [AsyncSession, WorkflowCommandContext, WorkflowRow], Awaitable[bool]
@@ -101,7 +106,11 @@ class WorkflowExecutionProtocol:
                 if not await self._job_has_current_authority(session, workflow, job):
                     continue
 
-                execution_input = self._registry.validate_job_input(job.kind, job.input)
+                execution_input = (
+                    (await resolve_email_effect(session, workflow.id, job)).model_dump(mode="json")
+                    if contract.execution_strategy == ExecutionStrategy.DETERMINISTIC_ADAPTER
+                    else self._registry.validate_job_input(job.kind, job.input)
+                )
                 runtime_instance_id = (
                     uuid4()
                     if contract.execution_strategy == ExecutionStrategy.FRESH_EXECUTION_AGENT
@@ -281,6 +290,7 @@ class WorkflowExecutionProtocol:
                 job.output = output
                 job.status = "succeeded"
                 await self._record_success(session, workflow, job, run)
+                await self._complete_if_satisfied(session, workflow, job, run)
             elif command.result.outcome == "uncertain":
                 run.status = "failed"
                 job.status = "waiting"
@@ -340,7 +350,7 @@ class WorkflowExecutionProtocol:
             return False
         if self._registry.requires_approval(job.kind):
             approval = await session.scalar(
-                sa.select(WorkflowEventRow.id)
+                sa.select(WorkflowEventRow)
                 .where(
                     WorkflowEventRow.workflow_id == job.workflow_id,
                     WorkflowEventRow.job_id == job.id,
@@ -349,6 +359,17 @@ class WorkflowExecutionProtocol:
                 .limit(1)
             )
             if approval is None:
+                return False
+            invalidated = await session.scalar(
+                sa.select(WorkflowEventRow.id)
+                .where(
+                    WorkflowEventRow.workflow_id == job.workflow_id,
+                    WorkflowEventRow.event_type == "approval_invalidated",
+                    WorkflowEventRow.approval_grant_id == approval.id,
+                )
+                .limit(1)
+            )
+            if invalidated is not None:
                 return False
         dispatched = await session.scalar(
             sa.select(WorkflowEventRow.id)
@@ -405,10 +426,8 @@ class WorkflowExecutionProtocol:
         if contract.success_notification_kind is None:
             return
         broker_party_id = await self._proposal_actor(session, workflow.id)
-        if broker_party_id is None or not await self._job_has_current_authority(
-            session, workflow, job
-        ):
-            raise WorkflowAuthorizationError("Workflow has no current Broker destination")
+        if broker_party_id is None:
+            return
         session.add(
             NotificationRow(
                 workflow_id=workflow.id,
@@ -420,6 +439,71 @@ class WorkflowExecutionProtocol:
                 max_attempts=3,
             )
         )
+        await session.flush()
+
+    async def _complete_if_satisfied(
+        self,
+        session: AsyncSession,
+        workflow: WorkflowRow,
+        completed_job: WorkflowJobRow,
+        run: WorkflowJobRunRow,
+    ) -> None:
+        jobs = (
+            await session.scalars(
+                sa.select(WorkflowJobRow).where(WorkflowJobRow.workflow_id == workflow.id)
+            )
+        ).all()
+        runs = (
+            await session.scalars(
+                sa.select(WorkflowJobRunRow).where(WorkflowJobRunRow.workflow_id == workflow.id)
+            )
+        ).all()
+        dispatched_job_ids = (
+            await session.scalars(
+                sa.select(WorkflowEventRow.job_id).where(
+                    WorkflowEventRow.workflow_id == workflow.id,
+                    WorkflowEventRow.event_type == "external_effect_dispatch_started",
+                    WorkflowEventRow.approval_grant_id.is_not(None),
+                    WorkflowEventRow.job_id.is_not(None),
+                )
+            )
+        ).all()
+        view = WorkflowCompletionView(
+            jobs=tuple(
+                WorkflowCompletionJob(
+                    id=item.id,
+                    kind=item.kind,
+                    status=item.status,
+                    revises_job_id=item.revises_job_id,
+                )
+                for item in jobs
+            ),
+            uncertain_job_ids=frozenset(
+                item.job_id
+                for item in runs
+                if item.result is not None and item.result.get("outcome") == "uncertain"
+            ),
+            approved_dispatch_job_ids=frozenset(
+                item for item in dispatched_job_ids if item is not None
+            ),
+        )
+        if not self._registry.completion_satisfied(workflow.kind, view):
+            return
+        workflow.status = "completed"
+        session.add(
+            WorkflowEventRow(
+                workflow_id=workflow.id,
+                job_id=completed_job.id,
+                run_id=run.id,
+                event_type="workflow_completed",
+                actor_type="system",
+                actor_id="workflow_control_plane",
+                cause_type="job",
+                cause_id=str(completed_job.id),
+                data={"objective_satisfied": True},
+            )
+        )
+        await session.flush()
 
     @staticmethod
     async def _proposal_actor(session: AsyncSession, workflow_id: UUID) -> UUID | None:

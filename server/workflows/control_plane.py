@@ -9,15 +9,23 @@ from uuid import UUID, uuid4
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .approval_protocol import WorkflowApprovalProtocol
 from .authority import WorkflowAuthority, WorkflowAuthorizationScope
 from .contracts import (
     AcknowledgeNotificationCommand,
+    ApprovalGrant,
+    ApproveWorkflowJobCommand,
+    BeginExternalEffectDispatchCommand,
+    CancelWorkflowCommand,
+    CancelWorkflowResult,
     ClaimNotificationCommand,
     ClaimWorkflowJobCommand,
     CommittedRunResult,
     CreateWorkflowCommand,
+    NotificationAudienceContext,
     NotificationDeliveryPacket,
     NotificationPresentationContext,
+    NotificationStatusContext,
     ProposeWorkflowJobsCommand,
     ReportNotificationFailureCommand,
     ReportRunResultCommand,
@@ -32,6 +40,7 @@ from .contracts import (
     WorkflowTraceWorkflow,
 )
 from .database import WorkflowDatabase
+from .email_effects import EmailSendDispatchV1
 from .errors import (
     InvalidWorkflowProposalError,
     WorkflowAuthorizationError,
@@ -39,6 +48,7 @@ from .errors import (
     WorkflowNotFoundError,
 )
 from .execution_protocol import WorkflowExecutionProtocol
+from .external_effect_protocol import WorkflowExternalEffectProtocol
 from .identity_models import (
     OrganizationMembershipRow,
     PartyIdentifierRow,
@@ -46,6 +56,7 @@ from .identity_models import (
     WorkflowParticipantRoleRow,
     WorkflowParticipantRow,
 )
+from .lifecycle_protocol import WorkflowLifecycleProtocol
 from .models import (
     NotificationRow,
     WorkflowEventRow,
@@ -82,6 +93,19 @@ class WorkflowControlPlane:
             database=database,
             registry=registry,
             has_current_broker_authority=self._has_current_broker_authority,
+        )
+        self._approval = WorkflowApprovalProtocol(
+            database,
+            self._has_current_broker_authority,
+        )
+        self._external_effects = WorkflowExternalEffectProtocol(
+            database,
+            registry,
+            self._has_current_broker_authority,
+        )
+        self._lifecycle = WorkflowLifecycleProtocol(
+            database,
+            self._has_current_broker_authority,
         )
         self._notification_delivery = WorkflowNotificationProtocol(
             database,
@@ -178,6 +202,18 @@ class WorkflowControlPlane:
     ) -> WorkflowExecutionPacket | None:
         return await self._execution.claim_job(command)
 
+    async def approve_job(self, command: ApproveWorkflowJobCommand) -> ApprovalGrant:
+        return await self._approval.approve_job(command)
+
+    async def begin_external_effect_dispatch(
+        self,
+        command: BeginExternalEffectDispatchCommand,
+    ) -> EmailSendDispatchV1:
+        return await self._external_effects.begin_dispatch(command)
+
+    async def cancel_workflow(self, command: CancelWorkflowCommand) -> CancelWorkflowResult:
+        return await self._lifecycle.cancel_workflow(command)
+
     async def report_run_result(
         self,
         command: ReportRunResultCommand,
@@ -211,6 +247,38 @@ class WorkflowControlPlane:
         delivery_attempt: int,
     ) -> NotificationPresentationContext:
         return await self._notification_delivery.resolve_presentation(
+            notification_id,
+            workflow_event_id,
+            workflow_id,
+            worker_id,
+            delivery_attempt,
+        )
+
+    async def resolve_notification_audience(
+        self,
+        notification_id: UUID,
+        workflow_event_id: UUID,
+        workflow_id: UUID,
+        worker_id: str,
+        delivery_attempt: int,
+    ) -> NotificationAudienceContext:
+        return await self._notification_delivery.resolve_audience(
+            notification_id,
+            workflow_event_id,
+            workflow_id,
+            worker_id,
+            delivery_attempt,
+        )
+
+    async def resolve_notification_status(
+        self,
+        notification_id: UUID,
+        workflow_event_id: UUID,
+        workflow_id: UUID,
+        worker_id: str,
+        delivery_attempt: int,
+    ) -> NotificationStatusContext:
+        return await self._notification_delivery.resolve_status(
             notification_id,
             workflow_event_id,
             workflow_id,

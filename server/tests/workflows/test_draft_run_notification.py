@@ -677,16 +677,20 @@ async def test_fresh_interaction_reloads_packet_and_presents_exact_send_input(
 
     assert delivered is not None
     assert delivered.workflow_id == created.workflow.id
-    assert presenter.effects == [
-        {
-            "sender_mailbox": "broker@acme.example",
-            "to": ["john@example.com"],
-            "cc": [],
-            "bcc": [],
-            "subject": "Your 2026 policy renewal",
-            "body": "Hello John Smith,\n\nLet's review your 2026 renewal options.",
-        }
-    ]
+    assert len(presenter.effects) == 1
+    effect = presenter.effects[0]
+    assert UUID(str(effect["sender_mailbox_id"]))
+    assert effect == {
+        "action": "send_email",
+        "sender_mailbox_id": effect["sender_mailbox_id"],
+        "expected_sender_address": "broker@acme.example",
+        "to": ["john@example.com"],
+        "cc": [],
+        "bcc": [],
+        "subject": "Your 2026 policy renewal",
+        "body": "Hello John Smith,\n\nLet's review your 2026 renewal options.",
+        "body_format": "plain_text",
+    }
     async with factory.create("notification-worker", 1) as first:
         first_runtime_id = first.runtime_instance_id
     async with factory.create("notification-worker", 2) as second:
@@ -739,15 +743,9 @@ async def test_interaction_revalidates_delivery_lease_before_presentation(
         }
 
     monkeypatch.setattr(InteractionAgentRuntime, "_make_llm_call", fake_llm_call)
-    original_resolve = control_plane.resolve_notification_presentation
-    resolve_calls = 0
 
     async def stale_on_presentation(*args):
-        nonlocal resolve_calls
-        resolve_calls += 1
-        if resolve_calls > 1:
-            raise NotificationLifecycleError("Notification delivery lease is stale")
-        return await original_resolve(*args)
+        raise NotificationLifecycleError("Notification delivery lease is stale")
 
     monkeypatch.setattr(control_plane, "resolve_notification_presentation", stale_on_presentation)
     database = WorkflowDatabase(migrated_postgres_url)

@@ -57,6 +57,40 @@ class ProposeWorkflowJobsCommand(WorkflowContract):
     jobs: tuple[WorkflowJobProposal, ...] = Field(min_length=1)
 
 
+class ApproveWorkflowJobCommand(WorkflowContract):
+    """Authorize one exact presented External Effect through an implicit Party."""
+
+    context: WorkflowCommandContext
+    job_id: UUID
+    expected_draft_revision_id: UUID
+
+
+class CancelWorkflowCommand(WorkflowContract):
+    """Atomically cancel one safely cancelable Workflow aggregate."""
+
+    context: WorkflowCommandContext
+    workflow_id: UUID
+
+
+class CancelWorkflowResult(WorkflowContract):
+    workflow_id: UUID
+    outcome: Literal["cancelled", "too_late"]
+
+
+class ApprovalGrant(WorkflowContract):
+    """Immutable evidence returned for a recorded or replayed exact approval."""
+
+    approval_grant_id: UUID
+    workflow_id: UUID
+    job_id: UUID
+    approving_party_id: UUID
+    draft_job_id: UUID
+    effect_fingerprint: str
+    cause_type: Literal["message", "ui_action"]
+    cause_id: str
+    granted_at: datetime
+
+
 class ClaimWorkflowJobCommand(WorkflowContract):
     """Claim at most one eligible Job through the Worker-only boundary."""
 
@@ -64,6 +98,12 @@ class ClaimWorkflowJobCommand(WorkflowContract):
     application_build: str = Field(min_length=1, max_length=255)
     lease_duration: timedelta = Field(gt=timedelta(0), le=timedelta(minutes=30))
     executor_keys: tuple[str, ...] = Field(min_length=1)
+
+
+class BeginExternalEffectDispatchCommand(WorkflowContract):
+    """Consume one Run's dispatch allowance before its provider call."""
+
+    run_id: UUID
 
 
 class RunResult(WorkflowContract):
@@ -148,6 +188,20 @@ class NotificationPresentationContext(WorkflowContract):
     send_job_id: UUID
     effect_fingerprint: str
     effect: dict[str, Any]
+
+
+class NotificationAudienceContext(WorkflowContract):
+    """Trusted destination and kind for one claimed Notification."""
+
+    destination_party_id: UUID
+    kind: Literal["approval_required", "send_confirmed"]
+
+
+class NotificationStatusContext(WorkflowContract):
+    """Deterministic user-facing status authorized at delivery time."""
+
+    destination_party_id: UUID
+    message: str
 
 
 class WorkflowTraceWorkflow(WorkflowContract):

@@ -80,6 +80,9 @@ class Settings(BaseModel):
     workflow_organization_party_id: str | None = Field(
         default=os.getenv("OPENMAGIC_WORKFLOW_ORGANIZATION_PARTY_ID")
     )
+    workflow_composio_user_id: str | None = Field(
+        default=os.getenv("OPENMAGIC_WORKFLOW_COMPOSIO_USER_ID")
+    )
     interaction_mode: Literal["workflow", "legacy"] = Field(default_factory=_interaction_mode)
 
     # HTTP behaviour
