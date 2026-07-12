@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping
 from contextlib import AbstractAsyncContextManager
 from datetime import timedelta
@@ -19,6 +20,7 @@ from .contracts import (
     WorkflowExecutionPacket,
 )
 from .control_plane import WorkflowControlPlane
+from .errors import WorkflowError
 
 
 class DraftExecutionRuntime(Protocol):
@@ -53,7 +55,11 @@ class NotificationInteraction(Protocol):
 class NotificationInteractionFactory(Protocol):
     """Construct and dispose one Interaction Agent per Notification attempt."""
 
-    def create(self) -> AbstractAsyncContextManager[NotificationInteraction]: ...
+    def create(
+        self,
+        worker_id: str,
+        delivery_attempt: int,
+    ) -> AbstractAsyncContextManager[NotificationInteraction]: ...
 
 
 class WorkflowWorker:
@@ -105,9 +111,17 @@ class WorkflowWorker:
                 error={"code": "executor_unavailable"},
             )
 
-        await self._control_plane.report_run_result(
-            ReportRunResultCommand(run_id=packet.run_id, result=result)
-        )
+        report = ReportRunResultCommand(run_id=packet.run_id, result=result)
+        for retry in range(3):
+            try:
+                await self._control_plane.report_run_result(report)
+                break
+            except WorkflowError:
+                raise
+            except Exception:
+                if retry == 2:
+                    raise
+                await asyncio.sleep(0.1 * (retry + 1))
         return packet
 
 
@@ -137,7 +151,10 @@ class NotificationWorker:
         if packet is None:
             return None
         try:
-            async with self._interactions.create() as interaction:
+            async with self._interactions.create(
+                self._worker_id,
+                packet.delivery_attempt,
+            ) as interaction:
                 await interaction.handle(
                     packet.notification_id,
                     packet.workflow_event_id,

@@ -58,6 +58,7 @@ class WorkflowExecutionProtocol:
     ) -> WorkflowExecutionPacket | None:
         now = datetime.now(UTC)
         async with self._database.transaction() as session:
+            await self._recover_expired_runs(session, now)
             candidates = (
                 await session.execute(
                     sa.select(
@@ -147,6 +148,79 @@ class WorkflowExecutionProtocol:
                     lease_expires_at=lease_expires_at,
                 )
         return None
+
+    @staticmethod
+    async def _recover_expired_runs(session: AsyncSession, now: datetime) -> None:
+        expired = (
+            await session.execute(
+                sa.select(
+                    WorkflowJobRunRow.id,
+                    WorkflowJobRunRow.workflow_id,
+                    WorkflowJobRunRow.job_id,
+                )
+                .where(
+                    WorkflowJobRunRow.status == "running",
+                    WorkflowJobRunRow.lease_expires_at < now,
+                )
+                .order_by(WorkflowJobRunRow.lease_expires_at, WorkflowJobRunRow.id)
+                .limit(20)
+            )
+        ).all()
+        for run_id, workflow_id, job_id in expired:
+            workflow = await session.scalar(
+                sa.select(WorkflowRow).where(WorkflowRow.id == workflow_id).with_for_update()
+            )
+            if workflow is None:
+                continue
+            job = await session.scalar(
+                sa.select(WorkflowJobRow)
+                .where(WorkflowJobRow.workflow_id == workflow_id, WorkflowJobRow.id == job_id)
+                .with_for_update()
+            )
+            run = await session.scalar(
+                sa.select(WorkflowJobRunRow)
+                .where(
+                    WorkflowJobRunRow.workflow_id == workflow_id,
+                    WorkflowJobRunRow.job_id == job_id,
+                    WorkflowJobRunRow.id == run_id,
+                )
+                .with_for_update()
+            )
+            if (
+                job is None
+                or run is None
+                or job.status != "running"
+                or run.status != "running"
+                or run.lease_expires_at >= now
+            ):
+                continue
+            dispatch_started = await session.scalar(
+                sa.select(WorkflowEventRow.id)
+                .where(
+                    WorkflowEventRow.workflow_id == workflow_id,
+                    WorkflowEventRow.job_id == job_id,
+                    WorkflowEventRow.event_type == "external_effect_dispatch_started",
+                )
+                .limit(1)
+            )
+            run.status = "abandoned"
+            run.finished_at = now
+            if dispatch_started is not None:
+                job.status = "waiting"
+            elif job.attempts < job.max_attempts:
+                job.status = "queued"
+                job.available_at = now
+            else:
+                job.status = "failed"
+            WorkflowExecutionProtocol._append_run_event(
+                session,
+                workflow,
+                job,
+                run,
+                "run_abandoned",
+                {"reason": "lease_expired"},
+            )
+        await session.flush()
 
     async def report_run_result(
         self,

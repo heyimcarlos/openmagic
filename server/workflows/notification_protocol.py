@@ -122,6 +122,8 @@ class WorkflowNotificationProtocol:
         notification_id: UUID,
         workflow_event_id: UUID,
         workflow_id: UUID,
+        worker_id: str,
+        delivery_attempt: int,
     ) -> NotificationPresentationContext:
         async with self._database.read_transaction() as session:
             row = (
@@ -144,11 +146,9 @@ class WorkflowNotificationProtocol:
         if row is None:
             raise NotificationLifecycleError("Notification identifiers do not match")
         notification, event = row
+        self._require_current_lease(notification, worker_id, delivery_attempt)
         if (
-            notification.status != "delivering"
-            or notification.lease_expires_at is None
-            or notification.lease_expires_at < datetime.now(UTC)
-            or notification.kind != "approval_required"
+            notification.kind != "approval_required"
             or notification.destination_type != "party"
             or event.event_type != "draft_ready"
         ):

@@ -18,6 +18,11 @@ depends_on: str | Sequence[str] | None = None
 
 def upgrade() -> None:
     op.add_column("notifications", sa.Column("delivered_by", sa.Text(), nullable=True))
+    op.execute(
+        sa.text(
+            "UPDATE notifications SET delivered_by = 'legacy_delivery' WHERE status = 'delivered'"
+        )
+    )
     op.drop_constraint(op.f("ck_notifications_delivery_shape"), "notifications", type_="check")
     op.create_check_constraint(
         op.f("ck_notifications_delivery_shape"),

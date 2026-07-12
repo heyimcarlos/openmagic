@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import threading
 from collections.abc import Iterator
+from fcntl import LOCK_EX, LOCK_UN, flock
 from html import escape, unescape
 from pathlib import Path
 from typing import Protocol
@@ -162,18 +163,23 @@ class ConversationLog:
             f"{_encode_payload(content)}</poke_reply>\n"
         )
         with self._lock:
-            try:
-                existing = self._path.read_text(encoding="utf-8") if self._path.exists() else ""
-                if marker in existing:
-                    return False
-                with self._path.open("a", encoding="utf-8") as handle:
-                    handle.write(entry)
-            except Exception as exc:  # pragma: no cover - defensive
-                logger.error(
-                    "correlated conversation reply failed",
-                    extra={"error": str(exc), "path": str(self._path)},
-                )
-                raise
+            lock_path = self._path.with_suffix(f"{self._path.suffix}.lock")
+            with lock_path.open("a", encoding="utf-8") as lock_file:
+                flock(lock_file.fileno(), LOCK_EX)
+                try:
+                    existing = self._path.read_text(encoding="utf-8") if self._path.exists() else ""
+                    if marker in existing:
+                        return False
+                    with self._path.open("a", encoding="utf-8") as handle:
+                        handle.write(entry)
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.error(
+                        "correlated conversation reply failed",
+                        extra={"error": str(exc), "path": str(self._path)},
+                    )
+                    raise
+                finally:
+                    flock(lock_file.fileno(), LOCK_UN)
         self._working_memory_log.append_entry("poke_reply", content, timestamp)
         self._notify_summarization()
         return True

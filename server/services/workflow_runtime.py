@@ -50,6 +50,9 @@ class WorkflowRuntimeService:
         if not self._settings.workflow_broker_party_id:
             logger.warning("Workflow runtime disabled because Broker identity is incomplete")
             return
+        if not self._settings.workflow_organization_party_id:
+            logger.warning("Workflow runtime disabled because Organization identity is incomplete")
+            return
         database = WorkflowDatabase(self._settings.database_url)
         control_plane = WorkflowControlPlane(
             database=database,
@@ -77,6 +80,8 @@ class WorkflowRuntimeService:
                 presenter=ConversationApprovalPresenter(
                     UUID(self._settings.workflow_broker_party_id)
                 ),
+                settings=self._settings,
+                organization_party_id=UUID(self._settings.workflow_organization_party_id),
             ),
             worker_id=f"notification-worker:{uuid4()}",
         )

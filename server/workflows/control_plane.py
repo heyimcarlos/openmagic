@@ -204,9 +204,15 @@ class WorkflowControlPlane:
         notification_id: UUID,
         workflow_event_id: UUID,
         workflow_id: UUID,
+        worker_id: str,
+        delivery_attempt: int,
     ) -> NotificationPresentationContext:
         return await self._notification_delivery.resolve_presentation(
-            notification_id, workflow_event_id, workflow_id
+            notification_id,
+            workflow_event_id,
+            workflow_id,
+            worker_id,
+            delivery_attempt,
         )
 
     @staticmethod

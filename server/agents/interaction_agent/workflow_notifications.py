@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from contextlib import asynccontextmanager
-from typing import Protocol
+from typing import Any, Protocol
 from uuid import UUID, uuid4
 
+from pydantic import BaseModel, ConfigDict
+
+from server.config import Settings
 from server.services.conversation import get_conversation_log
 from server.workflows import (
     GMAIL_SEND_EMAIL_KIND,
@@ -14,6 +18,9 @@ from server.workflows import (
     WorkflowInspectionContext,
     WorkflowRetrieval,
 )
+
+from .runtime import InteractionAgentRuntime
+from .toolbox import InteractionToolContext, ToolResult
 
 
 class ApprovalPresenter(Protocol):
@@ -24,7 +31,7 @@ class ApprovalPresenter(Protocol):
         notification_id: UUID,
         destination_party_id: UUID,
         effect: dict[str, object],
-    ) -> None: ...
+    ) -> str: ...
 
 
 class ConversationApprovalPresenter:
@@ -38,13 +45,124 @@ class ConversationApprovalPresenter:
         notification_id: UUID,
         destination_party_id: UUID,
         effect: dict[str, object],
-    ) -> None:
+    ) -> str:
         if destination_party_id != self._expected_party_id:
             raise NotificationLifecycleError("Notification targets a different Party")
+        message = FreshWorkflowInteraction.render_approval_request(effect)
         get_conversation_log().record_reply_once(
             str(notification_id),
-            FreshWorkflowInteraction.render_approval_request(effect),
+            message,
         )
+        return message
+
+
+class _NotificationArguments(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+class _ReadPacketArguments(_NotificationArguments):
+    workflow_id: UUID
+
+
+class _PresentArguments(_NotificationArguments):
+    send_job_id: UUID
+
+
+_NOTIFICATION_TOOLS: tuple[dict[str, Any], ...] = (
+    {
+        "type": "function",
+        "function": {
+            "name": "read_workflow_packet",
+            "description": "Read the fresh operational packet for this Notification's Workflow.",
+            "parameters": _ReadPacketArguments.model_json_schema(),
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "present_approval_request",
+            "description": "Present the exact resolved Send Job input for explicit approval.",
+            "parameters": _PresentArguments.model_json_schema(),
+        },
+    },
+)
+
+_NOTIFICATION_PROMPT = """You handle one Workflow Notification in a fresh context.
+Read the supplied Workflow Packet, find the one waiting Gmail Send Job, then call
+present_approval_request with its Job ID. Do not approve, edit, summarize, or
+paraphrase the email. You have no previous conversation context."""
+
+
+class _NotificationToolbox:
+    def __init__(
+        self,
+        *,
+        retrieval: WorkflowRetrieval,
+        presenter: ApprovalPresenter,
+        notification_id: UUID,
+        destination_party_id: UUID,
+    ) -> None:
+        self._retrieval = retrieval
+        self._presenter = presenter
+        self._notification_id = notification_id
+        self._destination_party_id = destination_party_id
+
+    @property
+    def schemas(self) -> tuple[dict[str, Any], ...]:
+        return _NOTIFICATION_TOOLS
+
+    async def invoke(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        context: InteractionToolContext,
+    ) -> ToolResult:
+        if name == "read_workflow_packet":
+            request = _ReadPacketArguments.model_validate(arguments)
+            if request.workflow_id != context.trusted_workflow_id:
+                return ToolResult(success=False, payload={"code": "wrong_workflow"})
+            packet = await self._retrieval.read_workflow_packet(
+                WorkflowInspectionContext(actor_party_id=context.actor_party_id),
+                request.workflow_id,
+            )
+            context.loaded_packet = packet
+            return ToolResult(success=True, payload=packet.model_dump(mode="json"))
+        if name == "present_approval_request":
+            request = _PresentArguments.model_validate(arguments)
+            packet = context.loaded_packet
+            if packet is None:
+                return ToolResult(success=False, payload={"code": "workflow_packet_required"})
+            send_jobs = [
+                job
+                for job in packet.jobs
+                if job.kind == GMAIL_SEND_EMAIL_KIND and job.job_id == request.send_job_id
+            ]
+            if len(send_jobs) != 1 or send_jobs[0].resolved_input is None:
+                return ToolResult(success=False, payload={"code": "resolved_send_required"})
+            message = await self._presenter.present(
+                self._notification_id,
+                self._destination_party_id,
+                send_jobs[0].resolved_input,
+            )
+            return ToolResult(
+                success=True,
+                payload={"status": "presented"},
+                user_message=message,
+                recorded_reply=True,
+            )
+        return ToolResult(success=False, payload={"code": "unknown_tool"})
+
+
+def _build_notification_prompt() -> str:
+    return _NOTIFICATION_PROMPT
+
+
+def _prepare_notification_message(
+    latest_text: str,
+    _transcript: str,
+    message_type: str = "agent",
+) -> list[dict[str, str]]:
+    return [{"role": "user", "content": f"<{message_type}>{latest_text}</{message_type}>"}]
 
 
 class FreshWorkflowInteraction:
@@ -56,11 +174,19 @@ class FreshWorkflowInteraction:
         control_plane: WorkflowControlPlane,
         retrieval: WorkflowRetrieval,
         presenter: ApprovalPresenter,
+        worker_id: str,
+        delivery_attempt: int,
+        settings: Settings,
+        organization_party_id: UUID,
     ) -> None:
         self.runtime_instance_id = uuid4()
         self._control_plane = control_plane
         self._retrieval = retrieval
         self._presenter = presenter
+        self._worker_id = worker_id
+        self._delivery_attempt = delivery_attempt
+        self._settings = settings
+        self._organization_party_id = organization_party_id
         self._used = False
 
     async def handle(
@@ -76,19 +202,39 @@ class FreshWorkflowInteraction:
             notification_id,
             workflow_event_id,
             workflow_id,
+            self._worker_id,
+            self._delivery_attempt,
         )
-        packet = await self._retrieval.read_workflow_packet(
-            WorkflowInspectionContext(actor_party_id=presentation.destination_party_id),
-            workflow_id,
+        toolbox = _NotificationToolbox(
+            retrieval=self._retrieval,
+            presenter=self._presenter,
+            notification_id=notification_id,
+            destination_party_id=presentation.destination_party_id,
         )
-        send_jobs = [job for job in packet.jobs if job.kind == GMAIL_SEND_EMAIL_KIND]
-        if len(send_jobs) != 1 or send_jobs[0].resolved_input is None:
-            raise NotificationLifecycleError("Approval Notification has no resolved Send input")
-        await self._presenter.present(
-            notification_id,
-            presentation.destination_party_id,
-            send_jobs[0].resolved_input,
+        runtime = InteractionAgentRuntime(
+            toolbox=toolbox,
+            system_prompt_builder=_build_notification_prompt,
+            message_builder=_prepare_notification_message,
+            settings=self._settings,
         )
+        result = await runtime.execute_fresh_notification(
+            json.dumps(
+                {
+                    "notification_id": str(notification_id),
+                    "workflow_event_id": str(workflow_event_id),
+                    "workflow_id": str(workflow_id),
+                },
+                sort_keys=True,
+            ),
+            InteractionToolContext(
+                actor_party_id=presentation.destination_party_id,
+                organization_party_id=self._organization_party_id,
+                cause_id=f"notification:{notification_id}",
+                trusted_workflow_id=workflow_id,
+            ),
+        )
+        if not result.success:
+            raise NotificationLifecycleError("Notification Interaction Agent failed")
 
     @staticmethod
     def render_approval_request(effect: dict[str, object]) -> str:
@@ -124,17 +270,25 @@ class FreshWorkflowInteractionFactory:
         control_plane: WorkflowControlPlane,
         retrieval: WorkflowRetrieval,
         presenter: ApprovalPresenter,
+        settings: Settings,
+        organization_party_id: UUID,
     ) -> None:
         self._control_plane = control_plane
         self._retrieval = retrieval
         self._presenter = presenter
+        self._settings = settings
+        self._organization_party_id = organization_party_id
 
     @asynccontextmanager
-    async def create(self):
+    async def create(self, worker_id: str, delivery_attempt: int):
         runtime = FreshWorkflowInteraction(
             control_plane=self._control_plane,
             retrieval=self._retrieval,
             presenter=self._presenter,
+            worker_id=worker_id,
+            delivery_attempt=delivery_attempt,
+            settings=self._settings,
+            organization_party_id=self._organization_party_id,
         )
         try:
             yield runtime

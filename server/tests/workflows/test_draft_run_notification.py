@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
@@ -9,10 +10,12 @@ import pytest
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from server.agents.interaction_agent.runtime import InteractionAgentRuntime
 from server.agents.interaction_agent.workflow_notifications import (
     FreshWorkflowInteractionFactory,
 )
-from server.tests.workflows.factories import create_command
+from server.config import Settings
+from server.tests.workflows.factories import ORGANIZATION_ID, create_command
 from server.workflows import (
     DRAFT_RENEWAL_EMAIL_KIND,
     AcknowledgeNotificationCommand,
@@ -239,6 +242,52 @@ async def test_retryable_draft_failure_uses_persisted_attempt_budget(
     assert draft.attempts == 2
 
 
+async def test_expired_pre_dispatch_run_is_abandoned_and_reclaimed(
+    control_plane: WorkflowControlPlane,
+    migrated_postgres_url: str,
+):
+    created = await control_plane.create_workflow(create_command())
+    first = await control_plane.claim_job(claim_command("lost-worker"))
+    assert first is not None
+    engine = create_async_engine(migrated_postgres_url)
+    async with engine.begin() as connection:
+        await connection.execute(
+            sa.update(WorkflowJobRunRow)
+            .where(WorkflowJobRunRow.id == first.run_id)
+            .values(lease_expires_at=datetime.now(UTC) - timedelta(seconds=1))
+        )
+    await engine.dispose()
+
+    second = await control_plane.claim_job(claim_command("replacement-worker"))
+
+    assert second is not None
+    assert second.run_id != first.run_id
+    with pytest.raises(StaleRunError):
+        await control_plane.report_run_result(
+            ReportRunResultCommand(run_id=first.run_id, result=successful_draft())
+        )
+    trace = await control_plane.read_workflow_trace(created.workflow.id, create_command().context)
+    draft = next(job for job in trace.jobs if job.kind == DRAFT_RENEWAL_EMAIL_KIND)
+    assert draft.status == "running"
+    assert draft.attempts == 2
+    assert [run.status for run in trace.runs] == ["abandoned", "running"]
+    assert [event.event_type for event in trace.events].count("run_abandoned") == 1
+
+    engine = create_async_engine(migrated_postgres_url)
+    async with engine.begin() as connection:
+        await connection.execute(
+            sa.update(WorkflowJobRunRow)
+            .where(WorkflowJobRunRow.id == second.run_id)
+            .values(lease_expires_at=datetime.now(UTC) - timedelta(seconds=1))
+        )
+    await engine.dispose()
+    assert await control_plane.claim_job(claim_command("third-worker")) is None
+    trace = await control_plane.read_workflow_trace(created.workflow.id, create_command().context)
+    draft = next(job for job in trace.jobs if job.kind == DRAFT_RENEWAL_EMAIL_KIND)
+    assert draft.status == "failed"
+    assert [run.status for run in trace.runs] == ["abandoned", "abandoned"]
+
+
 class _DraftRuntime:
     def __init__(self, runtime_instance_id: UUID, seen: list[tuple[UUID, dict[str, object]]]):
         self.runtime_instance_id = runtime_instance_id
@@ -285,6 +334,33 @@ async def test_worker_uses_disposable_registry_selected_runtime(
     assert next(job for job in trace.jobs if job.kind == DRAFT_RENEWAL_EMAIL_KIND).status == (
         "succeeded"
     )
+
+
+async def test_worker_replays_identical_result_after_transient_report_failure(
+    control_plane: WorkflowControlPlane,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    await control_plane.create_workflow(create_command())
+    original_report = control_plane.report_run_result
+    calls = 0
+
+    async def flaky_report(command):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OSError("database response lost")
+        return await original_report(command)
+
+    monkeypatch.setattr(control_plane, "report_run_result", flaky_report)
+    worker = WorkflowWorker(
+        control_plane=control_plane,
+        executors={"renewal_email_drafter": _DraftRuntimeFactory()},
+        worker_id="draft-worker",
+        application_build="test-build",
+    )
+
+    assert await worker.run_once() is not None
+    assert calls == 2
 
 
 async def test_draft_only_worker_leaves_unsupported_send_job_unclaimed(
@@ -351,7 +427,7 @@ class _NotificationInteractionFactory:
         self.live = 0
 
     @asynccontextmanager
-    async def create(self):
+    async def create(self, _worker_id: str, _delivery_attempt: int):
         self.live += 1
         try:
             yield _NotificationInteraction(self.calls)
@@ -366,7 +442,7 @@ class _FailingNotificationInteraction:
 
 class _FailingNotificationInteractionFactory:
     @asynccontextmanager
-    async def create(self):
+    async def create(self, _worker_id: str, _delivery_attempt: int):
         yield _FailingNotificationInteraction()
 
 
@@ -516,13 +592,15 @@ class _ApprovalPresenter:
         _notification_id: UUID,
         _destination_party_id: UUID,
         effect: dict[str, object],
-    ) -> None:
+    ) -> str:
         self.effects.append(effect)
+        return "presented"
 
 
 async def test_fresh_interaction_reloads_packet_and_presents_exact_send_input(
     control_plane: WorkflowControlPlane,
     migrated_postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
 ):
     created = await control_plane.create_workflow(create_command())
     claimed = await control_plane.claim_job(claim_command())
@@ -533,10 +611,61 @@ async def test_fresh_interaction_reloads_packet_and_presents_exact_send_input(
     database = WorkflowDatabase(migrated_postgres_url)
     retrieval = WorkflowRetrieval(database=database, cursor_secret=b"notification-test")
     presenter = _ApprovalPresenter()
+    calls = 0
+
+    async def fake_llm_call(self, _system_prompt, _messages):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "id": "read",
+                                    "function": {
+                                        "name": "read_workflow_packet",
+                                        "arguments": json.dumps(
+                                            {"workflow_id": str(created.workflow.id)}
+                                        ),
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                ]
+            }
+        if calls == 2:
+            send = next(job for job in created.jobs if job.kind != DRAFT_RENEWAL_EMAIL_KIND)
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "id": "present",
+                                    "function": {
+                                        "name": "present_approval_request",
+                                        "arguments": json.dumps({"send_job_id": str(send.id)}),
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                ]
+            }
+        return {"choices": [{"message": {"content": "Presented.", "tool_calls": []}}]}
+
+    monkeypatch.setattr(InteractionAgentRuntime, "_make_llm_call", fake_llm_call)
     factory = FreshWorkflowInteractionFactory(
         control_plane=control_plane,
         retrieval=retrieval,
         presenter=presenter,
+        settings=Settings(openrouter_api_key="test-key"),
+        organization_party_id=ORGANIZATION_ID,
     )
     worker = NotificationWorker(
         control_plane=control_plane,
@@ -558,9 +687,9 @@ async def test_fresh_interaction_reloads_packet_and_presents_exact_send_input(
             "body": "Hello John Smith,\n\nLet's review your 2026 renewal options.",
         }
     ]
-    async with factory.create() as first:
+    async with factory.create("notification-worker", 1) as first:
         first_runtime_id = first.runtime_instance_id
-    async with factory.create() as second:
+    async with factory.create("notification-worker", 2) as second:
         second_runtime_id = second.runtime_instance_id
     assert first_runtime_id != second_runtime_id
     await database.dispose()
