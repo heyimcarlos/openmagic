@@ -218,6 +218,35 @@ class WorkflowKindRegistry:
             raise UnknownWorkflowJobKindError(job_kind)
         return contract.requires_approval
 
+    def job_contract(self, job_kind: str) -> JobKindContract:
+        """Resolve trusted execution behavior for a persisted Job Kind."""
+
+        contract = self._job_kinds.get(job_kind)
+        if contract is None:
+            raise UnknownWorkflowJobKindError(job_kind)
+        return contract
+
+    def validate_job_input(self, job_kind: str, value: dict[str, Any]) -> dict[str, Any]:
+        """Revalidate persisted input before it crosses the execution boundary."""
+
+        contract = self.job_contract(job_kind)
+        try:
+            validated = contract.input_schema.model_validate(value)
+        except ValidationError as exc:
+            raise InvalidWorkflowProposalError("invalid persisted Workflow Job input") from exc
+        return validated.model_dump(mode="json")
+
+    def validate_success_data(self, job_kind: str, value: object) -> dict[str, Any]:
+        """Validate successful Run data before publishing canonical Job output."""
+
+        contract = self.job_contract(job_kind)
+        try:
+            run_data = contract.run_data_schema.model_validate(value)
+            output = contract.output_schema.model_validate(run_data)
+        except ValidationError as exc:
+            raise InvalidWorkflowProposalError("invalid successful Run data") from exc
+        return output.model_dump(mode="json")
+
     @staticmethod
     def _validate_dependencies(job: WorkflowJobProposal, known_keys: set[str]) -> None:
         if len(job.depends_on) != len(set(job.depends_on)):
