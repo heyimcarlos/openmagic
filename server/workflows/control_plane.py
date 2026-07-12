@@ -15,6 +15,7 @@ from .contracts import (
     AcknowledgeNotificationCommand,
     ApprovalGrant,
     ApproveWorkflowJobCommand,
+    AuthorityRevocationResult,
     BeginExternalEffectDispatchCommand,
     CancelWorkflowCommand,
     CancelWorkflowResult,
@@ -27,8 +28,10 @@ from .contracts import (
     NotificationPresentationContext,
     NotificationStatusContext,
     ProposeWorkflowJobsCommand,
+    RecordApprovalCauseCommand,
     ReportNotificationFailureCommand,
     ReportRunResultCommand,
+    RevokeWorkflowAuthorityCommand,
     WorkflowCommandContext,
     WorkflowExecutionPacket,
     WorkflowProposal,
@@ -205,6 +208,9 @@ class WorkflowControlPlane:
     async def approve_job(self, command: ApproveWorkflowJobCommand) -> ApprovalGrant:
         return await self._approval.approve_job(command)
 
+    async def record_approval_cause(self, command: RecordApprovalCauseCommand) -> None:
+        await self._approval.record_cause(command)
+
     async def begin_external_effect_dispatch(
         self,
         command: BeginExternalEffectDispatchCommand,
@@ -213,6 +219,12 @@ class WorkflowControlPlane:
 
     async def cancel_workflow(self, command: CancelWorkflowCommand) -> CancelWorkflowResult:
         return await self._lifecycle.cancel_workflow(command)
+
+    async def revoke_authority(
+        self,
+        command: RevokeWorkflowAuthorityCommand,
+    ) -> AuthorityRevocationResult:
+        return await self._lifecycle.revoke_authority(command)
 
     async def report_run_result(
         self,

@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from uuid import UUID
 
 import sqlalchemy as sa
-from sqlalchemy.ext.asyncio import AsyncSession
 
+from .authority import CurrentBrokerAuthority
 from .contracts import BeginExternalEffectDispatchCommand, WorkflowCommandContext
 from .database import WorkflowDatabase
 from .email_effects import (
@@ -20,10 +19,6 @@ from .email_effects import (
 from .errors import StaleRunError, WorkflowAuthorizationError, WorkflowLifecycleError
 from .models import WorkflowEventRow, WorkflowJobRow, WorkflowJobRunRow, WorkflowRow
 from .registry import GMAIL_SEND_EMAIL_KIND, WorkflowKindRegistry
-
-CurrentBrokerAuthority = Callable[
-    [AsyncSession, WorkflowCommandContext, WorkflowRow], Awaitable[bool]
-]
 
 
 class WorkflowExternalEffectProtocol:

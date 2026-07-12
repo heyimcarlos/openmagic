@@ -65,6 +65,13 @@ class ApproveWorkflowJobCommand(WorkflowContract):
     expected_draft_revision_id: UUID
 
 
+class RecordApprovalCauseCommand(WorkflowContract):
+    """Persist one trusted human message or UI action before agent interpretation."""
+
+    context: WorkflowCommandContext
+    content: str = Field(min_length=1, max_length=10_000)
+
+
 class CancelWorkflowCommand(WorkflowContract):
     """Atomically cancel one safely cancelable Workflow aggregate."""
 
@@ -75,6 +82,25 @@ class CancelWorkflowCommand(WorkflowContract):
 class CancelWorkflowResult(WorkflowContract):
     workflow_id: UUID
     outcome: Literal["cancelled", "too_late"]
+
+
+class RevokeWorkflowAuthorityCommand(WorkflowContract):
+    """Revoke one Broker authority fact and invalidate unconsumed approvals."""
+
+    context: WorkflowCommandContext
+    workflow_id: UUID
+    subject_party_id: UUID
+    reason: Literal[
+        "approver_identity_revoked",
+        "broker_role_revoked",
+        "organization_membership_revoked",
+    ]
+
+
+class AuthorityRevocationResult(WorkflowContract):
+    workflow_id: UUID
+    reason: str
+    invalidated_grants: int
 
 
 class ApprovalGrant(WorkflowContract):

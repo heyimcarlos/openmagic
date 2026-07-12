@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .authority import CurrentBrokerAuthority
 from .contracts import (
     ClaimWorkflowJobCommand,
     CommittedRunResult,
@@ -37,10 +37,6 @@ from .registry import (
     WorkflowCompletionView,
     WorkflowKindRegistry,
 )
-
-CurrentBrokerAuthority = Callable[
-    [AsyncSession, WorkflowCommandContext, WorkflowRow], Awaitable[bool]
-]
 
 
 class WorkflowExecutionProtocol:
@@ -279,6 +275,20 @@ class WorkflowExecutionProtocol:
             ):
                 raise StaleRunError("Run no longer has Execution Authority")
 
+            contract = self._registry.job_contract(job.kind)
+            dispatch = None
+            if contract.execution_strategy == ExecutionStrategy.DETERMINISTIC_ADAPTER:
+                dispatch = await session.scalar(
+                    sa.select(WorkflowEventRow).where(
+                        WorkflowEventRow.workflow_id == workflow.id,
+                        WorkflowEventRow.job_id == job.id,
+                        WorkflowEventRow.run_id == run.id,
+                        WorkflowEventRow.event_type == "external_effect_dispatch_started",
+                    )
+                )
+                if command.result.outcome in {"succeeded", "uncertain"} and dispatch is None:
+                    raise StaleRunError("External Effect result has no committed dispatch")
+
             now = datetime.now(UTC)
             run.result = normalized_result
             run.finished_at = now
@@ -297,16 +307,18 @@ class WorkflowExecutionProtocol:
                 self._append_run_event(session, workflow, job, run, "run_outcome_uncertain", {})
             else:
                 run.status = "failed"
-                contract = self._registry.job_contract(job.kind)
                 error_code = (
                     command.result.error.get("code") if command.result.error is not None else None
                 )
                 retry_scheduled = (
-                    isinstance(error_code, str)
+                    dispatch is None
+                    and isinstance(error_code, str)
                     and error_code in contract.retryable_error_codes
                     and job.attempts < job.max_attempts
                 )
-                if retry_scheduled:
+                if dispatch is not None:
+                    job.status = "waiting"
+                elif retry_scheduled:
                     job.status = "queued"
                     job.available_at = now + contract.retry_backoff * job.attempts
                 else:

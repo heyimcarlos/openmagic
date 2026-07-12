@@ -7,6 +7,7 @@ from .contracts import (
     AcknowledgeNotificationCommand,
     ApprovalGrant,
     ApproveWorkflowJobCommand,
+    AuthorityRevocationResult,
     BeginExternalEffectDispatchCommand,
     CancelWorkflowCommand,
     CancelWorkflowResult,
@@ -19,8 +20,10 @@ from .contracts import (
     NotificationPresentationContext,
     NotificationStatusContext,
     ProposeWorkflowJobsCommand,
+    RecordApprovalCauseCommand,
     ReportNotificationFailureCommand,
     ReportRunResultCommand,
+    RevokeWorkflowAuthorityCommand,
     RunResult,
     WorkflowCommandContext,
     WorkflowExecutionPacket,
@@ -31,6 +34,12 @@ from .contracts import (
 from .control_plane import WorkflowControlPlane
 from .database import WorkflowDatabase
 from .demo_seed import seed_v0_demo
+from .email_adapter import (
+    COMPOSIO_GMAIL_TOOLKIT_VERSION,
+    ComposioGmailSendAdapter,
+    ComposioMailboxBinding,
+    EmailSendAdapter,
+)
 from .email_effects import (
     EmailSendDispatchV1,
     EmailSendEffectV1,
@@ -50,6 +59,7 @@ from .errors import (
     WorkflowLifecycleError,
     WorkflowNotFoundError,
 )
+from .mailbox_directory import VerifiedMailbox, resolve_verified_mailbox
 from .models import Base as WorkflowModelBase
 from .registry import (
     DRAFT_RENEWAL_EMAIL_KIND,
@@ -71,20 +81,25 @@ from .retrieval_contracts import (
 from .worker import NotificationWorker, WorkflowWorker
 
 __all__ = [
+    "COMPOSIO_GMAIL_TOOLKIT_VERSION",
     "DRAFT_RENEWAL_EMAIL_KIND",
     "GMAIL_SEND_EMAIL_KIND",
     "RENEWAL_OUTREACH_KIND",
     "AcknowledgeNotificationCommand",
     "ApprovalGrant",
     "ApproveWorkflowJobCommand",
+    "AuthorityRevocationResult",
     "BeginExternalEffectDispatchCommand",
     "CancelWorkflowCommand",
     "CancelWorkflowResult",
     "ClaimNotificationCommand",
     "ClaimWorkflowJobCommand",
     "CommittedRunResult",
+    "ComposioGmailSendAdapter",
+    "ComposioMailboxBinding",
     "CreateWorkflowCommand",
     "DraftRenewalEmailOutput",
+    "EmailSendAdapter",
     "EmailSendDispatchV1",
     "EmailSendEffectV1",
     "EmailSendExecutionContextV1",
@@ -98,8 +113,10 @@ __all__ = [
     "NotificationStatusContext",
     "NotificationWorker",
     "ProposeWorkflowJobsCommand",
+    "RecordApprovalCauseCommand",
     "ReportNotificationFailureCommand",
     "ReportRunResultCommand",
+    "RevokeWorkflowAuthorityCommand",
     "RunResult",
     "RunResultConflictError",
     "StaleRunError",
@@ -107,6 +124,7 @@ __all__ = [
     "StaticWorkflowAuthority",
     "UnknownWorkflowJobKindError",
     "UnknownWorkflowKindError",
+    "VerifiedMailbox",
     "WorkflowAuthority",
     "WorkflowAuthorizationError",
     "WorkflowAuthorizationScope",
@@ -130,5 +148,6 @@ __all__ = [
     "WorkflowTrace",
     "WorkflowWorker",
     "default_workflow_registry",
+    "resolve_verified_mailbox",
     "seed_v0_demo",
 ]

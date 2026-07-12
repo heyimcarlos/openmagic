@@ -2,20 +2,26 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .contracts import CancelWorkflowCommand, CancelWorkflowResult, WorkflowCommandContext
+from .authority import CurrentBrokerAuthority
+from .contracts import (
+    AuthorityRevocationResult,
+    CancelWorkflowCommand,
+    CancelWorkflowResult,
+    RevokeWorkflowAuthorityCommand,
+)
 from .database import WorkflowDatabase
 from .errors import WorkflowAuthorizationError, WorkflowLifecycleError
+from .identity_models import (
+    OrganizationMembershipRow,
+    PartyIdentifierRow,
+    WorkflowParticipantRoleRow,
+)
 from .models import WorkflowEventRow, WorkflowJobRow, WorkflowJobRunRow, WorkflowRow
-
-CurrentBrokerAuthority = Callable[
-    [AsyncSession, WorkflowCommandContext, WorkflowRow], Awaitable[bool]
-]
 
 
 class WorkflowLifecycleProtocol:
@@ -28,6 +34,138 @@ class WorkflowLifecycleProtocol:
     ) -> None:
         self._database = database
         self._has_current_broker_authority = has_current_broker_authority
+
+    async def revoke_authority(
+        self,
+        command: RevokeWorkflowAuthorityCommand,
+    ) -> AuthorityRevocationResult:
+        """Serialize authority revocation against dispatch for one Workflow."""
+
+        async with self._database.transaction() as session:
+            workflow = await session.scalar(
+                sa.select(WorkflowRow)
+                .where(WorkflowRow.id == command.workflow_id)
+                .with_for_update()
+            )
+            if workflow is None:
+                raise WorkflowLifecycleError("Workflow does not exist")
+            if command.subject_party_id != command.context.actor_party_id:
+                raise WorkflowAuthorizationError("V0 authority revocation is self-scoped")
+            if not await self._has_current_broker_authority(session, command.context, workflow):
+                raise WorkflowAuthorizationError("Party cannot revoke Workflow authority")
+
+            now = datetime.now(UTC)
+            await self._revoke_authority_fact(session, workflow, command, now)
+            approvals = (
+                await session.scalars(
+                    sa.select(WorkflowEventRow).where(
+                        WorkflowEventRow.workflow_id == workflow.id,
+                        WorkflowEventRow.event_type == "approval_granted",
+                        WorkflowEventRow.actor_id == str(command.subject_party_id),
+                    )
+                )
+            ).all()
+            invalidated = 0
+            for approval in approvals:
+                if approval.job_id is None:
+                    continue
+                dispatch = await session.scalar(
+                    sa.select(WorkflowEventRow.id).where(
+                        WorkflowEventRow.workflow_id == workflow.id,
+                        WorkflowEventRow.job_id == approval.job_id,
+                        WorkflowEventRow.event_type == "external_effect_dispatch_started",
+                    )
+                )
+                prior = await session.scalar(
+                    sa.select(WorkflowEventRow.id).where(
+                        WorkflowEventRow.workflow_id == workflow.id,
+                        WorkflowEventRow.approval_grant_id == approval.id,
+                        WorkflowEventRow.event_type == "approval_invalidated",
+                    )
+                )
+                if dispatch is not None or prior is not None:
+                    continue
+                session.add(
+                    WorkflowEventRow(
+                        workflow_id=workflow.id,
+                        job_id=approval.job_id,
+                        approval_grant_id=approval.id,
+                        event_type="approval_invalidated",
+                        actor_type="party",
+                        actor_id=str(command.context.actor_party_id),
+                        cause_type=command.context.cause_type,
+                        cause_id=command.context.cause_id,
+                        data={
+                            "reason": command.reason,
+                            "approval_grant_id": str(approval.id),
+                        },
+                    )
+                )
+                runs = (
+                    await session.scalars(
+                        sa.select(WorkflowJobRunRow).where(
+                            WorkflowJobRunRow.workflow_id == workflow.id,
+                            WorkflowJobRunRow.job_id == approval.job_id,
+                            WorkflowJobRunRow.status == "running",
+                        )
+                    )
+                ).all()
+                for run in runs:
+                    run.status = "cancelled"
+                    run.finished_at = now
+                job = await session.get(WorkflowJobRow, approval.job_id)
+                if job is not None and job.status in {"waiting", "queued", "running"}:
+                    job.status = "waiting"
+                invalidated += 1
+            await session.flush()
+            return AuthorityRevocationResult(
+                workflow_id=workflow.id,
+                reason=command.reason,
+                invalidated_grants=invalidated,
+            )
+
+    @staticmethod
+    async def _revoke_authority_fact(
+        session: AsyncSession,
+        workflow: WorkflowRow,
+        command: RevokeWorkflowAuthorityCommand,
+        now: datetime,
+    ) -> None:
+        if command.reason == "broker_role_revoked":
+            row = await session.scalar(
+                sa.select(WorkflowParticipantRoleRow)
+                .where(
+                    WorkflowParticipantRoleRow.workflow_id == workflow.id,
+                    WorkflowParticipantRoleRow.party_id == command.subject_party_id,
+                    WorkflowParticipantRoleRow.role == "Broker",
+                    WorkflowParticipantRoleRow.revoked_at.is_(None),
+                )
+                .with_for_update()
+            )
+        elif command.reason == "organization_membership_revoked":
+            row = await session.scalar(
+                sa.select(OrganizationMembershipRow)
+                .where(
+                    OrganizationMembershipRow.person_party_id == command.subject_party_id,
+                    OrganizationMembershipRow.organization_party_id
+                    == workflow.organization_party_id,
+                    OrganizationMembershipRow.revoked_at.is_(None),
+                )
+                .with_for_update()
+            )
+        else:
+            row = await session.scalar(
+                sa.select(PartyIdentifierRow)
+                .where(
+                    PartyIdentifierRow.party_id == command.subject_party_id,
+                    PartyIdentifierRow.kind == "email",
+                    PartyIdentifierRow.revoked_at.is_(None),
+                )
+                .with_for_update()
+            )
+        if row is None:
+            raise WorkflowLifecycleError("Authority fact is not currently active")
+        row.revoked_at = now
 
     async def cancel_workflow(self, command: CancelWorkflowCommand) -> CancelWorkflowResult:
         async with self._database.transaction() as session:

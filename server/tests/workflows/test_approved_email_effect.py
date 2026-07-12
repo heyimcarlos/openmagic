@@ -25,7 +25,9 @@ from server.workflows import (
     ClaimNotificationCommand,
     ClaimWorkflowJobCommand,
     NotificationWorker,
+    RecordApprovalCauseCommand,
     ReportRunResultCommand,
+    RevokeWorkflowAuthorityCommand,
     RunResult,
     RunResultConflictError,
     WorkflowAuthorizationError,
@@ -88,7 +90,23 @@ async def presented_send(control_plane: WorkflowControlPlane):
         "notification-worker",
         notification.delivery_attempt,
     )
+    await record_cause(control_plane, "approval-message-1", "Yes, send this exact email")
     return created, presentation
+
+
+async def record_cause(
+    control_plane: WorkflowControlPlane,
+    cause_id: str,
+    content: str,
+    *,
+    context: WorkflowCommandContext | None = None,
+) -> None:
+    await control_plane.record_approval_cause(
+        RecordApprovalCauseCommand(
+            context=(context or create_command().context).model_copy(update={"cause_id": cause_id}),
+            content=content,
+        )
+    )
 
 
 async def test_exact_presented_send_approval_is_idempotent(
@@ -134,6 +152,7 @@ async def test_stale_or_unauthorized_approval_changes_nothing(
 ):
     created, presentation = await presented_send(control_plane)
     broker = create_command().context
+    await record_cause(control_plane, "wrong-revision", "Yes, send it")
     with pytest.raises(WorkflowLifecycleError, match="Draft Revision is stale"):
         await control_plane.approve_job(
             ApproveWorkflowJobCommand(
@@ -154,6 +173,7 @@ async def test_stale_or_unauthorized_approval_changes_nothing(
             .values(revoked_at=datetime.now(UTC))
         )
     await engine.dispose()
+    await record_cause(control_plane, "revoked-approval", "Yes, send it")
     with pytest.raises(WorkflowAuthorizationError):
         await control_plane.approve_job(
             ApproveWorkflowJobCommand(
@@ -164,6 +184,44 @@ async def test_stale_or_unauthorized_approval_changes_nothing(
         )
     trace = await control_plane.read_workflow_trace(created.workflow.id, broker)
     assert not any(event.event_type == "approval_granted" for event in trace.events)
+
+
+async def test_approval_cause_must_follow_presentation_and_match_party(
+    control_plane: WorkflowControlPlane,
+):
+    broker = create_command().context
+    await record_cause(control_plane, "early-message", "Yes, send it")
+    _created, presentation = await presented_send(control_plane)
+
+    with pytest.raises(WorkflowLifecycleError, match="predates the exact presentation"):
+        await control_plane.approve_job(
+            ApproveWorkflowJobCommand(
+                context=broker.model_copy(update={"cause_id": "early-message"}),
+                job_id=presentation.send_job_id,
+                expected_draft_revision_id=presentation.draft_job_id,
+            )
+        )
+
+    foreign_context = broker.model_copy(
+        update={
+            "actor_party_id": broker.organization_party_id,
+            "cause_id": "wrong-author-message",
+        }
+    )
+    await record_cause(
+        control_plane,
+        "wrong-author-message",
+        "Yes, send it",
+        context=foreign_context,
+    )
+    with pytest.raises(WorkflowLifecycleError, match="not authenticated"):
+        await control_plane.approve_job(
+            ApproveWorkflowJobCommand(
+                context=broker.model_copy(update={"cause_id": "wrong-author-message"}),
+                job_id=presentation.send_job_id,
+                expected_draft_revision_id=presentation.draft_job_id,
+            )
+        )
 
 
 async def test_dispatch_consumes_exact_approval_before_provider_call(
@@ -575,6 +633,59 @@ async def test_send_result_replay_is_write_once_and_conflicts_fail(
         )
 
 
+async def test_send_result_requires_dispatch_and_post_dispatch_failure_never_retries(
+    control_plane: WorkflowControlPlane,
+):
+    created, presentation = await presented_send(control_plane)
+    broker = create_command().context
+    await control_plane.approve_job(
+        ApproveWorkflowJobCommand(
+            context=broker.model_copy(update={"cause_id": "approval-message-1"}),
+            job_id=presentation.send_job_id,
+            expected_draft_revision_id=presentation.draft_job_id,
+        )
+    )
+    run = await control_plane.claim_job(
+        ClaimWorkflowJobCommand(
+            worker_id="send-worker",
+            application_build="test-build",
+            lease_duration=timedelta(minutes=5),
+            executor_keys=("composio_gmail_send",),
+        )
+    )
+    assert run is not None
+    success = RunResult(
+        outcome="succeeded",
+        data={
+            "provider": "composio_gmail",
+            "acknowledged": True,
+            "tool_version": "20260702_01",
+        },
+    )
+    with pytest.raises(WorkflowLifecycleError, match="no committed dispatch"):
+        await control_plane.report_run_result(
+            ReportRunResultCommand(run_id=run.run_id, result=success)
+        )
+
+    await control_plane.begin_external_effect_dispatch(
+        BeginExternalEffectDispatchCommand(run_id=run.run_id)
+    )
+    await control_plane.report_run_result(
+        ReportRunResultCommand(
+            run_id=run.run_id,
+            result=RunResult(
+                outcome="failed",
+                error={"code": "provider_temporarily_unavailable"},
+            ),
+        )
+    )
+
+    trace = await control_plane.read_workflow_trace(created.workflow.id, broker)
+    send = next(job for job in trace.jobs if job.id == presentation.send_job_id)
+    assert send.status == "waiting"
+    assert send.attempts == 1
+
+
 async def test_integrity_failure_is_audited_and_never_dispatched(
     control_plane: WorkflowControlPlane,
     migrated_postgres_url: str,
@@ -675,6 +786,77 @@ async def test_cancellation_and_dispatch_have_one_transaction_winner(
         assert invalidations == []
 
 
+async def test_authority_revocation_and_dispatch_have_one_transaction_winner(
+    control_plane: WorkflowControlPlane,
+    migrated_postgres_url: str,
+):
+    created, presentation = await presented_send(control_plane)
+    broker = create_command().context
+    await control_plane.approve_job(
+        ApproveWorkflowJobCommand(
+            context=broker.model_copy(update={"cause_id": "approval-message-1"}),
+            job_id=presentation.send_job_id,
+            expected_draft_revision_id=presentation.draft_job_id,
+        )
+    )
+    run = await control_plane.claim_job(
+        ClaimWorkflowJobCommand(
+            worker_id="send-worker",
+            application_build="test-build",
+            lease_duration=timedelta(minutes=5),
+            executor_keys=("composio_gmail_send",),
+        )
+    )
+    assert run is not None
+
+    dispatch, revocation = await asyncio.gather(
+        control_plane.begin_external_effect_dispatch(
+            BeginExternalEffectDispatchCommand(run_id=run.run_id)
+        ),
+        control_plane.revoke_authority(
+            RevokeWorkflowAuthorityCommand(
+                context=broker.model_copy(update={"cause_id": "revoke-role-message"}),
+                workflow_id=created.workflow.id,
+                subject_party_id=broker.actor_party_id,
+                reason="broker_role_revoked",
+            )
+        ),
+        return_exceptions=True,
+    )
+
+    assert not isinstance(revocation, BaseException)
+    trace = await control_plane.read_workflow_trace(created.workflow.id, broker)
+    invalidations = [event for event in trace.events if event.event_type == "approval_invalidated"]
+    if isinstance(dispatch, WorkflowLifecycleError):
+        assert revocation.invalidated_grants == 1
+        assert len(invalidations) == 1
+        assert invalidations[0].data["reason"] == "broker_role_revoked"
+        send = next(job for job in trace.jobs if job.id == presentation.send_job_id)
+        assert send.status == "waiting"
+        send_run = next(item for item in trace.runs if item.id == run.run_id)
+        assert send_run.status == "cancelled"
+
+        engine = create_async_engine(migrated_postgres_url)
+        async with engine.begin() as connection:
+            await connection.execute(
+                sa.update(WorkflowParticipantRoleRow)
+                .where(
+                    WorkflowParticipantRoleRow.workflow_id == created.workflow.id,
+                    WorkflowParticipantRoleRow.party_id == broker.actor_party_id,
+                    WorkflowParticipantRoleRow.role == "Broker",
+                )
+                .values(revoked_at=None)
+            )
+        await engine.dispose()
+        with pytest.raises(WorkflowLifecycleError):
+            await control_plane.begin_external_effect_dispatch(
+                BeginExternalEffectDispatchCommand(run_id=run.run_id)
+            )
+    else:
+        assert revocation.invalidated_grants == 0
+        assert invalidations == []
+
+
 async def test_interaction_tool_approves_only_loaded_exact_job(
     control_plane: WorkflowControlPlane,
     migrated_postgres_url: str,
@@ -692,6 +874,7 @@ async def test_interaction_tool_approves_only_loaded_exact_job(
         cause_id="approval-message-tool",
         trusted_workflow_id=created.workflow.id,
     )
+    await toolbox.record_user_cause(context, "I approve sending this exact email")
     packet = await toolbox.invoke(
         "read_workflow_packet",
         {"workflow_id": str(created.workflow.id)},

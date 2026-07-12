@@ -13,6 +13,7 @@ from server.workflows import (
     GMAIL_SEND_EMAIL_KIND,
     ApproveWorkflowJobCommand,
     ProposeWorkflowJobsCommand,
+    RecordApprovalCauseCommand,
     WorkflowCommandContext,
     WorkflowControlPlane,
     WorkflowError,
@@ -117,6 +118,25 @@ class WorkflowInteractionToolbox:
     @property
     def schemas(self) -> tuple[dict[str, Any], ...]:
         return WORKFLOW_TOOL_SCHEMAS
+
+    async def record_user_cause(
+        self,
+        context: InteractionToolContext,
+        content: str,
+    ) -> None:
+        """Persist the trusted human message before the model interprets it."""
+
+        await self._control_plane.record_approval_cause(
+            RecordApprovalCauseCommand(
+                context=WorkflowCommandContext(
+                    actor_party_id=context.actor_party_id,
+                    organization_party_id=context.organization_party_id,
+                    cause_type="message",
+                    cause_id=context.cause_id,
+                ),
+                content=content,
+            )
+        )
 
     async def invoke(
         self,

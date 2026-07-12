@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .authority import CurrentBrokerAuthority
 from .contracts import (
     AcknowledgeNotificationCommand,
     ClaimNotificationCommand,
@@ -29,10 +29,6 @@ from .models import (
     WorkflowJobRow,
     WorkflowRow,
 )
-
-CurrentBrokerAuthority = Callable[
-    [AsyncSession, WorkflowCommandContext, WorkflowRow], Awaitable[bool]
-]
 
 
 class WorkflowNotificationProtocol:
