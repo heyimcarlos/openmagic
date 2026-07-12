@@ -67,6 +67,10 @@ class _PresentArguments(_NotificationArguments):
     pass
 
 
+class _PresentStatusArguments(_NotificationArguments):
+    pass
+
+
 _NOTIFICATION_TOOLS: tuple[dict[str, Any], ...] = (
     {
         "type": "function",
@@ -84,12 +88,25 @@ _NOTIFICATION_TOOLS: tuple[dict[str, Any], ...] = (
             "parameters": _PresentArguments.model_json_schema(),
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "present_status_update",
+            "description": "Present the Control Plane-validated Workflow status update.",
+            "parameters": _PresentStatusArguments.model_json_schema(),
+        },
+    },
 )
 
-_NOTIFICATION_PROMPT = """You handle one Workflow Notification in a fresh context.
+_APPROVAL_PROMPT = """You handle one Workflow Notification in a fresh context.
 Read the supplied Workflow Packet, verify that approval is required, then call
 present_approval_request. Do not approve, edit, summarize, select a Job, or
 paraphrase the email. You have no previous conversation context."""
+
+_STATUS_PROMPT = """You handle one Workflow Notification in a fresh context.
+Read the supplied Workflow Packet, verify that the renewal email Send Job and
+Workflow succeeded, then call present_status_update. Do not claim recipient
+delivery or add provider details. You have no previous conversation context."""
 
 
 class _NotificationToolbox:
@@ -103,6 +120,7 @@ class _NotificationToolbox:
         workflow_event_id: UUID,
         workflow_id: UUID,
         destination_party_id: UUID,
+        notification_kind: str,
         worker_id: str,
         delivery_attempt: int,
     ) -> None:
@@ -113,12 +131,22 @@ class _NotificationToolbox:
         self._workflow_event_id = workflow_event_id
         self._workflow_id = workflow_id
         self._destination_party_id = destination_party_id
+        self._notification_kind = notification_kind
         self._worker_id = worker_id
         self._delivery_attempt = delivery_attempt
 
     @property
     def schemas(self) -> tuple[dict[str, Any], ...]:
-        return _NOTIFICATION_TOOLS
+        presentation_tool = (
+            "present_approval_request"
+            if self._notification_kind == "approval_required"
+            else "present_status_update"
+        )
+        return tuple(
+            schema
+            for schema in _NOTIFICATION_TOOLS
+            if schema["function"]["name"] in {"read_workflow_packet", presentation_tool}
+        )
 
     async def invoke(
         self,
@@ -161,11 +189,31 @@ class _NotificationToolbox:
                 user_message=message,
                 recorded_reply=True,
             )
+        if name == "present_status_update":
+            _PresentStatusArguments.model_validate(arguments)
+            if context.loaded_packet is None:
+                return ToolResult(success=False, payload={"code": "workflow_packet_required"})
+            status = await self._control_plane.resolve_notification_status(
+                self._notification_id,
+                self._workflow_event_id,
+                self._workflow_id,
+                self._worker_id,
+                self._delivery_attempt,
+            )
+            if status.destination_party_id != self._destination_party_id:
+                return ToolResult(success=False, payload={"code": "destination_changed"})
+            get_conversation_log().record_reply_once(str(self._notification_id), status.message)
+            return ToolResult(
+                success=True,
+                payload={"status": "presented"},
+                user_message=status.message,
+                recorded_reply=True,
+            )
         return ToolResult(success=False, payload={"code": "unknown_tool"})
 
 
-def _build_notification_prompt() -> str:
-    return _NOTIFICATION_PROMPT
+def _build_notification_prompt(kind: str) -> str:
+    return _APPROVAL_PROMPT if kind == "approval_required" else _STATUS_PROMPT
 
 
 def _prepare_notification_message(
@@ -209,7 +257,7 @@ class FreshWorkflowInteraction:
         if self._used:
             raise RuntimeError("A Notification Interaction runtime may handle only once")
         self._used = True
-        presentation = await self._control_plane.resolve_notification_presentation(
+        audience = await self._control_plane.resolve_notification_audience(
             notification_id,
             workflow_event_id,
             workflow_id,
@@ -223,13 +271,14 @@ class FreshWorkflowInteraction:
             notification_id=notification_id,
             workflow_event_id=workflow_event_id,
             workflow_id=workflow_id,
-            destination_party_id=presentation.destination_party_id,
+            destination_party_id=audience.destination_party_id,
+            notification_kind=audience.kind,
             worker_id=self._worker_id,
             delivery_attempt=self._delivery_attempt,
         )
         runtime = InteractionAgentRuntime(
             toolbox=toolbox,
-            system_prompt_builder=_build_notification_prompt,
+            system_prompt_builder=lambda: _build_notification_prompt(audience.kind),
             message_builder=_prepare_notification_message,
             settings=self._settings,
         )
@@ -243,7 +292,7 @@ class FreshWorkflowInteraction:
                 sort_keys=True,
             ),
             InteractionToolContext(
-                actor_party_id=presentation.destination_party_id,
+                actor_party_id=audience.destination_party_id,
                 organization_party_id=self._organization_party_id,
                 cause_id=f"notification:{notification_id}",
                 trusted_workflow_id=workflow_id,
@@ -260,7 +309,7 @@ class FreshWorkflowInteraction:
                 raise NotificationLifecycleError(f"Resolved Send input lacks {field}")
             return ", ".join(str(value) for value in values) or "None"
 
-        sender = effect.get("sender_mailbox")
+        sender = effect.get("expected_sender_address")
         subject = effect.get("subject")
         body = effect.get("body")
         if not all(isinstance(value, str) and value for value in (sender, subject, body)):

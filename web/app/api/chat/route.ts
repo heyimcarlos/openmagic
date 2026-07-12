@@ -1,10 +1,10 @@
 export const runtime = 'nodejs';
 
 type UIMsgPart = { type: string; text?: string };
-type UIMessage = { role: string; parts?: UIMsgPart[]; content?: string };
+type UIMessage = { id?: string; role: string; parts?: UIMsgPart[]; content?: string };
 
-function uiToOpenAIContent(messages: UIMessage[]): { role: string; content: string }[] {
-  const out: { role: string; content: string }[] = [];
+function uiToOpenAIContent(messages: UIMessage[]): { id?: string; role: string; content: string }[] {
+  const out: { id?: string; role: string; content: string }[] = [];
   for (const m of messages || []) {
     const role = m?.role;
     if (!role) continue;
@@ -14,7 +14,7 @@ function uiToOpenAIContent(messages: UIMessage[]): { role: string; content: stri
     } else if (typeof m.content === 'string') {
       content = m.content;
     }
-    out.push({ role, content });
+    out.push({ id: m.id, role, content });
   }
   return out;
 }
@@ -46,7 +46,11 @@ export async function POST(req: Request) {
   try {
     const upstream = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Accept: 'text/plain, */*' },
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'text/plain, */*',
+        Authorization: `Bearer ${process.env.OPENMAGIC_WORKFLOW_INTERACTION_TOKEN || ''}`,
+      },
       body: JSON.stringify(payload),
     });
     const text = await upstream.text();

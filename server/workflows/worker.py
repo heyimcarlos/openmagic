@@ -11,6 +11,7 @@ from uuid import UUID
 
 from .contracts import (
     AcknowledgeNotificationCommand,
+    BeginExternalEffectDispatchCommand,
     ClaimNotificationCommand,
     ClaimWorkflowJobCommand,
     NotificationDeliveryPacket,
@@ -20,6 +21,8 @@ from .contracts import (
     WorkflowExecutionPacket,
 )
 from .control_plane import WorkflowControlPlane
+from .email_adapter import EmailAdapterValidationError, EmailSendAdapter
+from .email_effects import EmailSendEffectV1
 from .errors import WorkflowError
 
 
@@ -70,13 +73,15 @@ class WorkflowWorker:
         *,
         control_plane: WorkflowControlPlane,
         executors: Mapping[str, DraftExecutionRuntimeFactory],
+        email_adapters: Mapping[str, EmailSendAdapter] | None = None,
         worker_id: str,
         application_build: str,
         lease_duration: timedelta = timedelta(minutes=5),
     ) -> None:
         self._control_plane = control_plane
         self._executors = dict(executors)
-        if not self._executors:
+        self._email_adapters = dict(email_adapters or {})
+        if not self._executors and not self._email_adapters:
             raise ValueError("Workflow Worker requires at least one installed executor")
         self._worker_id = worker_id
         self._application_build = application_build
@@ -90,26 +95,15 @@ class WorkflowWorker:
                 worker_id=self._worker_id,
                 application_build=self._application_build,
                 lease_duration=self._lease_duration,
-                executor_keys=tuple(self._executors),
+                executor_keys=(*self._executors, *self._email_adapters),
             )
         )
         if packet is None:
             return None
-        factory = self._executors.get(packet.executor_key)
-        if factory is None or packet.runtime_instance_id is None:
-            raise RuntimeError(f"No executor is installed for {packet.executor_key!r}")
-
-        try:
-            async with factory.create(packet.runtime_instance_id) as runtime:
-                if runtime.runtime_instance_id != packet.runtime_instance_id:
-                    raise RuntimeError("Runtime identity does not match the claimed Run")
-                result = await runtime.execute(packet.input)
-        except Exception:
-            result = RunResult(
-                outcome="failed",
-                evidence=({"type": "executor_failed"},),
-                error={"code": "executor_unavailable"},
-            )
+        if packet.execution_strategy == "deterministic_adapter":
+            result = await self._execute_email_adapter(packet)
+        else:
+            result = await self._execute_draft(packet)
 
         report = ReportRunResultCommand(run_id=packet.run_id, result=result)
         for retry in range(3):
@@ -123,6 +117,49 @@ class WorkflowWorker:
                     raise
                 await asyncio.sleep(0.1 * (retry + 1))
         return packet
+
+    async def _execute_draft(self, packet: WorkflowExecutionPacket) -> RunResult:
+        factory = self._executors.get(packet.executor_key)
+        if factory is None or packet.runtime_instance_id is None:
+            raise RuntimeError(f"No executor is installed for {packet.executor_key!r}")
+        try:
+            async with factory.create(packet.runtime_instance_id) as runtime:
+                if runtime.runtime_instance_id != packet.runtime_instance_id:
+                    raise RuntimeError("Runtime identity does not match the claimed Run")
+                return await runtime.execute(packet.input)
+        except Exception:
+            return RunResult(
+                outcome="failed",
+                evidence=({"type": "executor_failed"},),
+                error={"code": "executor_unavailable"},
+            )
+
+    async def _execute_email_adapter(self, packet: WorkflowExecutionPacket) -> RunResult:
+        adapter = self._email_adapters.get(packet.executor_key)
+        if adapter is None:
+            raise RuntimeError(f"No adapter is installed for {packet.executor_key!r}")
+        effect = EmailSendEffectV1.model_validate(packet.input)
+        try:
+            adapter.validate_effect(effect)
+        except EmailAdapterValidationError as exc:
+            return RunResult(
+                outcome="failed",
+                evidence=({"type": "adapter_validation_failed_before_dispatch"},),
+                error={"code": "adapter_configuration_invalid", "detail": str(exc)},
+            )
+        dispatch = await self._control_plane.begin_external_effect_dispatch(
+            BeginExternalEffectDispatchCommand(run_id=packet.run_id)
+        )
+        if dispatch.effect != effect:
+            raise RuntimeError("Dispatch effect changed after claim")
+        try:
+            return await adapter.send_email(dispatch.effect, dispatch.context)
+        except Exception as exc:
+            return RunResult(
+                outcome="uncertain",
+                evidence=({"type": "adapter_outcome_uncertain"},),
+                error={"code": "adapter_outcome_uncertain", "detail": type(exc).__name__},
+            )
 
 
 class NotificationWorker:

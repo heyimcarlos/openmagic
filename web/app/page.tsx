@@ -116,6 +116,7 @@ export default function Page() {
       setIsWaitingForResponse(true);
 
       // Optimistically add the user message immediately
+      const sourceId = crypto.randomUUID();
       const userMessage: ChatBubble = {
         id: `user-${Date.now()}`,
         role: 'user',
@@ -131,7 +132,7 @@ export default function Page() {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            messages: [{ role: 'user', content: trimmed }],
+            messages: [{ id: sourceId, role: 'user', content: trimmed }],
           }),
         });
 

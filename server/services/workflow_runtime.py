@@ -15,6 +15,10 @@ from server.agents.interaction_agent.workflow_notifications import (
 from server.config import Settings, get_settings
 from server.logging_config import logger
 from server.workflows import (
+    COMPOSIO_GMAIL_TOOLKIT_VERSION,
+    ComposioGmailSendAdapter,
+    ComposioMailboxBinding,
+    EmailSendAdapter,
     NotificationWorker,
     StaticWorkflowAuthority,
     WorkflowControlPlane,
@@ -22,6 +26,7 @@ from server.workflows import (
     WorkflowRetrieval,
     WorkflowWorker,
     default_workflow_registry,
+    resolve_verified_mailbox,
 )
 
 
@@ -64,11 +69,13 @@ class WorkflowRuntimeService:
             cursor_secret=self._settings.workflow_cursor_secret.encode(),
         )
         self._database = database
+        email_adapters = await self._email_adapters(database)
         self._job_worker = WorkflowWorker(
             control_plane=control_plane,
             executors={
                 "renewal_email_drafter": FreshDraftExecutionAgentFactory(self._settings),
             },
+            email_adapters=email_adapters,
             worker_id=f"workflow-worker:{uuid4()}",
             application_build=self._settings.app_version,
         )
@@ -88,6 +95,36 @@ class WorkflowRuntimeService:
         self._running = True
         self._task = asyncio.create_task(self._run(), name="workflow-runtime")
         logger.info("Workflow runtime started", extra={"interval": self._poll_interval})
+
+    async def _email_adapters(
+        self,
+        database: WorkflowDatabase,
+    ) -> dict[str, EmailSendAdapter]:
+        composio_user_id = self._settings.workflow_composio_user_id
+        if not self._settings.composio_api_key or not composio_user_id:
+            logger.warning("Workflow Gmail adapter disabled because Composio is incomplete")
+            return {}
+        broker_party_id = UUID(self._settings.workflow_broker_party_id or "")
+        mailbox = await resolve_verified_mailbox(database, broker_party_id)
+        if mailbox is None:
+            logger.warning("Workflow Gmail adapter requires one verified Broker mailbox")
+            return {}
+        from composio import Composio
+
+        client = Composio(
+            api_key=self._settings.composio_api_key,
+            toolkit_versions={"gmail": COMPOSIO_GMAIL_TOOLKIT_VERSION},
+        )
+        return {
+            "composio_gmail_send": ComposioGmailSendAdapter(
+                client=client,
+                binding=ComposioMailboxBinding(
+                    sender_mailbox_id=mailbox.id,
+                    expected_sender_address=mailbox.address,
+                    composio_user_id=composio_user_id,
+                ),
+            )
+        }
 
     async def stop(self) -> None:
         self._running = False

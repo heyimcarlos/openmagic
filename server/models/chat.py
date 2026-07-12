@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -8,9 +8,10 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 class ChatMessage(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
+    id: str | None = Field(default=None, min_length=1, max_length=255)
     role: str = Field(..., min_length=1)
     content: str = Field(...)
-    timestamp: Optional[str] = Field(default=None)
+    timestamp: str | None = Field(default=None)
 
     @model_validator(mode="before")
     @classmethod
@@ -19,24 +20,24 @@ class ChatMessage(BaseModel):
             data["content"] = "" if data["content"] is None else str(data["content"])
         return data
 
-    def as_openrouter(self) -> Dict[str, str]:
+    def as_openrouter(self) -> dict[str, str]:
         return {"role": self.role.strip(), "content": self.content}
 
 
 class ChatRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="ignore")
 
-    messages: List[ChatMessage] = Field(default_factory=list)
-    model: Optional[str] = None
-    system: Optional[str] = None
+    messages: list[ChatMessage] = Field(default_factory=list)
+    model: str | None = None
+    system: str | None = None
     stream: bool = True
 
-    def openrouter_messages(self) -> List[Dict[str, str]]:
+    def openrouter_messages(self) -> list[dict[str, str]]:
         return [msg.as_openrouter() for msg in self.messages if msg.content.strip()]
 
 
 class ChatHistoryResponse(BaseModel):
-    messages: List[ChatMessage] = Field(default_factory=list)
+    messages: list[ChatMessage] = Field(default_factory=list)
 
 
 class ChatHistoryClearResponse(BaseModel):

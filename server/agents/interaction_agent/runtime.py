@@ -1,7 +1,7 @@
 """Interaction Agent Runtime - handles LLM calls for user and agent turns."""
 
 import json
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID, uuid4
@@ -56,6 +56,8 @@ class InteractionAgentRuntime:
         tool_context_factory: Callable[[str], InteractionToolContext] | None = None,
         system_prompt_builder: Callable[[], str] = build_system_prompt,
         message_builder: Callable[..., list[dict[str, str]]] = prepare_message_with_history,
+        interaction_cause_recorder: Callable[[InteractionToolContext, str], Awaitable[None]]
+        | None = None,
         settings: Settings | None = None,
     ) -> None:
         settings = settings or get_settings()
@@ -69,6 +71,7 @@ class InteractionAgentRuntime:
         self._tool_context_factory = tool_context_factory or self._legacy_tool_context
         self._system_prompt_builder = system_prompt_builder
         self._message_builder = message_builder
+        self._interaction_cause_recorder = interaction_cause_recorder
 
         if not self.api_key:
             raise ValueError(
@@ -76,16 +79,24 @@ class InteractionAgentRuntime:
             )
 
     # Main entry point for processing user messages through the LLM interaction loop
-    async def execute(self, user_message: str) -> InteractionResult:
+    async def execute(
+        self,
+        user_message: str,
+        *,
+        cause_id: str | None = None,
+    ) -> InteractionResult:
         """Handle a user-authored message."""
 
         try:
             transcript_before = self._load_conversation_transcript()
-            self.conversation_log.record_user_message(user_message)
-
             system_prompt = self._system_prompt_builder()
             messages = self._message_builder(user_message, transcript_before, message_type="user")
-            tool_context = self._tool_context_factory(f"message-{uuid4()}")
+            if self._interaction_cause_recorder is not None and cause_id is None:
+                raise ValueError("Authenticated interaction Cause ID is required")
+            tool_context = self._tool_context_factory(cause_id or f"message-{uuid4()}")
+            if self._interaction_cause_recorder is not None:
+                await self._interaction_cause_recorder(tool_context, user_message)
+            self.conversation_log.record_user_message(user_message)
 
             logger.info("Processing user message through interaction agent")
             summary = await self._run_interaction_loop(system_prompt, messages, tool_context)

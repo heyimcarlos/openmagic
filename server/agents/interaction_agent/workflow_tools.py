@@ -11,7 +11,9 @@ from server.services.conversation import get_conversation_log
 from server.workflows import (
     DRAFT_RENEWAL_EMAIL_KIND,
     GMAIL_SEND_EMAIL_KIND,
+    ApproveWorkflowJobCommand,
     ProposeWorkflowJobsCommand,
+    RecordInteractionCauseCommand,
     WorkflowCommandContext,
     WorkflowControlPlane,
     WorkflowError,
@@ -34,6 +36,11 @@ class _PacketArguments(_ToolArguments):
 
 class _ProposalArguments(_ToolArguments):
     workflow_id: UUID
+
+
+class _ApprovalArguments(_ToolArguments):
+    job_id: UUID
+    expected_draft_revision_id: UUID
 
 
 class _MessageArguments(_ToolArguments):
@@ -72,6 +79,14 @@ WORKFLOW_TOOL_SCHEMAS: tuple[dict[str, Any], ...] = (
     {
         "type": "function",
         "function": {
+            "name": "approve_job",
+            "description": "Submit explicit Party approval for one exact presented Send Job.",
+            "parameters": _ApprovalArguments.model_json_schema(),
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "send_message_to_user",
             "description": "Send one user-visible response.",
             "parameters": _MessageArguments.model_json_schema(),
@@ -103,6 +118,25 @@ class WorkflowInteractionToolbox:
     @property
     def schemas(self) -> tuple[dict[str, Any], ...]:
         return WORKFLOW_TOOL_SCHEMAS
+
+    async def record_interaction_cause(
+        self,
+        context: InteractionToolContext,
+        content: str,
+    ) -> None:
+        """Persist the trusted human message before the model interprets it."""
+
+        await self._control_plane.record_interaction_cause(
+            RecordInteractionCauseCommand(
+                context=WorkflowCommandContext(
+                    actor_party_id=context.actor_party_id,
+                    organization_party_id=context.organization_party_id,
+                    cause_type="message",
+                    cause_id=context.cause_id,
+                ),
+                content=content,
+            )
+        )
 
     async def invoke(
         self,
@@ -146,6 +180,46 @@ class WorkflowInteractionToolbox:
             if name == "propose_renewal_email":
                 request = _ProposalArguments.model_validate(arguments)
                 return await self._propose(request, context)
+            if name == "approve_job":
+                request = _ApprovalArguments.model_validate(arguments)
+                packet = context.loaded_packet
+                if packet is None:
+                    return ToolResult(
+                        success=False,
+                        payload={"code": "workflow_packet_required"},
+                    )
+                job = next(
+                    (
+                        item
+                        for item in packet.jobs
+                        if item.job_id == request.job_id
+                        and item.status == "waiting"
+                        and request.expected_draft_revision_id in item.depends_on_job_ids
+                    ),
+                    None,
+                )
+                if job is None:
+                    return ToolResult(success=False, payload={"code": "stale_approval_target"})
+                grant = await self._control_plane.approve_job(
+                    ApproveWorkflowJobCommand(
+                        context=WorkflowCommandContext(
+                            actor_party_id=context.actor_party_id,
+                            organization_party_id=context.organization_party_id,
+                            cause_type="message",
+                            cause_id=context.cause_id,
+                        ),
+                        job_id=request.job_id,
+                        expected_draft_revision_id=request.expected_draft_revision_id,
+                    )
+                )
+                return ToolResult(
+                    success=True,
+                    payload={
+                        "approval_grant_id": str(grant.approval_grant_id),
+                        "job_id": str(grant.job_id),
+                        "status": "queued",
+                    },
+                )
             if name == "send_message_to_user":
                 request = _MessageArguments.model_validate(arguments)
                 get_conversation_log().record_reply(request.message)

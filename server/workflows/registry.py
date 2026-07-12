@@ -81,7 +81,10 @@ class GmailSendEmailInput(GmailMessageEnvelope):
 
 class GmailSendEmailOutput(KindSchema):
     provider: str
-    accepted: bool
+    acknowledged: bool
+    tool_version: str
+    message_id: str | None = None
+    thread_id: str | None = None
 
 
 class ExecutionStrategy(StrEnum):
@@ -105,6 +108,12 @@ class JobKindContract:
     retryable_error_codes: frozenset[str]
     retry_backoff: timedelta
     requires_approval: bool = False
+    adapter_version: str | None = None
+    provider_tool_version: str | None = None
+
+
+def _never_complete(_view: object) -> bool:
+    return False
 
 
 @dataclass(frozen=True)
@@ -112,6 +121,22 @@ class WorkflowKindContract:
     kind: str
     input_schema: type[KindSchema]
     allowed_job_kinds: frozenset[str]
+    completion_predicate: Callable[[WorkflowCompletionView], bool] = _never_complete
+
+
+@dataclass(frozen=True)
+class WorkflowCompletionJob:
+    id: UUID
+    kind: str
+    status: str
+    revises_job_id: UUID | None
+
+
+@dataclass(frozen=True)
+class WorkflowCompletionView:
+    jobs: tuple[WorkflowCompletionJob, ...]
+    uncertain_job_ids: frozenset[UUID]
+    approved_dispatch_job_ids: frozenset[UUID]
 
 
 @dataclass(frozen=True)
@@ -232,6 +257,16 @@ class WorkflowKindRegistry:
             raise UnknownWorkflowJobKindError(job_kind)
         return contract
 
+    def completion_satisfied(
+        self,
+        workflow_kind: str,
+        view: WorkflowCompletionView,
+    ) -> bool:
+        contract = self._workflow_kinds.get(workflow_kind)
+        if contract is None:
+            raise UnknownWorkflowKindError(workflow_kind)
+        return contract.completion_predicate(view)
+
     def validate_job_input(self, job_kind: str, value: dict[str, Any]) -> dict[str, Any]:
         """Revalidate persisted input before it crosses the execution boundary."""
 
@@ -340,6 +375,24 @@ def _materialize_gmail_input(
     )
 
 
+def _renewal_completion_satisfied(view: WorkflowCompletionView) -> bool:
+    if view.uncertain_job_ids:
+        return False
+    revised_ids = {job.revises_job_id for job in view.jobs if job.revises_job_id is not None}
+    effective_sends = [
+        job for job in view.jobs if job.kind == GMAIL_SEND_EMAIL_KIND and job.id not in revised_ids
+    ]
+    if len(effective_sends) != 1:
+        return False
+    effective_send = effective_sends[0]
+    if (
+        effective_send.status != "succeeded"
+        or effective_send.id not in view.approved_dispatch_job_ids
+    ):
+        return False
+    return all(job.status in {"succeeded", "cancelled"} for job in view.jobs)
+
+
 def default_workflow_registry() -> WorkflowKindRegistry:
     """Build the V0 registry without exposing mutable global state."""
 
@@ -367,16 +420,19 @@ def default_workflow_registry() -> WorkflowKindRegistry:
         materialize_input=_materialize_gmail_input,
         execution_strategy=ExecutionStrategy.DETERMINISTIC_ADAPTER,
         executor_key="composio_gmail_send",
-        max_attempts=1,
+        max_attempts=3,
         success_event_type="email_send_succeeded",
         success_notification_kind="send_confirmed",
         retryable_error_codes=frozenset(),
         retry_backoff=timedelta(seconds=2),
         requires_approval=True,
+        adapter_version="openmagic.composio_gmail.v1",
+        provider_tool_version="GMAIL_SEND_EMAIL@20260702_01",
     )
     renewal = WorkflowKindContract(
         kind=RENEWAL_OUTREACH_KIND,
         input_schema=RenewalOutreachInput,
         allowed_job_kinds=frozenset({draft.kind, send.kind}),
+        completion_predicate=_renewal_completion_satisfied,
     )
     return WorkflowKindRegistry((renewal,), (draft, send))

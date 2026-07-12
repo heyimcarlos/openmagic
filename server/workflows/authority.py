@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
-from collections.abc import Collection
+from collections.abc import Awaitable, Callable, Collection
 from dataclasses import dataclass
 from typing import Protocol
 from uuid import UUID
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from .contracts import WorkflowCommandContext
+from .models import WorkflowRow
 
 AuthorityGrant = tuple[UUID, UUID, str]
+CurrentBrokerAuthority = Callable[
+    [AsyncSession, WorkflowCommandContext, WorkflowRow], Awaitable[bool]
+]
 
 
 @dataclass(frozen=True)
