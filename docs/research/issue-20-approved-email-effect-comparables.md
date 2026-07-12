@@ -156,11 +156,18 @@ toolkit version `20260702_01`. Its successful send receipt uses provider keys
 `id` and `threadId`, which OpenMagic normalizes into `message_id` and
 `thread_id`.
 
-The configured Google Cloud project rejected both the Gmail send and a
-read-only Sent-mail reconciliation query with `403 PERMISSION_DENIED` because
-the Gmail API is disabled for that project. The uniquely correlated messages
-did not appear in the disposable recipient inbox. In both cases OpenMagic had
-already committed one dispatch event, so it conservatively left the Send Job
-waiting and did not retry. A live happy-path smoke remains blocked on enabling
-the Gmail API in the connected Google Cloud project. Deterministic browser QA
-still confirmed that a vague approval creates no Approval Grant or dispatch.
+An initial live run returned `403 PERMISSION_DENIED` after dispatch. OpenMagic
+conservatively left the Send Job waiting and did not retry, which exercised the
+uncertain-effect safety branch. Follow-up inspection confirmed that the Gmail
+API is enabled, the OAuth application is in Testing with the Broker Gmail
+account registered as a test user, and the custom Composio auth configuration
+has one active connected account.
+
+After binding OpenMagic to that connected Composio user, a uniquely correlated
+live message completed the exact approved-send path. The durable trace contained
+one Approval Grant, one dispatch event, one send-success event, one completion
+event, and one send-confirmation Notification. The provider returned a message
+ID, the Send Job succeeded, the Workflow completed, and the disposable AgentMail
+inbox received the exact subject from the expected Gmail sender. Deterministic
+browser QA also confirmed that a vague approval creates no Approval Grant or
+dispatch.
