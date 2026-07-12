@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
@@ -22,6 +24,7 @@ from .models import (
     WorkflowEventRow,
     WorkflowJobDependencyRow,
     WorkflowJobRow,
+    WorkflowRow,
 )
 
 
@@ -130,7 +133,12 @@ class WorkflowNotificationProtocol:
         worker_id: str,
         delivery_attempt: int,
     ) -> NotificationPresentationContext:
-        async with self._database.read_transaction() as session:
+        async with self._database.transaction() as session:
+            workflow = await session.scalar(
+                sa.select(WorkflowRow).where(WorkflowRow.id == workflow_id).with_for_update()
+            )
+            if workflow is None:
+                raise NotificationLifecycleError("Workflow does not exist")
             row = (
                 await session.execute(
                     sa.select(NotificationRow, WorkflowEventRow)
@@ -163,6 +171,21 @@ class WorkflowNotificationProtocol:
                 destination_party_id = UUID(notification.destination_id)
             except ValueError as exc:
                 raise NotificationLifecycleError("Notification destination is invalid") from exc
+
+            committed = await session.scalar(
+                sa.select(WorkflowEventRow).where(
+                    WorkflowEventRow.workflow_id == workflow_id,
+                    WorkflowEventRow.event_type == "approval_presentation_committed",
+                    WorkflowEventRow.cause_type == "notification",
+                    WorkflowEventRow.cause_id == str(notification_id),
+                )
+            )
+            if committed is not None:
+                return await self._committed_presentation(
+                    session,
+                    committed,
+                    destination_party_id,
+                )
 
             draft = await session.scalar(
                 sa.select(WorkflowJobRow).where(
@@ -206,11 +229,96 @@ class WorkflowNotificationProtocol:
                 raise NotificationLifecycleError(
                     "Notification does not identify one current Send Job awaiting approval"
                 )
+            send = eligible[0]
+            effect = await self._resolve_effect(session, workflow_id, send)
+            fingerprint = self._fingerprint(effect)
+            session.add(
+                WorkflowEventRow(
+                    workflow_id=workflow_id,
+                    job_id=send.id,
+                    event_type="approval_presentation_committed",
+                    actor_type="worker",
+                    actor_id=worker_id,
+                    cause_type="notification",
+                    cause_id=str(notification_id),
+                    data={
+                        "draft_job_id": str(draft.id),
+                        "effect_fingerprint": fingerprint,
+                    },
+                )
+            )
+            await session.flush()
             return NotificationPresentationContext(
                 destination_party_id=destination_party_id,
                 draft_job_id=draft.id,
-                send_job_id=eligible[0].id,
+                send_job_id=send.id,
+                effect_fingerprint=fingerprint,
+                effect=effect,
             )
+
+    @classmethod
+    async def _committed_presentation(
+        cls,
+        session: AsyncSession,
+        event: WorkflowEventRow,
+        destination_party_id: UUID,
+    ) -> NotificationPresentationContext:
+        if event.job_id is None:
+            raise NotificationLifecycleError("Committed presentation has no Send Job")
+        try:
+            draft_job_id = UUID(str(event.data["draft_job_id"]))
+            fingerprint = str(event.data["effect_fingerprint"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise NotificationLifecycleError("Committed presentation is invalid") from exc
+        send = await session.scalar(
+            sa.select(WorkflowJobRow).where(
+                WorkflowJobRow.workflow_id == event.workflow_id,
+                WorkflowJobRow.id == event.job_id,
+            )
+        )
+        if send is None:
+            raise NotificationLifecycleError("Committed presentation Send Job is missing")
+        effect = await cls._resolve_effect(session, event.workflow_id, send)
+        if cls._fingerprint(effect) != fingerprint:
+            raise NotificationLifecycleError("Committed presentation fingerprint is invalid")
+        return NotificationPresentationContext(
+            destination_party_id=destination_party_id,
+            draft_job_id=draft_job_id,
+            send_job_id=send.id,
+            effect_fingerprint=fingerprint,
+            effect=effect,
+        )
+
+    @staticmethod
+    async def _resolve_effect(
+        session: AsyncSession,
+        workflow_id: UUID,
+        send: WorkflowJobRow,
+    ) -> dict[str, object]:
+        resolved = dict(send.input)
+        for field, value in send.input.items():
+            if not isinstance(value, dict) or set(value) != {"job_output", "field"}:
+                continue
+            try:
+                source_id = UUID(str(value["job_output"]))
+                source_field = str(value["field"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise NotificationLifecycleError("Send Job input reference is invalid") from exc
+            source = await session.scalar(
+                sa.select(WorkflowJobRow).where(
+                    WorkflowJobRow.workflow_id == workflow_id,
+                    WorkflowJobRow.id == source_id,
+                )
+            )
+            if source is None or source.output is None or source_field not in source.output:
+                raise NotificationLifecycleError("Send Job input reference is unresolved")
+            resolved[field] = source.output[source_field]
+        return resolved
+
+    @staticmethod
+    def _fingerprint(effect: dict[str, object]) -> str:
+        encoded = json.dumps(effect, sort_keys=True, separators=(",", ":")).encode()
+        return hashlib.sha256(encoded).hexdigest()
 
     @staticmethod
     async def _dependencies_succeeded(

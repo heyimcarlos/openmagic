@@ -12,7 +12,6 @@ from pydantic import BaseModel, ConfigDict
 from server.config import Settings
 from server.services.conversation import get_conversation_log
 from server.workflows import (
-    GMAIL_SEND_EMAIL_KIND,
     NotificationLifecycleError,
     WorkflowControlPlane,
     WorkflowInspectionContext,
@@ -151,19 +150,10 @@ class _NotificationToolbox:
             )
             if presentation.destination_party_id != self._destination_party_id:
                 return ToolResult(success=False, payload={"code": "destination_changed"})
-            send_jobs = [
-                job
-                for job in packet.jobs
-                if job.kind == GMAIL_SEND_EMAIL_KIND
-                and job.job_id == presentation.send_job_id
-                and job.status == "waiting"
-            ]
-            if len(send_jobs) != 1 or send_jobs[0].resolved_input is None:
-                return ToolResult(success=False, payload={"code": "resolved_send_required"})
             message = await self._presenter.present(
                 self._notification_id,
                 self._destination_party_id,
-                send_jobs[0].resolved_input,
+                presentation.effect,
             )
             return ToolResult(
                 success=True,

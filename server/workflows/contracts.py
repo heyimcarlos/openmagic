@@ -146,6 +146,8 @@ class NotificationPresentationContext(WorkflowContract):
     destination_party_id: UUID
     draft_job_id: UUID
     send_job_id: UUID
+    effect_fingerprint: str
+    effect: dict[str, Any]
 
 
 class WorkflowTraceWorkflow(WorkflowContract):

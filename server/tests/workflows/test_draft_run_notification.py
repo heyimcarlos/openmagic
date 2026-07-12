@@ -873,3 +873,68 @@ async def test_presentation_rejects_send_job_that_no_longer_waits_for_approval(
             delivery.delivery_attempt,
         )
     await database.dispose()
+
+
+async def test_presentation_commit_wins_before_later_job_replacement(
+    control_plane: WorkflowControlPlane,
+    migrated_postgres_url: str,
+):
+    created = await control_plane.create_workflow(create_command())
+    claimed = await control_plane.claim_job(claim_command())
+    assert claimed is not None
+    await control_plane.report_run_result(
+        ReportRunResultCommand(run_id=claimed.run_id, result=successful_draft())
+    )
+    delivery = await control_plane.claim_notification(
+        ClaimNotificationCommand(
+            worker_id="notification-worker",
+            lease_duration=timedelta(minutes=5),
+        )
+    )
+    assert delivery is not None
+    first = await control_plane.resolve_notification_presentation(
+        delivery.notification_id,
+        delivery.workflow_event_id,
+        delivery.workflow_id,
+        "notification-worker",
+        delivery.delivery_attempt,
+    )
+
+    database = WorkflowDatabase(migrated_postgres_url)
+    async with database.transaction() as session:
+        old_send = await session.get(WorkflowJobRow, first.send_job_id)
+        assert old_send is not None
+        old_send.status = "cancelled"
+        replacement = WorkflowJobRow(
+            workflow_id=old_send.workflow_id,
+            kind=old_send.kind,
+            status="waiting",
+            attempts=0,
+            max_attempts=old_send.max_attempts,
+            input=old_send.input,
+            revises_job_id=old_send.id,
+        )
+        session.add(replacement)
+        await session.flush()
+        session.add(
+            WorkflowJobDependencyRow(
+                workflow_id=old_send.workflow_id,
+                job_id=replacement.id,
+                depends_on_job_id=claimed.job_id,
+            )
+        )
+
+    replay = await control_plane.resolve_notification_presentation(
+        delivery.notification_id,
+        delivery.workflow_event_id,
+        delivery.workflow_id,
+        "notification-worker",
+        delivery.delivery_attempt,
+    )
+
+    assert replay == first
+    trace = await control_plane.read_workflow_trace(created.workflow.id, create_command().context)
+    assert [event.event_type for event in trace.events].count(
+        "approval_presentation_committed"
+    ) == 1
+    await database.dispose()
