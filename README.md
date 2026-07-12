@@ -1,6 +1,6 @@
 # OpenMagic 🌴
 
-OpenMagic is a simplified, open-source take on [Interaction Company’s](https://interaction.co/about) [Poke](https://poke.com/) assistant—built to show how a multi-agent orchestration stack can feel genuinely useful. It keeps the handful of things Poke is great at (email triage, reminders, and persistent agents) while staying easy to spin up locally.
+OpenMagic is a simplified, open-source take on [Interaction Company’s](https://interaction.co/about) [Poke](https://poke.com/) assistant, built to show how a multi-agent orchestration stack can feel genuinely useful. It keeps the handful of things Poke is great at (email triage, reminders, and persistent agents) while staying easy to spin up locally.
 
 - Multi-agent FastAPI backend that mirrors Poke's interaction/execution split, powered by [OpenRouter](https://openrouter.ai/).
 - Gmail tooling via [Composio](https://composio.dev/) for drafting/replying/forwarding without leaving chat.
@@ -8,15 +8,17 @@ OpenMagic is a simplified, open-source take on [Interaction Company’s](https:/
 - Next.js web UI that proxies everything through the shared `.env`, so plugging in API keys is the only setup.
 
 ## Requirements
-- Python 3.10+
+- Python 3.11+
+- [uv](https://docs.astral.sh/uv/)
+- PostgreSQL 17
 - Node.js 18+
 - npm 9+
 
 ## Quickstart
 1. **Clone and enter the repo.**
    ```bash
-   git clone https://github.com/shlokkhemani/OpenPoke
-   cd OpenPoke
+   git clone https://github.com/heyimcarlos/openmagic
+   cd openmagic
    ```
 2. **Create a shared env file.** Copy the template and open it in your editor:
    ```bash
@@ -34,28 +36,19 @@ OpenMagic is a simplified, open-source take on [Interaction Company’s](https:/
    - Create an API key
    - Set up Gmail integration and get your auth config ID
    - Replace `your_composio_api_key_here` and `your_gmail_auth_config_id_here` in `.env`
-4. **(Required) Create and activate a Python 3.10+ virtualenv:**
+4. **Start PostgreSQL.** For a disposable local database:
    ```bash
-   # Ensure you're using Python 3.10+
-   python3.10 -m venv .venv
-   source .venv/bin/activate
-   
-   # Verify Python version (should show 3.10+)
-   python --version
+   docker run --name openmagic-postgres \
+     -e POSTGRES_USER=openmagic \
+     -e POSTGRES_PASSWORD=openmagic \
+     -e POSTGRES_DB=openmagic \
+     -p 5432:5432 \
+     -d postgres:17-alpine
    ```
-   On Windows (PowerShell):
-   ```powershell
-   # Use Python 3.10+ (adjust path as needed)
-   python3.10 -m venv .venv
-   .\.venv\Scripts\Activate.ps1
-   
-   # Verify Python version
-   python --version
-   ```
-
-5. **Install backend dependencies:**
+5. **Install backend dependencies and apply migrations:**
    ```bash
-   pip install -r server/requirements.txt
+   uv sync --locked --group dev
+   uv run alembic upgrade head
    ```
 6. **Install frontend dependencies:**
    ```bash
@@ -63,7 +56,7 @@ OpenMagic is a simplified, open-source take on [Interaction Company’s](https:/
    ```
 7. **Start the FastAPI server:**
    ```bash
-   python -m server.server --reload
+   uv run python -m server.server --reload
    ```
 8. **Start the Next.js app (new terminal):**
    ```bash
@@ -74,9 +67,22 @@ OpenMagic is a simplified, open-source take on [Interaction Company’s](https:/
 The web app proxies API calls to the Python server using the values in `.env`, so keeping both processes running is required for end-to-end flows.
 
 ## Project Layout
-- `server/` – FastAPI application and agents
-- `web/` – Next.js app
-- `server/data/` – runtime data (ignored by git)
+- `server/`: FastAPI application, agent runtimes, and durable Workflow services
+- `web/`: Next.js application
+- `server/migrations/`: PostgreSQL schema migrations
+
+## Backend checks
+
+The Workflow integration suite requires PostgreSQL. If
+`OPENMAGIC_TEST_DATABASE_URL` is absent, Testcontainers starts an isolated
+PostgreSQL 17 container.
+
+```bash
+uv run ruff format --check server/workflows server/tests server/migrations
+uv run ruff check server/workflows server/tests server/migrations
+uv run ty check server/workflows
+uv run pytest server/tests/workflows
+```
 
 ## License
-MIT — see [LICENSE](LICENSE).
+MIT, see [LICENSE](LICENSE).
