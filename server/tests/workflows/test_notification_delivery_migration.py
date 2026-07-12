@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from uuid import UUID
 
+import pytest
 import sqlalchemy as sa
 from alembic import command
 from alembic.config import Config
@@ -15,7 +16,11 @@ EVENT_ID = UUID("73000000-0000-0000-0000-000000000001")
 NOTIFICATION_ID = UUID("74000000-0000-0000-0000-000000000001")
 
 
-def test_upgrade_backfills_existing_delivered_notification(postgres_url: str):
+def test_upgrade_backfills_existing_delivered_notification(
+    postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.delenv("OPENMAGIC_DATABASE_URL", raising=False)
     database_name = "openmagic_notification_migration_test"
     source_url = make_url(postgres_url)
     admin = sa.create_engine(
