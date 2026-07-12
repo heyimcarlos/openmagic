@@ -938,3 +938,46 @@ async def test_presentation_commit_wins_before_later_job_replacement(
         "approval_presentation_committed"
     ) == 1
     await database.dispose()
+
+
+async def test_presentation_rejects_revoked_broker_before_commit(
+    control_plane: WorkflowControlPlane,
+    migrated_postgres_url: str,
+):
+    created = await control_plane.create_workflow(create_command())
+    claimed = await control_plane.claim_job(claim_command())
+    assert claimed is not None
+    await control_plane.report_run_result(
+        ReportRunResultCommand(run_id=claimed.run_id, result=successful_draft())
+    )
+    delivery = await control_plane.claim_notification(
+        ClaimNotificationCommand(
+            worker_id="notification-worker",
+            lease_duration=timedelta(minutes=5),
+        )
+    )
+    assert delivery is not None
+    database = WorkflowDatabase(migrated_postgres_url)
+    async with database.transaction() as session:
+        broker_role = await session.scalar(
+            sa.select(WorkflowParticipantRoleRow).where(
+                WorkflowParticipantRoleRow.workflow_id == created.workflow.id,
+                WorkflowParticipantRoleRow.party_id == create_command().context.actor_party_id,
+                WorkflowParticipantRoleRow.role == "Broker",
+                WorkflowParticipantRoleRow.revoked_at.is_(None),
+            )
+        )
+        assert broker_role is not None
+        broker_role.revoked_at = datetime.now(UTC)
+
+    with pytest.raises(NotificationLifecycleError, match="no longer has Broker authority"):
+        await control_plane.resolve_notification_presentation(
+            delivery.notification_id,
+            delivery.workflow_event_id,
+            delivery.workflow_id,
+            "notification-worker",
+            delivery.delivery_attempt,
+        )
+    trace = await control_plane.read_workflow_trace(created.workflow.id, create_command().context)
+    assert "approval_presentation_committed" not in {event.event_type for event in trace.events}
+    await database.dispose()

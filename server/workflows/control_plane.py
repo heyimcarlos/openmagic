@@ -83,7 +83,10 @@ class WorkflowControlPlane:
             registry=registry,
             has_current_broker_authority=self._has_current_broker_authority,
         )
-        self._notification_delivery = WorkflowNotificationProtocol(database)
+        self._notification_delivery = WorkflowNotificationProtocol(
+            database,
+            self._has_current_broker_authority,
+        )
 
     async def create_workflow(self, command: CreateWorkflowCommand) -> WorkflowTrace:
         validated = self._registry.validate(command.proposal)

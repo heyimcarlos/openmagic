@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
@@ -16,6 +17,7 @@ from .contracts import (
     NotificationDeliveryPacket,
     NotificationPresentationContext,
     ReportNotificationFailureCommand,
+    WorkflowCommandContext,
 )
 from .database import WorkflowDatabase
 from .errors import NotificationLifecycleError
@@ -27,12 +29,21 @@ from .models import (
     WorkflowRow,
 )
 
+CurrentBrokerAuthority = Callable[
+    [AsyncSession, WorkflowCommandContext, WorkflowRow], Awaitable[bool]
+]
+
 
 class WorkflowNotificationProtocol:
     """Own Notification delivery state behind the Control Plane facade."""
 
-    def __init__(self, database: WorkflowDatabase) -> None:
+    def __init__(
+        self,
+        database: WorkflowDatabase,
+        has_current_broker_authority: CurrentBrokerAuthority,
+    ) -> None:
         self._database = database
+        self._has_current_broker_authority = has_current_broker_authority
 
     async def claim_notification(
         self,
@@ -185,6 +196,20 @@ class WorkflowNotificationProtocol:
                     session,
                     committed,
                     destination_party_id,
+                )
+            authorized = await self._has_current_broker_authority(
+                session,
+                WorkflowCommandContext(
+                    actor_party_id=destination_party_id,
+                    organization_party_id=workflow.organization_party_id,
+                    cause_type="message",
+                    cause_id=f"notification:{notification_id}",
+                ),
+                workflow,
+            )
+            if not authorized:
+                raise NotificationLifecycleError(
+                    "Notification destination no longer has Broker authority"
                 )
 
             draft = await session.scalar(
