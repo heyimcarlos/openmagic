@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from datetime import timedelta
 from enum import StrEnum
 from types import MappingProxyType
 from typing import Any, TypeVar
@@ -97,7 +98,12 @@ class JobKindContract:
     run_data_schema: type[KindSchema]
     materialize_input: Callable[[KindSchema, Mapping[str, UUID]], KindSchema]
     execution_strategy: ExecutionStrategy
+    executor_key: str
     max_attempts: int
+    success_event_type: str
+    success_notification_kind: str | None
+    retryable_error_codes: frozenset[str]
+    retry_backoff: timedelta
     requires_approval: bool = False
 
 
@@ -218,6 +224,35 @@ class WorkflowKindRegistry:
             raise UnknownWorkflowJobKindError(job_kind)
         return contract.requires_approval
 
+    def job_contract(self, job_kind: str) -> JobKindContract:
+        """Resolve trusted execution behavior for a persisted Job Kind."""
+
+        contract = self._job_kinds.get(job_kind)
+        if contract is None:
+            raise UnknownWorkflowJobKindError(job_kind)
+        return contract
+
+    def validate_job_input(self, job_kind: str, value: dict[str, Any]) -> dict[str, Any]:
+        """Revalidate persisted input before it crosses the execution boundary."""
+
+        contract = self.job_contract(job_kind)
+        try:
+            validated = contract.input_schema.model_validate(value)
+        except ValidationError as exc:
+            raise InvalidWorkflowProposalError("invalid persisted Workflow Job input") from exc
+        return validated.model_dump(mode="json")
+
+    def validate_success_data(self, job_kind: str, value: object) -> dict[str, Any]:
+        """Validate successful Run data before publishing canonical Job output."""
+
+        contract = self.job_contract(job_kind)
+        try:
+            run_data = contract.run_data_schema.model_validate(value)
+            output = contract.output_schema.model_validate(run_data)
+        except ValidationError as exc:
+            raise InvalidWorkflowProposalError("invalid successful Run data") from exc
+        return output.model_dump(mode="json")
+
     @staticmethod
     def _validate_dependencies(job: WorkflowJobProposal, known_keys: set[str]) -> None:
         if len(job.depends_on) != len(set(job.depends_on)):
@@ -316,7 +351,12 @@ def default_workflow_registry() -> WorkflowKindRegistry:
         run_data_schema=DraftRenewalEmailOutput,
         materialize_input=_keep_validated_input,
         execution_strategy=ExecutionStrategy.FRESH_EXECUTION_AGENT,
+        executor_key="renewal_email_drafter",
         max_attempts=2,
+        success_event_type="draft_ready",
+        success_notification_kind="approval_required",
+        retryable_error_codes=frozenset({"executor_unavailable", "invalid_draft_output"}),
+        retry_backoff=timedelta(seconds=2),
     )
     send = JobKindContract(
         kind=GMAIL_SEND_EMAIL_KIND,
@@ -326,7 +366,12 @@ def default_workflow_registry() -> WorkflowKindRegistry:
         run_data_schema=GmailSendEmailOutput,
         materialize_input=_materialize_gmail_input,
         execution_strategy=ExecutionStrategy.DETERMINISTIC_ADAPTER,
+        executor_key="composio_gmail_send",
         max_attempts=1,
+        success_event_type="email_send_succeeded",
+        success_notification_kind="send_confirmed",
+        retryable_error_codes=frozenset(),
+        retry_backoff=timedelta(seconds=2),
         requires_approval=True,
     )
     renewal = WorkflowKindContract(

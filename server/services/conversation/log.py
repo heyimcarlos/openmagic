@@ -2,27 +2,32 @@ from __future__ import annotations
 
 import re
 import threading
+from collections.abc import Iterator
+from fcntl import LOCK_EX, LOCK_UN, flock
 from html import escape, unescape
 from pathlib import Path
-from typing import Dict, Iterator, List, Optional, Protocol, Tuple
+from typing import Protocol
 
 from ...config import get_settings
 from ...logging_config import logger
 from ...models import ChatMessage
 from ...utils.timezones import now_in_user_timezone
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:  # pragma: no cover - used for type checkers only
-    from .summarization import WorkingMemoryLog
-
 
 _DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
 _CONVERSATION_LOG_PATH = _DATA_DIR / "conversation" / "poke_conversation.log"
 
 
 class TranscriptFormatter(Protocol):
-    def __call__(self, tag: str, timestamp: str, payload: str) -> str:  # pragma: no cover - typing protocol
+    def __call__(
+        self, tag: str, timestamp: str, payload: str
+    ) -> str:  # pragma: no cover - typing protocol
         ...
+
+
+class WorkingMemoryLog(Protocol):
+    def append_entry(self, tag: str, payload: str, timestamp: str) -> None: ...
+
+    def clear(self) -> None: ...
 
 
 def _encode_payload(payload: str) -> str:
@@ -37,10 +42,10 @@ def _decode_payload(payload: str) -> str:
 
 def _default_formatter(tag: str, timestamp: str, payload: str) -> str:
     encoded = _encode_payload(payload)
-    return f"<{tag} timestamp=\"{timestamp}\">{encoded}</{tag}>\n"
+    return f'<{tag} timestamp="{timestamp}">{encoded}</{tag}>\n'
 
 
-def _resolve_working_memory_log() -> "WorkingMemoryLog":
+def _resolve_working_memory_log() -> WorkingMemoryLog:
     from .summarization import get_working_memory_log
 
     return get_working_memory_log()
@@ -67,6 +72,7 @@ class ConversationLog:
 
     def _append(self, tag: str, payload: str) -> str:
         timestamp = now_in_user_timezone("%Y-%m-%d %H:%M:%S")
+        assert isinstance(timestamp, str)
         entry = self._formatter(tag, timestamp, str(payload))
         with self._lock:
             try:
@@ -81,7 +87,7 @@ class ConversationLog:
         self._notify_summarization()
         return timestamp
 
-    def _parse_line(self, line: str) -> Optional[Tuple[str, str, str]]:
+    def _parse_line(self, line: str) -> tuple[str, str, str] | None:
         stripped = line.strip()
         if not stripped.startswith("<") or "</" not in stripped:
             return None
@@ -101,13 +107,13 @@ class ConversationLog:
         if closing_tag != tag:
             return None
         payload = stripped[open_end + 1 : close_start]
-        attributes: Dict[str, str] = {
+        attributes: dict[str, str] = {
             match.group(1): match.group(2) for match in _ATTR_PATTERN.finditer(attr_string)
         }
         timestamp = attributes.get("timestamp", "")
         return tag, timestamp, _decode_payload(payload)
 
-    def iter_entries(self) -> Iterator[Tuple[str, str, str]]:
+    def iter_entries(self) -> Iterator[tuple[str, str, str]]:
         with self._lock:
             try:
                 lines = self._path.read_text(encoding="utf-8").splitlines()
@@ -115,7 +121,8 @@ class ConversationLog:
                 lines = []
             except Exception as exc:  # pragma: no cover - defensive
                 logger.error(
-                    "conversation log read failed", extra={"error": str(exc), "path": str(self._path)}
+                    "conversation log read failed",
+                    extra={"error": str(exc), "path": str(self._path)},
                 )
                 raise
         for line in lines:
@@ -124,11 +131,11 @@ class ConversationLog:
                 yield item
 
     def load_transcript(self) -> str:
-        parts: List[str] = []
+        parts: list[str] = []
         for tag, timestamp, payload in self.iter_entries():
             safe_payload = escape(payload, quote=False)
             if timestamp:
-                parts.append(f"<{tag} timestamp=\"{timestamp}\">{safe_payload}</{tag}>")
+                parts.append(f'<{tag} timestamp="{timestamp}">{safe_payload}</{tag}>')
             else:
                 parts.append(f"<{tag}>{safe_payload}</{tag}>")
         return "\n".join(parts)
@@ -145,6 +152,38 @@ class ConversationLog:
         timestamp = self._append("poke_reply", content)
         self._working_memory_log.append_entry("poke_reply", content, timestamp)
 
+    def record_reply_once(self, delivery_id: str, content: str) -> bool:
+        """Append one correlated reply at most once across process restarts."""
+
+        marker = f'delivery_id="{escape(delivery_id, quote=True)}"'
+        timestamp = now_in_user_timezone("%Y-%m-%d %H:%M:%S")
+        assert isinstance(timestamp, str)
+        entry = (
+            f'<poke_reply timestamp="{timestamp}" {marker}>'
+            f"{_encode_payload(content)}</poke_reply>\n"
+        )
+        with self._lock:
+            lock_path = self._path.with_suffix(f"{self._path.suffix}.lock")
+            with lock_path.open("a", encoding="utf-8") as lock_file:
+                flock(lock_file.fileno(), LOCK_EX)
+                try:
+                    existing = self._path.read_text(encoding="utf-8") if self._path.exists() else ""
+                    if marker in existing:
+                        return False
+                    with self._path.open("a", encoding="utf-8") as handle:
+                        handle.write(entry)
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.error(
+                        "correlated conversation reply failed",
+                        extra={"error": str(exc), "path": str(self._path)},
+                    )
+                    raise
+                finally:
+                    flock(lock_file.fileno(), LOCK_UN)
+        self._working_memory_log.append_entry("poke_reply", content, timestamp)
+        self._notify_summarization()
+        return True
+
     def record_wait(self, reason: str) -> None:
         """Record a wait marker that should not reach the user-facing chat history."""
         timestamp = self._append("wait", reason)
@@ -156,7 +195,7 @@ class ConversationLog:
             return
 
         try:
-            from .summarization import schedule_summarization  # type: ignore import-not-found
+            from .summarization import schedule_summarization
         except Exception as exc:  # pragma: no cover - defensive
             logger.debug(
                 "summarization scheduler unavailable",
@@ -172,8 +211,8 @@ class ConversationLog:
                 extra={"error": str(exc)},
             )
 
-    def to_chat_messages(self) -> List[ChatMessage]:
-        messages: List[ChatMessage] = []
+    def to_chat_messages(self) -> list[ChatMessage]:
+        messages: list[ChatMessage] = []
         for tag, timestamp, payload in self.iter_entries():
             normalized_timestamp = timestamp or None
             if tag == "user_message":
@@ -182,9 +221,7 @@ class ConversationLog:
                 )
             elif tag == "poke_reply":
                 messages.append(
-                    ChatMessage(
-                        role="assistant", content=payload, timestamp=normalized_timestamp
-                    )
+                    ChatMessage(role="assistant", content=payload, timestamp=normalized_timestamp)
                 )
             elif tag == "wait":
                 # Wait markers are orchestration metadata and must not surface to the user
@@ -198,7 +235,8 @@ class ConversationLog:
                     self._path.unlink()
             except Exception as exc:  # pragma: no cover - defensive
                 logger.warning(
-                    "conversation log clear failed", extra={"error": str(exc), "path": str(self._path)}
+                    "conversation log clear failed",
+                    extra={"error": str(exc), "path": str(self._path)},
                 )
             finally:
                 self._ensure_directory()

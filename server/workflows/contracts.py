@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Literal
 from uuid import UUID
 
@@ -57,6 +57,99 @@ class ProposeWorkflowJobsCommand(WorkflowContract):
     jobs: tuple[WorkflowJobProposal, ...] = Field(min_length=1)
 
 
+class ClaimWorkflowJobCommand(WorkflowContract):
+    """Claim at most one eligible Job through the Worker-only boundary."""
+
+    worker_id: str = Field(min_length=1, max_length=255)
+    application_build: str = Field(min_length=1, max_length=255)
+    lease_duration: timedelta = Field(gt=timedelta(0), le=timedelta(minutes=30))
+    executor_keys: tuple[str, ...] = Field(min_length=1)
+
+
+class RunResult(WorkflowContract):
+    """One immutable execution-attempt conclusion."""
+
+    outcome: Literal["succeeded", "failed", "uncertain"]
+    data: dict[str, Any] | None = None
+    evidence: tuple[dict[str, Any], ...] = ()
+    error: dict[str, Any] | None = None
+
+
+class ReportRunResultCommand(WorkflowContract):
+    """Commit one typed Run Result while the Run still has authority."""
+
+    run_id: UUID
+    result: RunResult
+
+
+class WorkflowExecutionPacket(WorkflowContract):
+    """Bounded Run context selected entirely by trusted application contracts."""
+
+    workflow_id: UUID
+    job_id: UUID
+    run_id: UUID
+    job_kind: str
+    execution_strategy: str
+    executor_key: str
+    input: dict[str, Any]
+    runtime_instance_id: UUID | None
+    lease_expires_at: datetime
+
+
+class CommittedRunResult(WorkflowContract):
+    """Stable acknowledgement for an accepted or replayed result command."""
+
+    workflow_id: UUID
+    job_id: UUID
+    run_id: UUID
+    run_status: str
+    job_status: str
+    result: RunResult
+
+
+class ClaimNotificationCommand(WorkflowContract):
+    """Claim one due Notification for delivery."""
+
+    worker_id: str = Field(min_length=1, max_length=255)
+    lease_duration: timedelta = Field(gt=timedelta(0), le=timedelta(minutes=30))
+
+
+class NotificationDeliveryPacket(WorkflowContract):
+    """Stable identifiers passed to a fresh Interaction Agent runtime."""
+
+    notification_id: UUID
+    workflow_event_id: UUID
+    workflow_id: UUID
+    delivery_attempt: int
+
+
+class AcknowledgeNotificationCommand(WorkflowContract):
+    """Mark one claimed Notification delivered through the Worker boundary."""
+
+    notification_id: UUID
+    worker_id: str = Field(min_length=1, max_length=255)
+    delivery_attempt: int = Field(gt=0)
+
+
+class ReportNotificationFailureCommand(WorkflowContract):
+    """Release one failed delivery attempt through its current lease."""
+
+    notification_id: UUID
+    worker_id: str = Field(min_length=1, max_length=255)
+    delivery_attempt: int = Field(gt=0)
+    error_code: str = Field(pattern=r"^[a-z][a-z0-9_]{0,63}$")
+
+
+class NotificationPresentationContext(WorkflowContract):
+    """Trusted presentation target resolved from durable Workflow state."""
+
+    destination_party_id: UUID
+    draft_job_id: UUID
+    send_job_id: UUID
+    effect_fingerprint: str
+    effect: dict[str, Any]
+
+
 class WorkflowTraceWorkflow(WorkflowContract):
     id: UUID
     kind: str
@@ -87,6 +180,7 @@ class WorkflowTraceRun(WorkflowContract):
     id: UUID
     job_id: UUID
     status: str
+    runtime_instance_id: UUID | None
 
 
 class WorkflowTraceEvent(WorkflowContract):

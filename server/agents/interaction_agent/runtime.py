@@ -143,6 +143,27 @@ class InteractionAgentRuntime:
                 error=str(exc),
             )
 
+    async def execute_fresh_notification(
+        self,
+        notification_message: str,
+        tool_context: InteractionToolContext,
+    ) -> InteractionResult:
+        """Handle one Notification without reading or recording prior prompt history."""
+
+        try:
+            system_prompt = self._system_prompt_builder()
+            messages = self._message_builder(notification_message, "", message_type="agent")
+            summary = await self._run_interaction_loop(system_prompt, messages, tool_context)
+            if not summary.user_messages:
+                raise RuntimeError("Notification Interaction Agent did not present its request")
+            return InteractionResult(success=True, response=summary.user_messages[-1])
+        except Exception as exc:
+            logger.error(
+                "Fresh Notification Interaction Agent failed",
+                extra={"error_type": type(exc).__name__},
+            )
+            return InteractionResult(success=False, response="", error=type(exc).__name__)
+
     # Core interaction loop that handles LLM calls and tool executions until completion
     async def _run_interaction_loop(
         self,

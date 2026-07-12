@@ -323,13 +323,14 @@ class NotificationRow(Base):
         sa.CheckConstraint("attempts <= max_attempts", name="attempt_budget"),
         sa.CheckConstraint(
             "(status = 'queued' AND claimed_by IS NULL AND lease_expires_at IS NULL "
-            "AND delivered_at IS NULL) "
+            "AND delivered_at IS NULL AND delivered_by IS NULL) "
             "OR (status = 'delivering' AND claimed_by IS NOT NULL "
-            "AND lease_expires_at IS NOT NULL AND delivered_at IS NULL) "
+            "AND lease_expires_at IS NOT NULL AND delivered_at IS NULL "
+            "AND delivered_by IS NULL) "
             "OR (status = 'delivered' AND claimed_by IS NULL AND lease_expires_at IS NULL "
-            "AND delivered_at IS NOT NULL) "
+            "AND delivered_at IS NOT NULL AND delivered_by IS NOT NULL) "
             "OR (status = 'failed' AND claimed_by IS NULL AND lease_expires_at IS NULL "
-            "AND delivered_at IS NULL)",
+            "AND delivered_at IS NULL AND delivered_by IS NULL)",
             name="delivery_shape",
         ),
         sa.Index(
@@ -369,6 +370,7 @@ class NotificationRow(Base):
         sa.DateTime(timezone=True), nullable=True
     )
     delivered_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True), nullable=True)
+    delivered_by: Mapped[str | None] = mapped_column(sa.Text, nullable=True)
     last_error: Mapped[str | None] = mapped_column(sa.Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         sa.DateTime(timezone=True),

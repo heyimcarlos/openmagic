@@ -11,9 +11,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .authority import WorkflowAuthority, WorkflowAuthorizationScope
 from .contracts import (
+    AcknowledgeNotificationCommand,
+    ClaimNotificationCommand,
+    ClaimWorkflowJobCommand,
+    CommittedRunResult,
     CreateWorkflowCommand,
+    NotificationDeliveryPacket,
+    NotificationPresentationContext,
     ProposeWorkflowJobsCommand,
+    ReportNotificationFailureCommand,
+    ReportRunResultCommand,
     WorkflowCommandContext,
+    WorkflowExecutionPacket,
     WorkflowProposal,
     WorkflowTrace,
     WorkflowTraceEvent,
@@ -29,6 +38,7 @@ from .errors import (
     WorkflowLifecycleError,
     WorkflowNotFoundError,
 )
+from .execution_protocol import WorkflowExecutionProtocol
 from .identity_models import (
     OrganizationMembershipRow,
     PartyIdentifierRow,
@@ -44,6 +54,7 @@ from .models import (
     WorkflowJobRunRow,
     WorkflowRow,
 )
+from .notification_protocol import WorkflowNotificationProtocol
 from .registry import (
     DRAFT_RENEWAL_EMAIL_KIND,
     GMAIL_SEND_EMAIL_KIND,
@@ -67,6 +78,15 @@ class WorkflowControlPlane:
         self._database = database
         self._registry = registry
         self._authority = authority
+        self._execution = WorkflowExecutionProtocol(
+            database=database,
+            registry=registry,
+            has_current_broker_authority=self._has_current_broker_authority,
+        )
+        self._notification_delivery = WorkflowNotificationProtocol(
+            database,
+            self._has_current_broker_authority,
+        )
 
     async def create_workflow(self, command: CreateWorkflowCommand) -> WorkflowTrace:
         validated = self._registry.validate(command.proposal)
@@ -151,6 +171,52 @@ class WorkflowControlPlane:
             await self._append_job_graph(session, workflow, validated, command.context)
             trace = await self._read_trace(session, workflow)
         return trace
+
+    async def claim_job(
+        self,
+        command: ClaimWorkflowJobCommand,
+    ) -> WorkflowExecutionPacket | None:
+        return await self._execution.claim_job(command)
+
+    async def report_run_result(
+        self,
+        command: ReportRunResultCommand,
+    ) -> CommittedRunResult:
+        return await self._execution.report_run_result(command)
+
+    async def claim_notification(
+        self,
+        command: ClaimNotificationCommand,
+    ) -> NotificationDeliveryPacket | None:
+        return await self._notification_delivery.claim_notification(command)
+
+    async def acknowledge_notification(
+        self,
+        command: AcknowledgeNotificationCommand,
+    ) -> NotificationDeliveryPacket:
+        return await self._notification_delivery.acknowledge_notification(command)
+
+    async def report_notification_failure(
+        self,
+        command: ReportNotificationFailureCommand,
+    ) -> NotificationDeliveryPacket:
+        return await self._notification_delivery.report_failure(command)
+
+    async def resolve_notification_presentation(
+        self,
+        notification_id: UUID,
+        workflow_event_id: UUID,
+        workflow_id: UUID,
+        worker_id: str,
+        delivery_attempt: int,
+    ) -> NotificationPresentationContext:
+        return await self._notification_delivery.resolve_presentation(
+            notification_id,
+            workflow_event_id,
+            workflow_id,
+            worker_id,
+            delivery_attempt,
+        )
 
     @staticmethod
     async def _has_current_broker_authority(
@@ -414,7 +480,13 @@ class WorkflowControlPlane:
             ),
             jobs=job_traces,
             runs=tuple(
-                WorkflowTraceRun(id=run.id, job_id=run.job_id, status=run.status) for run in runs
+                WorkflowTraceRun(
+                    id=run.id,
+                    job_id=run.job_id,
+                    status=run.status,
+                    runtime_instance_id=run.runtime_instance_id,
+                )
+                for run in runs
             ),
             events=tuple(
                 WorkflowTraceEvent(

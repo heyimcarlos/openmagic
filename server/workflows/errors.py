@@ -35,3 +35,15 @@ class StaleWorkflowCursorError(InvalidWorkflowSearchError):
 
 class WorkflowLifecycleError(WorkflowError):
     """The Workflow cannot accept the requested transition in its current state."""
+
+
+class RunResultConflictError(WorkflowLifecycleError):
+    """A Run already carries a different immutable result."""
+
+
+class StaleRunError(WorkflowLifecycleError):
+    """A Run no longer has authority to report execution facts."""
+
+
+class NotificationLifecycleError(WorkflowError):
+    """A Notification cannot accept the requested delivery transition."""
