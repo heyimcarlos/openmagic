@@ -15,6 +15,18 @@ down_revision: str | Sequence[str] | None = "f42a4bf67c21"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
+SEND_ATTEMPT_UPGRADE_SQL = sa.text(
+    "UPDATE workflow_jobs AS job SET max_attempts = 3 "
+    "WHERE job.kind = 'gmail.send_email.v1' "
+    "AND job.max_attempts = 1 AND job.attempts <= 1 "
+    "AND job.status IN ('waiting', 'queued', 'running') "
+    "AND NOT EXISTS ("
+    "SELECT 1 FROM workflow_events AS event "
+    "WHERE event.job_id = job.id "
+    "AND event.event_type = 'external_effect_dispatch_started'"
+    ")"
+)
+
 
 def upgrade() -> None:
     op.create_table(
@@ -22,6 +34,7 @@ def upgrade() -> None:
         sa.Column("id", sa.Text(), nullable=False),
         sa.Column("cause_type", sa.Text(), nullable=False),
         sa.Column("actor_party_id", sa.UUID(), nullable=False),
+        sa.Column("content_digest", sa.Text(), nullable=False),
         sa.Column(
             "occurred_at",
             sa.DateTime(timezone=True),
@@ -51,19 +64,7 @@ def upgrade() -> None:
         unique=True,
         postgresql_where=sa.text("event_type = 'approval_granted'"),
     )
-    op.execute(
-        sa.text(
-            "UPDATE workflow_jobs AS job SET max_attempts = 3 "
-            "WHERE job.kind = 'gmail.send_email.v1' "
-            "AND job.max_attempts = 1 AND job.attempts <= 1 "
-            "AND job.status IN ('waiting', 'queued') "
-            "AND NOT EXISTS ("
-            "SELECT 1 FROM workflow_events AS event "
-            "WHERE event.job_id = job.id "
-            "AND event.event_type = 'external_effect_dispatch_started'"
-            ")"
-        )
-    )
+    op.execute(SEND_ATTEMPT_UPGRADE_SQL)
 
 
 def downgrade() -> None:

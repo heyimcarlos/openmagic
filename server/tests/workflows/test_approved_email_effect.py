@@ -17,6 +17,9 @@ from server.agents.interaction_agent.workflow_notifications import (
 )
 from server.agents.interaction_agent.workflow_tools import WorkflowInteractionToolbox
 from server.config import Settings
+from server.migrations.versions.a734d2a724bb_record_approval_causes import (
+    SEND_ATTEMPT_UPGRADE_SQL,
+)
 from server.tests.workflows.factories import create_command
 from server.workflows import (
     ApproveWorkflowJobCommand,
@@ -96,12 +99,14 @@ async def presented_send(control_plane: WorkflowControlPlane):
 async def record_cause(
     control_plane: WorkflowControlPlane,
     cause_id: str,
+    content: str = "Yes, send this exact email",
     *,
     context: WorkflowCommandContext | None = None,
 ) -> None:
     await control_plane.record_interaction_cause(
         RecordInteractionCauseCommand(
             context=(context or create_command().context).model_copy(update={"cause_id": cause_id}),
+            content=content,
         )
     )
 
@@ -225,7 +230,9 @@ async def test_approval_cause_must_follow_presentation_and_match_party(
     control_plane: WorkflowControlPlane,
 ):
     broker = create_command().context
-    await record_cause(control_plane, "early-message")
+    await record_cause(control_plane, "early-message", "Do not send this email")
+    with pytest.raises(WorkflowLifecycleError, match="identity conflicts"):
+        await record_cause(control_plane, "early-message", "Yes, send this exact email")
     _created, presentation = await presented_send(control_plane)
 
     with pytest.raises(WorkflowLifecycleError, match="predates the exact presentation"):
@@ -1088,6 +1095,47 @@ async def test_predispatch_revocation_fails_an_exhausted_send_job(
     assert send.status == "failed"
 
 
+async def test_attempt_upgrade_includes_running_undispatched_send(
+    control_plane: WorkflowControlPlane,
+    migrated_postgres_url: str,
+):
+    _created, presentation = await presented_send(control_plane)
+    broker = create_command().context
+    await control_plane.approve_job(
+        ApproveWorkflowJobCommand(
+            context=broker.model_copy(update={"cause_id": "approval-message-1"}),
+            job_id=presentation.send_job_id,
+            expected_draft_revision_id=presentation.draft_job_id,
+        )
+    )
+    run = await control_plane.claim_job(
+        ClaimWorkflowJobCommand(
+            worker_id="send-worker",
+            application_build="test-build",
+            lease_duration=timedelta(minutes=5),
+            executor_keys=("composio_gmail_send",),
+        )
+    )
+    assert run is not None
+
+    engine = create_async_engine(migrated_postgres_url)
+    async with engine.begin() as connection:
+        await connection.execute(
+            sa.update(WorkflowJobRow)
+            .where(WorkflowJobRow.id == presentation.send_job_id)
+            .values(max_attempts=1)
+        )
+        await connection.execute(SEND_ATTEMPT_UPGRADE_SQL)
+        max_attempts = await connection.scalar(
+            sa.select(WorkflowJobRow.max_attempts).where(
+                WorkflowJobRow.id == presentation.send_job_id
+            )
+        )
+    await engine.dispose()
+
+    assert max_attempts == 3
+
+
 async def test_interaction_tool_approves_only_loaded_exact_job(
     control_plane: WorkflowControlPlane,
     migrated_postgres_url: str,
@@ -1105,7 +1153,7 @@ async def test_interaction_tool_approves_only_loaded_exact_job(
         cause_id="approval-message-tool",
         trusted_workflow_id=created.workflow.id,
     )
-    await toolbox.record_interaction_cause(context)
+    await toolbox.record_interaction_cause(context, "I approve sending this exact email")
     packet = await toolbox.invoke(
         "read_workflow_packet",
         {"workflow_id": str(created.workflow.id)},

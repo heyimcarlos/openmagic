@@ -69,6 +69,7 @@ class RecordInteractionCauseCommand(WorkflowContract):
     """Persist a trusted reference to a human interaction before interpretation."""
 
     context: WorkflowCommandContext
+    content: str = Field(min_length=1, max_length=10_000)
 
 
 class CancelWorkflowCommand(WorkflowContract):

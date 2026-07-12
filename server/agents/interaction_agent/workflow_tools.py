@@ -122,6 +122,7 @@ class WorkflowInteractionToolbox:
     async def record_interaction_cause(
         self,
         context: InteractionToolContext,
+        content: str,
     ) -> None:
         """Persist the trusted human message before the model interprets it."""
 
@@ -133,6 +134,7 @@ class WorkflowInteractionToolbox:
                     cause_type="message",
                     cause_id=context.cause_id,
                 ),
+                content=content,
             )
         )
 

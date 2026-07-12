@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from typing import Literal, cast
 
 import sqlalchemy as sa
@@ -29,12 +30,14 @@ class WorkflowApprovalProtocol:
     async def record_cause(self, command: RecordInteractionCauseCommand) -> None:
         """Record the original authenticated interaction before agent interpretation."""
 
+        content_digest = hashlib.sha256(command.content.encode()).hexdigest()
         async with self._database.transaction() as session:
             existing = await session.get(InteractionCauseRow, command.context.cause_id)
             if existing is not None:
                 if (
                     existing.cause_type != command.context.cause_type
                     or existing.actor_party_id != command.context.actor_party_id
+                    or existing.content_digest != content_digest
                 ):
                     raise WorkflowLifecycleError("Approval Cause identity conflicts")
                 return
@@ -43,6 +46,7 @@ class WorkflowApprovalProtocol:
                     id=command.context.cause_id,
                     cause_type=command.context.cause_type,
                     actor_party_id=command.context.actor_party_id,
+                    content_digest=content_digest,
                 )
             )
             await session.flush()

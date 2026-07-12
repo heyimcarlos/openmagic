@@ -223,6 +223,7 @@ class InteractionCauseRow(Base):
         sa.ForeignKey("parties.id", name="fk_interaction_causes_actor_party"),
         nullable=False,
     )
+    content_digest: Mapped[str] = mapped_column(sa.Text, nullable=False)
     occurred_at: Mapped[datetime] = mapped_column(
         sa.DateTime(timezone=True),
         nullable=False,

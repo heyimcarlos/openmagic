@@ -56,7 +56,7 @@ class InteractionAgentRuntime:
         tool_context_factory: Callable[[str], InteractionToolContext] | None = None,
         system_prompt_builder: Callable[[], str] = build_system_prompt,
         message_builder: Callable[..., list[dict[str, str]]] = prepare_message_with_history,
-        interaction_cause_recorder: Callable[[InteractionToolContext], Awaitable[None]]
+        interaction_cause_recorder: Callable[[InteractionToolContext, str], Awaitable[None]]
         | None = None,
         settings: Settings | None = None,
     ) -> None:
@@ -95,7 +95,7 @@ class InteractionAgentRuntime:
                 raise ValueError("Authenticated interaction Cause ID is required")
             tool_context = self._tool_context_factory(cause_id or f"message-{uuid4()}")
             if self._interaction_cause_recorder is not None:
-                await self._interaction_cause_recorder(tool_context)
+                await self._interaction_cause_recorder(tool_context, user_message)
             self.conversation_log.record_user_message(user_message)
 
             logger.info("Processing user message through interaction agent")
