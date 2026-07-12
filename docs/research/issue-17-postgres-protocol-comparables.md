@@ -73,6 +73,14 @@ Tests call the Control Plane and inspect its returned trace. Separate migration
 tests inspect PostgreSQL structural enforcement because the schema itself is
 the interface under test.
 
+For the V0 creation tracer, the initial Workflow Event preserves the trusted
+actor and organization scope used to authorize development-trace reads. This
+is audit provenance, not duplicated Workflow input or a replacement for the
+relational Party model planned by the retrieval ticket. The creation command
+builds its return trace inside the write transaction, so it cannot commit the
+aggregate and then report a false command failure because a second read loses
+authority.
+
 ## Rejected alternatives
 
 - **Prefect-style multi-dialect database interface:** OpenMagic has one selected

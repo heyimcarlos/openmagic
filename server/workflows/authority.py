@@ -12,6 +12,14 @@ from .contracts import WorkflowCommandContext
 AuthorityGrant = tuple[UUID, UUID, str]
 
 
+@dataclass(frozen=True)
+class WorkflowAuthorizationScope:
+    """Trusted V0 creation scope recovered from Workflow Event evidence."""
+
+    actor_party_id: UUID
+    organization_party_id: UUID
+
+
 class WorkflowAuthority(Protocol):
     """Resolve current Party authority outside model-controlled input."""
 
@@ -24,7 +32,9 @@ class WorkflowAuthority(Protocol):
     async def can_read_workflow(
         self,
         context: WorkflowCommandContext,
+        workflow_id: UUID,
         workflow_kind: str,
+        scope: WorkflowAuthorizationScope,
     ) -> bool: ...
 
 
@@ -48,7 +58,13 @@ class StaticWorkflowAuthority:
     async def can_read_workflow(
         self,
         context: WorkflowCommandContext,
+        _workflow_id: UUID,
         workflow_kind: str,
+        scope: WorkflowAuthorizationScope,
     ) -> bool:
         grant = (context.actor_party_id, context.organization_party_id, workflow_kind)
-        return grant in self.grants
+        return (
+            grant in self.grants
+            and context.actor_party_id == scope.actor_party_id
+            and context.organization_party_id == scope.organization_party_id
+        )

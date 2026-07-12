@@ -6,8 +6,9 @@ from collections import defaultdict
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from .authority import WorkflowAuthority
+from .authority import WorkflowAuthority, WorkflowAuthorizationScope
 from .contracts import (
     CreateWorkflowCommand,
     WorkflowCommandContext,
@@ -98,19 +99,23 @@ class WorkflowControlPlane:
                 for dependency in job.depends_on
             ]
             session.add_all(dependencies)
-            session.add(
-                WorkflowEventRow(
-                    workflow_id=workflow_id,
-                    event_type="workflow_jobs_proposed",
-                    actor_type="party",
-                    actor_id=str(command.context.actor_party_id),
-                    cause_type=command.context.cause_type,
-                    cause_id=command.context.cause_id,
-                    data={"job_ids": [str(job_ids[job.key]) for job in validated.jobs]},
-                )
+            event = WorkflowEventRow(
+                workflow_id=workflow_id,
+                event_type="workflow_jobs_proposed",
+                actor_type="party",
+                actor_id=str(command.context.actor_party_id),
+                cause_type=command.context.cause_type,
+                cause_id=command.context.cause_id,
+                data={
+                    "job_ids": [str(job_ids[job.key]) for job in validated.jobs],
+                    "organization_party_id": str(command.context.organization_party_id),
+                },
             )
+            session.add(event)
+            await session.flush()
+            trace = await self._read_trace(session, workflow)
 
-        return await self.read_workflow_trace(workflow_id, command.context)
+        return trace
 
     async def read_workflow_trace(
         self,
@@ -121,47 +126,71 @@ class WorkflowControlPlane:
             workflow = await session.get(WorkflowRow, workflow_id)
             if workflow is None:
                 raise WorkflowNotFoundError(str(workflow_id))
-            if not await self._authority.can_read_workflow(context, workflow.kind):
-                raise WorkflowAuthorizationError("Party cannot read this Workflow")
+            creation_event = await session.scalar(
+                sa.select(WorkflowEventRow)
+                .where(
+                    WorkflowEventRow.workflow_id == workflow_id,
+                    WorkflowEventRow.event_type == "workflow_jobs_proposed",
+                )
+                .limit(1)
+            )
+            if creation_event is None:
+                raise WorkflowNotFoundError(str(workflow_id))
+            scope = self._authorization_scope(creation_event, workflow_id)
+            allowed = await self._authority.can_read_workflow(
+                context,
+                workflow_id,
+                workflow.kind,
+                scope,
+            )
+            if not allowed:
+                raise WorkflowNotFoundError(str(workflow_id))
+            return await self._read_trace(session, workflow)
 
-            jobs = (
-                await session.scalars(
-                    sa.select(WorkflowJobRow)
-                    .where(WorkflowJobRow.workflow_id == workflow_id)
-                    .order_by(WorkflowJobRow.created_at, WorkflowJobRow.id)
+    async def _read_trace(
+        self,
+        session: AsyncSession,
+        workflow: WorkflowRow,
+    ) -> WorkflowTrace:
+        workflow_id = workflow.id
+        jobs = (
+            await session.scalars(
+                sa.select(WorkflowJobRow)
+                .where(WorkflowJobRow.workflow_id == workflow_id)
+                .order_by(WorkflowJobRow.created_at, WorkflowJobRow.id)
+            )
+        ).all()
+        dependencies = (
+            await session.scalars(
+                sa.select(WorkflowJobDependencyRow)
+                .where(WorkflowJobDependencyRow.workflow_id == workflow_id)
+                .order_by(
+                    WorkflowJobDependencyRow.job_id,
+                    WorkflowJobDependencyRow.depends_on_job_id,
                 )
-            ).all()
-            dependencies = (
-                await session.scalars(
-                    sa.select(WorkflowJobDependencyRow)
-                    .where(WorkflowJobDependencyRow.workflow_id == workflow_id)
-                    .order_by(
-                        WorkflowJobDependencyRow.job_id,
-                        WorkflowJobDependencyRow.depends_on_job_id,
-                    )
-                )
-            ).all()
-            runs = (
-                await session.scalars(
-                    sa.select(WorkflowJobRunRow)
-                    .where(WorkflowJobRunRow.workflow_id == workflow_id)
-                    .order_by(WorkflowJobRunRow.created_at, WorkflowJobRunRow.id)
-                )
-            ).all()
-            events = (
-                await session.scalars(
-                    sa.select(WorkflowEventRow)
-                    .where(WorkflowEventRow.workflow_id == workflow_id)
-                    .order_by(WorkflowEventRow.occurred_at, WorkflowEventRow.id)
-                )
-            ).all()
-            notifications = (
-                await session.scalars(
-                    sa.select(NotificationRow)
-                    .where(NotificationRow.workflow_id == workflow_id)
-                    .order_by(NotificationRow.created_at, NotificationRow.id)
-                )
-            ).all()
+            )
+        ).all()
+        runs = (
+            await session.scalars(
+                sa.select(WorkflowJobRunRow)
+                .where(WorkflowJobRunRow.workflow_id == workflow_id)
+                .order_by(WorkflowJobRunRow.created_at, WorkflowJobRunRow.id)
+            )
+        ).all()
+        events = (
+            await session.scalars(
+                sa.select(WorkflowEventRow)
+                .where(WorkflowEventRow.workflow_id == workflow_id)
+                .order_by(WorkflowEventRow.occurred_at, WorkflowEventRow.id)
+            )
+        ).all()
+        notifications = (
+            await session.scalars(
+                sa.select(NotificationRow)
+                .where(NotificationRow.workflow_id == workflow_id)
+                .order_by(NotificationRow.created_at, NotificationRow.id)
+            )
+        ).all()
 
         dependencies_by_job: dict[UUID, list[UUID]] = defaultdict(list)
         for dependency in dependencies:
@@ -236,6 +265,20 @@ class WorkflowControlPlane:
                 for notification in notifications
             ),
         )
+
+    @staticmethod
+    def _authorization_scope(
+        creation_event: WorkflowEventRow,
+        workflow_id: UUID,
+    ) -> WorkflowAuthorizationScope:
+        organization_party_id = creation_event.data.get("organization_party_id")
+        try:
+            return WorkflowAuthorizationScope(
+                actor_party_id=UUID(creation_event.actor_id),
+                organization_party_id=UUID(str(organization_party_id)),
+            )
+        except (TypeError, ValueError) as exc:
+            raise WorkflowNotFoundError(str(workflow_id)) from exc
 
     def _waiting_reasons(
         self,

@@ -240,6 +240,12 @@ class WorkflowEventRow(Base):
         sa.Index("ix_workflow_events_job", "workflow_id", "job_id", "occurred_at"),
         sa.Index("ix_workflow_events_run", "workflow_id", "run_id", "occurred_at"),
         sa.Index(
+            "uq_workflow_events_workflow_proposed",
+            "workflow_id",
+            unique=True,
+            postgresql_where=sa.text("event_type = 'workflow_jobs_proposed'"),
+        ),
+        sa.Index(
             "uq_workflow_events_dispatch_job",
             "job_id",
             unique=True,

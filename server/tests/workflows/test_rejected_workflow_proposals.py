@@ -8,6 +8,8 @@ from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from server.tests.workflows.factories import (
+    BROKER_ID,
+    ORGANIZATION_ID,
     create_command,
     renewal_proposal,
 )
@@ -15,6 +17,7 @@ from server.workflows import (
     DRAFT_RENEWAL_EMAIL_KIND,
     GMAIL_SEND_EMAIL_KIND,
     RENEWAL_OUTREACH_KIND,
+    ExecutionStrategy,
     InvalidWorkflowProposalError,
     StaticWorkflowAuthority,
     UnknownWorkflowJobKindError,
@@ -24,8 +27,11 @@ from server.workflows import (
     WorkflowControlPlane,
     WorkflowDatabase,
     WorkflowJobProposal,
+    WorkflowKindRegistry,
+    WorkflowNotFoundError,
     default_workflow_registry,
 )
+from server.workflows.registry import RenewalOutreachInput, WorkflowKindContract
 
 
 async def workflow_count(database_url: str) -> int:
@@ -119,8 +125,65 @@ async def test_rejects_unauthorized_trace_read(
         cause_id="unauthorized-read",
     )
 
-    with pytest.raises(WorkflowAuthorizationError):
+    with pytest.raises(WorkflowNotFoundError):
         await control_plane.read_workflow_trace(trace.workflow.id, unauthorized_context)
+
+
+async def test_rejects_authorized_cross_organization_trace_read(
+    migrated_postgres_url: str,
+    clean_workflow_database,
+):
+    other_broker_id = uuid4()
+    other_organization_id = uuid4()
+    database = WorkflowDatabase(migrated_postgres_url)
+    authority = StaticWorkflowAuthority(
+        grants={
+            (BROKER_ID, ORGANIZATION_ID, RENEWAL_OUTREACH_KIND),
+            (other_broker_id, other_organization_id, RENEWAL_OUTREACH_KIND),
+        }
+    )
+    control_plane = WorkflowControlPlane(
+        database=database,
+        registry=default_workflow_registry(),
+        authority=authority,
+    )
+    trace = await control_plane.create_workflow(create_command())
+    other_context = WorkflowCommandContext(
+        actor_party_id=other_broker_id,
+        organization_party_id=other_organization_id,
+        cause_type="message",
+        cause_id="cross-organization-read",
+    )
+
+    with pytest.raises(WorkflowNotFoundError):
+        await control_plane.read_workflow_trace(trace.workflow.id, other_context)
+
+    await database.dispose()
+
+
+async def test_create_result_does_not_depend_on_post_commit_read_authority(
+    migrated_postgres_url: str,
+    clean_workflow_database,
+):
+    class CreateOnlyAuthority:
+        async def can_create_workflow(self, context, workflow_kind):
+            return True
+
+        async def can_read_workflow(self, context, workflow_id, workflow_kind, scope):
+            return False
+
+    database = WorkflowDatabase(migrated_postgres_url)
+    control_plane = WorkflowControlPlane(
+        database=database,
+        registry=default_workflow_registry(),
+        authority=CreateOnlyAuthority(),
+    )
+
+    trace = await control_plane.create_workflow(create_command())
+
+    assert trace.workflow.status == "active"
+    assert await workflow_count(migrated_postgres_url) == 1
+    await database.dispose()
 
 
 async def test_rejects_mismatched_renewal_period_without_mutation(
@@ -169,3 +232,18 @@ def test_registry_owns_the_only_v0_job_kinds():
         GMAIL_SEND_EMAIL_KIND,
     }
     assert {job.contract.max_attempts for job in validated.jobs} == {1, 2}
+    assert {job.kind: job.contract.execution_strategy for job in validated.jobs} == {
+        DRAFT_RENEWAL_EMAIL_KIND: ExecutionStrategy.FRESH_EXECUTION_AGENT,
+        GMAIL_SEND_EMAIL_KIND: ExecutionStrategy.DETERMINISTIC_ADAPTER,
+    }
+
+
+def test_registry_rejects_duplicate_versioned_kind_names():
+    duplicate = WorkflowKindContract(
+        kind="duplicate.v1",
+        input_schema=RenewalOutreachInput,
+        allowed_job_kinds=frozenset(),
+    )
+
+    with pytest.raises(ValueError, match="duplicate Workflow Kind"):
+        WorkflowKindRegistry((duplicate, duplicate), ())

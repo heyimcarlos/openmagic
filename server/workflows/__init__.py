@@ -1,6 +1,6 @@
 """Public Workflow Control Plane interface."""
 
-from .authority import StaticWorkflowAuthority, WorkflowAuthority
+from .authority import StaticWorkflowAuthority, WorkflowAuthority, WorkflowAuthorizationScope
 from .contracts import (
     CreateWorkflowCommand,
     WorkflowCommandContext,
@@ -40,6 +40,7 @@ __all__ = [
     "UnknownWorkflowKindError",
     "WorkflowAuthority",
     "WorkflowAuthorizationError",
+    "WorkflowAuthorizationScope",
     "WorkflowCommandContext",
     "WorkflowControlPlane",
     "WorkflowDatabase",

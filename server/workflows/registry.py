@@ -6,7 +6,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from types import MappingProxyType
-from typing import Any
+from typing import Any, TypeVar
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, ValidationError, field_validator
@@ -21,6 +21,9 @@ from .errors import (
 RENEWAL_OUTREACH_KIND = "renewal_outreach.v1"
 DRAFT_RENEWAL_EMAIL_KIND = "renewal_email.draft.v1"
 GMAIL_SEND_EMAIL_KIND = "gmail.send_email.v1"
+
+
+ContractT = TypeVar("ContractT")
 
 
 class KindSchema(BaseModel):
@@ -130,8 +133,26 @@ class WorkflowKindRegistry:
         workflow_kinds: tuple[WorkflowKindContract, ...],
         job_kinds: tuple[JobKindContract, ...],
     ) -> None:
-        self._workflow_kinds = MappingProxyType({kind.kind: kind for kind in workflow_kinds})
-        self._job_kinds = MappingProxyType({kind.kind: kind for kind in job_kinds})
+        self._workflow_kinds = MappingProxyType(
+            self._index_unique_kinds(workflow_kinds, "Workflow", lambda contract: contract.kind)
+        )
+        self._job_kinds = MappingProxyType(
+            self._index_unique_kinds(job_kinds, "Workflow Job", lambda contract: contract.kind)
+        )
+
+    @staticmethod
+    def _index_unique_kinds(
+        contracts: tuple[ContractT, ...],
+        label: str,
+        kind_of: Callable[[ContractT], str],
+    ) -> dict[str, ContractT]:
+        indexed: dict[str, ContractT] = {}
+        for contract in contracts:
+            kind = kind_of(contract)
+            if kind in indexed:
+                raise ValueError(f"duplicate {label} Kind {kind!r}")
+            indexed[kind] = contract
+        return indexed
 
     def validate(self, proposal: WorkflowProposal) -> ValidatedWorkflowProposal:
         workflow_contract = self._workflow_kinds.get(proposal.kind)

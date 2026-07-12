@@ -274,6 +274,13 @@ def upgrade() -> None:
         postgresql_where=sa.text("event_type = 'approval_granted'"),
     )
     op.create_index(
+        "uq_workflow_events_workflow_proposed",
+        "workflow_events",
+        ["workflow_id"],
+        unique=True,
+        postgresql_where=sa.text("event_type = 'workflow_jobs_proposed'"),
+    )
+    op.create_index(
         "uq_workflow_events_approval_invalidation",
         "workflow_events",
         ["approval_grant_id"],

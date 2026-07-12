@@ -38,6 +38,7 @@ EXPECTED_INDEXES = {
         "uq_workflow_events_approval_cause",
         "uq_workflow_events_approval_invalidation",
         "uq_workflow_events_dispatch_job",
+        "uq_workflow_events_workflow_proposed",
     },
     "notifications": {"ix_notifications_claim", "ix_notifications_lease"},
 }
