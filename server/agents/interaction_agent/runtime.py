@@ -56,7 +56,8 @@ class InteractionAgentRuntime:
         tool_context_factory: Callable[[str], InteractionToolContext] | None = None,
         system_prompt_builder: Callable[[], str] = build_system_prompt,
         message_builder: Callable[..., list[dict[str, str]]] = prepare_message_with_history,
-        user_cause_recorder: Callable[[InteractionToolContext, str], Awaitable[None]] | None = None,
+        interaction_cause_recorder: Callable[[InteractionToolContext], Awaitable[None]]
+        | None = None,
         settings: Settings | None = None,
     ) -> None:
         settings = settings or get_settings()
@@ -70,7 +71,7 @@ class InteractionAgentRuntime:
         self._tool_context_factory = tool_context_factory or self._legacy_tool_context
         self._system_prompt_builder = system_prompt_builder
         self._message_builder = message_builder
-        self._user_cause_recorder = user_cause_recorder
+        self._interaction_cause_recorder = interaction_cause_recorder
 
         if not self.api_key:
             raise ValueError(
@@ -86,8 +87,8 @@ class InteractionAgentRuntime:
             system_prompt = self._system_prompt_builder()
             messages = self._message_builder(user_message, transcript_before, message_type="user")
             tool_context = self._tool_context_factory(f"message-{uuid4()}")
-            if self._user_cause_recorder is not None:
-                await self._user_cause_recorder(tool_context, user_message)
+            if self._interaction_cause_recorder is not None:
+                await self._interaction_cause_recorder(tool_context)
             self.conversation_log.record_user_message(user_message)
 
             logger.info("Processing user message through interaction agent")

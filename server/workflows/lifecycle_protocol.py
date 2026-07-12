@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from uuid import UUID
 
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -42,87 +43,143 @@ class WorkflowLifecycleProtocol:
         """Serialize authority revocation against dispatch for one Workflow."""
 
         async with self._database.transaction() as session:
-            workflow = await session.scalar(
-                sa.select(WorkflowRow)
-                .where(WorkflowRow.id == command.workflow_id)
-                .with_for_update()
-            )
-            if workflow is None:
+            anchor = await session.get(WorkflowRow, command.workflow_id)
+            if anchor is None:
                 raise WorkflowLifecycleError("Workflow does not exist")
             if command.subject_party_id != command.context.actor_party_id:
                 raise WorkflowAuthorizationError("V0 authority revocation is self-scoped")
+            workflow_ids = await self._affected_workflow_ids(session, anchor, command)
+            workflows = (
+                await session.scalars(
+                    sa.select(WorkflowRow)
+                    .where(WorkflowRow.id.in_(workflow_ids))
+                    .order_by(WorkflowRow.id)
+                    .with_for_update()
+                )
+            ).all()
+            workflow = next((item for item in workflows if item.id == command.workflow_id), None)
+            if workflow is None:
+                raise WorkflowLifecycleError("Workflow is not active")
             if not await self._has_current_broker_authority(session, command.context, workflow):
                 raise WorkflowAuthorizationError("Party cannot revoke Workflow authority")
 
             now = datetime.now(UTC)
             await self._revoke_authority_fact(session, workflow, command, now)
-            approvals = (
-                await session.scalars(
-                    sa.select(WorkflowEventRow).where(
-                        WorkflowEventRow.workflow_id == workflow.id,
-                        WorkflowEventRow.event_type == "approval_granted",
-                        WorkflowEventRow.actor_id == str(command.subject_party_id),
+            invalidated = sum(
+                [
+                    await self._invalidate_unconsumed_approvals(
+                        session,
+                        affected,
+                        command,
+                        now,
                     )
-                )
-            ).all()
-            invalidated = 0
-            for approval in approvals:
-                if approval.job_id is None:
-                    continue
-                dispatch = await session.scalar(
-                    sa.select(WorkflowEventRow.id).where(
-                        WorkflowEventRow.workflow_id == workflow.id,
-                        WorkflowEventRow.job_id == approval.job_id,
-                        WorkflowEventRow.event_type == "external_effect_dispatch_started",
-                    )
-                )
-                prior = await session.scalar(
-                    sa.select(WorkflowEventRow.id).where(
-                        WorkflowEventRow.workflow_id == workflow.id,
-                        WorkflowEventRow.approval_grant_id == approval.id,
-                        WorkflowEventRow.event_type == "approval_invalidated",
-                    )
-                )
-                if dispatch is not None or prior is not None:
-                    continue
-                session.add(
-                    WorkflowEventRow(
-                        workflow_id=workflow.id,
-                        job_id=approval.job_id,
-                        approval_grant_id=approval.id,
-                        event_type="approval_invalidated",
-                        actor_type="party",
-                        actor_id=str(command.context.actor_party_id),
-                        cause_type=command.context.cause_type,
-                        cause_id=command.context.cause_id,
-                        data={
-                            "reason": command.reason,
-                            "approval_grant_id": str(approval.id),
-                        },
-                    )
-                )
-                runs = (
-                    await session.scalars(
-                        sa.select(WorkflowJobRunRow).where(
-                            WorkflowJobRunRow.workflow_id == workflow.id,
-                            WorkflowJobRunRow.job_id == approval.job_id,
-                            WorkflowJobRunRow.status == "running",
-                        )
-                    )
-                ).all()
-                for run in runs:
-                    run.status = "cancelled"
-                    run.finished_at = now
-                job = await session.get(WorkflowJobRow, approval.job_id)
-                if job is not None and job.status in {"waiting", "queued", "running"}:
-                    job.status = "waiting"
-                invalidated += 1
+                    for affected in workflows
+                ]
+            )
             await session.flush()
             return AuthorityRevocationResult(
                 workflow_id=workflow.id,
                 reason=command.reason,
                 invalidated_grants=invalidated,
             )
+
+    @staticmethod
+    async def _affected_workflow_ids(
+        session: AsyncSession,
+        anchor: WorkflowRow,
+        command: RevokeWorkflowAuthorityCommand,
+    ) -> tuple[UUID, ...]:
+        if command.reason == "broker_role_revoked":
+            return (anchor.id,)
+        predicates = [
+            WorkflowRow.status == "active",
+            WorkflowParticipantRoleRow.party_id == command.subject_party_id,
+            WorkflowParticipantRoleRow.role == "Broker",
+        ]
+        if command.reason == "organization_membership_revoked":
+            predicates.append(WorkflowRow.organization_party_id == anchor.organization_party_id)
+        workflow_ids = (
+            await session.scalars(
+                sa.select(WorkflowRow.id)
+                .join(
+                    WorkflowParticipantRoleRow,
+                    WorkflowParticipantRoleRow.workflow_id == WorkflowRow.id,
+                )
+                .where(*predicates)
+                .distinct()
+            )
+        ).all()
+        return tuple(workflow_ids)
+
+    @staticmethod
+    async def _invalidate_unconsumed_approvals(
+        session: AsyncSession,
+        workflow: WorkflowRow,
+        command: RevokeWorkflowAuthorityCommand,
+        now: datetime,
+    ) -> int:
+        approvals = (
+            await session.scalars(
+                sa.select(WorkflowEventRow).where(
+                    WorkflowEventRow.workflow_id == workflow.id,
+                    WorkflowEventRow.event_type == "approval_granted",
+                    WorkflowEventRow.actor_id == str(command.subject_party_id),
+                )
+            )
+        ).all()
+        invalidated = 0
+        for approval in approvals:
+            if approval.job_id is None:
+                continue
+            dispatch = await session.scalar(
+                sa.select(WorkflowEventRow.id).where(
+                    WorkflowEventRow.workflow_id == workflow.id,
+                    WorkflowEventRow.job_id == approval.job_id,
+                    WorkflowEventRow.event_type == "external_effect_dispatch_started",
+                )
+            )
+            prior = await session.scalar(
+                sa.select(WorkflowEventRow.id).where(
+                    WorkflowEventRow.workflow_id == workflow.id,
+                    WorkflowEventRow.approval_grant_id == approval.id,
+                    WorkflowEventRow.event_type == "approval_invalidated",
+                )
+            )
+            if dispatch is not None or prior is not None:
+                continue
+            session.add(
+                WorkflowEventRow(
+                    workflow_id=workflow.id,
+                    job_id=approval.job_id,
+                    approval_grant_id=approval.id,
+                    event_type="approval_invalidated",
+                    actor_type="party",
+                    actor_id=str(command.context.actor_party_id),
+                    cause_type=command.context.cause_type,
+                    cause_id=command.context.cause_id,
+                    data={
+                        "reason": command.reason,
+                        "approval_grant_id": str(approval.id),
+                    },
+                )
+            )
+            runs = (
+                await session.scalars(
+                    sa.select(WorkflowJobRunRow).where(
+                        WorkflowJobRunRow.workflow_id == workflow.id,
+                        WorkflowJobRunRow.job_id == approval.job_id,
+                        WorkflowJobRunRow.status == "running",
+                    )
+                )
+            ).all()
+            for run in runs:
+                run.status = "cancelled"
+                run.finished_at = now
+            job = await session.get(WorkflowJobRow, approval.job_id)
+            if job is not None and job.status in {"waiting", "queued", "running"}:
+                job.status = "waiting"
+            invalidated += 1
+        return invalidated
 
     @staticmethod
     async def _revoke_authority_fact(
@@ -157,8 +214,8 @@ class WorkflowLifecycleProtocol:
             row = await session.scalar(
                 sa.select(PartyIdentifierRow)
                 .where(
+                    PartyIdentifierRow.id == command.party_identifier_id,
                     PartyIdentifierRow.party_id == command.subject_party_id,
-                    PartyIdentifierRow.kind == "email",
                     PartyIdentifierRow.revoked_at.is_(None),
                 )
                 .with_for_update()

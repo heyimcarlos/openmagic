@@ -368,6 +368,7 @@ class WorkflowExecutionProtocol:
                     WorkflowEventRow.job_id == job.id,
                     WorkflowEventRow.event_type == "approval_granted",
                 )
+                .order_by(WorkflowEventRow.occurred_at.desc(), WorkflowEventRow.id.desc())
                 .limit(1)
             )
             if approval is None:

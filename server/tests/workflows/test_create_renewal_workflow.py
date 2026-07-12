@@ -29,7 +29,7 @@ async def test_creates_atomic_renewal_workflow_graph(control_plane: WorkflowCont
 
     assert send.status == "waiting"
     assert send.attempts == 0
-    assert send.max_attempts == 1
+    assert send.max_attempts == 3
     assert send.output is None
     assert send.depends_on_job_ids == (draft.id,)
     assert send.waiting_reasons == (f"dependency:{draft.id}",)

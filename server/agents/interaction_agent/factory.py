@@ -53,7 +53,7 @@ def create_interaction_runtime(settings: Settings | None = None) -> InteractionA
         tool_context_factory=context_factory,
         system_prompt_builder=build_workflow_system_prompt,
         message_builder=prepare_workflow_message,
-        user_cause_recorder=toolbox.record_user_cause,
+        interaction_cause_recorder=toolbox.record_interaction_cause,
         settings=settings,
     )
 

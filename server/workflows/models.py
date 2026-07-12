@@ -208,10 +208,10 @@ class WorkflowJobRunRow(Base):
     finished_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True), nullable=True)
 
 
-class ApprovalCauseRow(Base):
-    """Durable source evidence referenced by an Approval Grant."""
+class InteractionCauseRow(Base):
+    """Authoritative durable human interaction referenced by domain evidence."""
 
-    __tablename__ = "approval_causes"
+    __tablename__ = "interaction_causes"
     __table_args__ = (
         sa.CheckConstraint("cause_type IN ('message', 'ui_action')", name="cause_type"),
     )
@@ -220,10 +220,9 @@ class ApprovalCauseRow(Base):
     cause_type: Mapped[str] = mapped_column(sa.Text, nullable=False)
     actor_party_id: Mapped[UUID] = mapped_column(
         PGUUID(as_uuid=True),
-        sa.ForeignKey("parties.id", name="fk_approval_causes_actor_party"),
+        sa.ForeignKey("parties.id", name="fk_interaction_causes_actor_party"),
         nullable=False,
     )
-    content: Mapped[str] = mapped_column(sa.Text, nullable=False)
     occurred_at: Mapped[datetime] = mapped_column(
         sa.DateTime(timezone=True),
         nullable=False,
@@ -287,7 +286,6 @@ class WorkflowEventRow(Base):
         ),
         sa.Index(
             "uq_workflow_events_approval_cause",
-            "job_id",
             "cause_type",
             "cause_id",
             unique=True,

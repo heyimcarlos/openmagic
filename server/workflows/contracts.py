@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class WorkflowContract(BaseModel):
@@ -65,11 +65,10 @@ class ApproveWorkflowJobCommand(WorkflowContract):
     expected_draft_revision_id: UUID
 
 
-class RecordApprovalCauseCommand(WorkflowContract):
-    """Persist one trusted human message or UI action before agent interpretation."""
+class RecordInteractionCauseCommand(WorkflowContract):
+    """Persist a trusted reference to a human interaction before interpretation."""
 
     context: WorkflowCommandContext
-    content: str = Field(min_length=1, max_length=10_000)
 
 
 class CancelWorkflowCommand(WorkflowContract):
@@ -90,11 +89,19 @@ class RevokeWorkflowAuthorityCommand(WorkflowContract):
     context: WorkflowCommandContext
     workflow_id: UUID
     subject_party_id: UUID
+    party_identifier_id: UUID | None = None
     reason: Literal[
         "approver_identity_revoked",
         "broker_role_revoked",
         "organization_membership_revoked",
     ]
+
+    @model_validator(mode="after")
+    def validate_identifier_target(self) -> RevokeWorkflowAuthorityCommand:
+        targets_identifier = self.reason == "approver_identity_revoked"
+        if targets_identifier != (self.party_identifier_id is not None):
+            raise ValueError("party_identifier_id is required only for approver_identity_revoked")
+        return self
 
 
 class AuthorityRevocationResult(WorkflowContract):

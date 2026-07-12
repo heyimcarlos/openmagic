@@ -231,7 +231,7 @@ def test_registry_owns_the_only_v0_job_kinds():
         DRAFT_RENEWAL_EMAIL_KIND,
         GMAIL_SEND_EMAIL_KIND,
     }
-    assert {job.contract.max_attempts for job in validated.jobs} == {1, 2}
+    assert {job.contract.max_attempts for job in validated.jobs} == {2, 3}
     assert {job.kind: job.contract.execution_strategy for job in validated.jobs} == {
         DRAFT_RENEWAL_EMAIL_KIND: ExecutionStrategy.FRESH_EXECUTION_AGENT,
         GMAIL_SEND_EMAIL_KIND: ExecutionStrategy.DETERMINISTIC_ADAPTER,

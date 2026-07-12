@@ -420,7 +420,7 @@ def default_workflow_registry() -> WorkflowKindRegistry:
         materialize_input=_materialize_gmail_input,
         execution_strategy=ExecutionStrategy.DETERMINISTIC_ADAPTER,
         executor_key="composio_gmail_send",
-        max_attempts=1,
+        max_attempts=3,
         success_event_type="email_send_succeeded",
         success_notification_kind="send_confirmed",
         retryable_error_codes=frozenset(),

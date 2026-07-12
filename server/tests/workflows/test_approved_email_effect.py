@@ -24,8 +24,14 @@ from server.workflows import (
     CancelWorkflowCommand,
     ClaimNotificationCommand,
     ClaimWorkflowJobCommand,
+    ComposioGmailSendAdapter,
+    ComposioMailboxBinding,
+    DeterministicEmailSendAdapter,
+    DuplicateEmailSendError,
+    EmailSendEffectV1,
+    EmailSendExecutionContextV1,
     NotificationWorker,
-    RecordApprovalCauseCommand,
+    RecordInteractionCauseCommand,
     ReportRunResultCommand,
     RevokeWorkflowAuthorityCommand,
     RunResult,
@@ -38,14 +44,7 @@ from server.workflows import (
     WorkflowRetrieval,
     WorkflowWorker,
 )
-from server.workflows.email_adapter import (
-    ComposioGmailSendAdapter,
-    ComposioMailboxBinding,
-    DeterministicEmailSendAdapter,
-    DuplicateEmailSendError,
-)
-from server.workflows.email_effects import EmailSendEffectV1, EmailSendExecutionContextV1
-from server.workflows.identity_models import WorkflowParticipantRoleRow
+from server.workflows.identity_models import OrganizationMembershipRow, WorkflowParticipantRoleRow
 from server.workflows.models import WorkflowJobRow
 
 
@@ -90,21 +89,19 @@ async def presented_send(control_plane: WorkflowControlPlane):
         "notification-worker",
         notification.delivery_attempt,
     )
-    await record_cause(control_plane, "approval-message-1", "Yes, send this exact email")
+    await record_cause(control_plane, "approval-message-1")
     return created, presentation
 
 
 async def record_cause(
     control_plane: WorkflowControlPlane,
     cause_id: str,
-    content: str,
     *,
     context: WorkflowCommandContext | None = None,
 ) -> None:
-    await control_plane.record_approval_cause(
-        RecordApprovalCauseCommand(
+    await control_plane.record_interaction_cause(
+        RecordInteractionCauseCommand(
             context=(context or create_command().context).model_copy(update={"cause_id": cause_id}),
-            content=content,
         )
     )
 
@@ -145,6 +142,16 @@ async def test_exact_presented_send_approval_is_idempotent(
             command.model_copy(update={"expected_draft_revision_id": created.workflow.id})
         )
 
+    _second, second_presentation = await presented_send(control_plane)
+    with pytest.raises(WorkflowLifecycleError, match="Cause was already used"):
+        await control_plane.approve_job(
+            ApproveWorkflowJobCommand(
+                context=command.context,
+                job_id=second_presentation.send_job_id,
+                expected_draft_revision_id=second_presentation.draft_job_id,
+            )
+        )
+
 
 async def test_stale_or_unauthorized_approval_changes_nothing(
     control_plane: WorkflowControlPlane,
@@ -152,7 +159,7 @@ async def test_stale_or_unauthorized_approval_changes_nothing(
 ):
     created, presentation = await presented_send(control_plane)
     broker = create_command().context
-    await record_cause(control_plane, "wrong-revision", "Yes, send it")
+    await record_cause(control_plane, "wrong-revision")
     with pytest.raises(WorkflowLifecycleError, match="Draft Revision is stale"):
         await control_plane.approve_job(
             ApproveWorkflowJobCommand(
@@ -173,7 +180,7 @@ async def test_stale_or_unauthorized_approval_changes_nothing(
             .values(revoked_at=datetime.now(UTC))
         )
     await engine.dispose()
-    await record_cause(control_plane, "revoked-approval", "Yes, send it")
+    await record_cause(control_plane, "revoked-approval")
     with pytest.raises(WorkflowAuthorizationError):
         await control_plane.approve_job(
             ApproveWorkflowJobCommand(
@@ -190,7 +197,7 @@ async def test_approval_cause_must_follow_presentation_and_match_party(
     control_plane: WorkflowControlPlane,
 ):
     broker = create_command().context
-    await record_cause(control_plane, "early-message", "Yes, send it")
+    await record_cause(control_plane, "early-message")
     _created, presentation = await presented_send(control_plane)
 
     with pytest.raises(WorkflowLifecycleError, match="predates the exact presentation"):
@@ -211,7 +218,6 @@ async def test_approval_cause_must_follow_presentation_and_match_party(
     await record_cause(
         control_plane,
         "wrong-author-message",
-        "Yes, send it",
         context=foreign_context,
     )
     with pytest.raises(WorkflowLifecycleError, match="not authenticated"):
@@ -857,6 +863,149 @@ async def test_authority_revocation_and_dispatch_have_one_transaction_winner(
         assert invalidations == []
 
 
+async def test_reapproval_after_predispatch_revocation_can_claim_a_fresh_run(
+    control_plane: WorkflowControlPlane,
+    migrated_postgres_url: str,
+):
+    created, presentation = await presented_send(control_plane)
+    broker = create_command().context
+    await control_plane.approve_job(
+        ApproveWorkflowJobCommand(
+            context=broker.model_copy(update={"cause_id": "approval-message-1"}),
+            job_id=presentation.send_job_id,
+            expected_draft_revision_id=presentation.draft_job_id,
+        )
+    )
+    first_run = await control_plane.claim_job(
+        ClaimWorkflowJobCommand(
+            worker_id="send-worker-one",
+            application_build="test-build",
+            lease_duration=timedelta(minutes=5),
+            executor_keys=("composio_gmail_send",),
+        )
+    )
+    assert first_run is not None
+
+    result = await control_plane.revoke_authority(
+        RevokeWorkflowAuthorityCommand(
+            context=broker.model_copy(update={"cause_id": "revoke-role-message"}),
+            workflow_id=created.workflow.id,
+            subject_party_id=broker.actor_party_id,
+            reason="broker_role_revoked",
+        )
+    )
+    assert result.invalidated_grants == 1
+
+    engine = create_async_engine(migrated_postgres_url)
+    async with engine.begin() as connection:
+        await connection.execute(
+            sa.update(WorkflowParticipantRoleRow)
+            .where(
+                WorkflowParticipantRoleRow.workflow_id == created.workflow.id,
+                WorkflowParticipantRoleRow.party_id == broker.actor_party_id,
+                WorkflowParticipantRoleRow.role == "Broker",
+            )
+            .values(revoked_at=None)
+        )
+    await engine.dispose()
+    await record_cause(control_plane, "replacement-approval-message")
+    await control_plane.approve_job(
+        ApproveWorkflowJobCommand(
+            context=broker.model_copy(update={"cause_id": "replacement-approval-message"}),
+            job_id=presentation.send_job_id,
+            expected_draft_revision_id=presentation.draft_job_id,
+        )
+    )
+
+    second_run = await control_plane.claim_job(
+        ClaimWorkflowJobCommand(
+            worker_id="send-worker-two",
+            application_build="test-build",
+            lease_duration=timedelta(minutes=5),
+            executor_keys=("composio_gmail_send",),
+        )
+    )
+    assert second_run is not None
+    assert second_run.run_id != first_run.run_id
+    trace = await control_plane.read_workflow_trace(created.workflow.id, broker)
+    send = next(job for job in trace.jobs if job.id == presentation.send_job_id)
+    assert send.attempts == 2
+    dispatch = await control_plane.begin_external_effect_dispatch(
+        BeginExternalEffectDispatchCommand(run_id=second_run.run_id)
+    )
+    assert dispatch.context.run_id == second_run.run_id
+
+
+async def test_membership_revocation_invalidates_every_affected_workflow(
+    control_plane: WorkflowControlPlane,
+    migrated_postgres_url: str,
+):
+    first, first_presentation = await presented_send(control_plane)
+    broker = create_command().context
+    await control_plane.approve_job(
+        ApproveWorkflowJobCommand(
+            context=broker.model_copy(update={"cause_id": "approval-message-1"}),
+            job_id=first_presentation.send_job_id,
+            expected_draft_revision_id=first_presentation.draft_job_id,
+        )
+    )
+    second, second_presentation = await presented_send(control_plane)
+    await record_cause(control_plane, "second-workflow-approval")
+    await control_plane.approve_job(
+        ApproveWorkflowJobCommand(
+            context=broker.model_copy(update={"cause_id": "second-workflow-approval"}),
+            job_id=second_presentation.send_job_id,
+            expected_draft_revision_id=second_presentation.draft_job_id,
+        )
+    )
+
+    result = await control_plane.revoke_authority(
+        RevokeWorkflowAuthorityCommand(
+            context=broker.model_copy(update={"cause_id": "revoke-membership-message"}),
+            workflow_id=first.workflow.id,
+            subject_party_id=broker.actor_party_id,
+            reason="organization_membership_revoked",
+        )
+    )
+
+    assert result.invalidated_grants == 2
+    for created, presentation in (
+        (first, first_presentation),
+        (second, second_presentation),
+    ):
+        trace = await control_plane.read_workflow_trace(created.workflow.id, broker)
+        invalidations = [
+            event for event in trace.events if event.event_type == "approval_invalidated"
+        ]
+        send = next(job for job in trace.jobs if job.id == presentation.send_job_id)
+        assert len(invalidations) == 1
+        assert invalidations[0].data["reason"] == "organization_membership_revoked"
+        assert send.status == "waiting"
+
+    engine = create_async_engine(migrated_postgres_url)
+    async with engine.begin() as connection:
+        await connection.execute(
+            sa.update(OrganizationMembershipRow)
+            .where(
+                OrganizationMembershipRow.person_party_id == broker.actor_party_id,
+                OrganizationMembershipRow.organization_party_id == broker.organization_party_id,
+            )
+            .values(revoked_at=None)
+        )
+    await engine.dispose()
+    assert (
+        await control_plane.claim_job(
+            ClaimWorkflowJobCommand(
+                worker_id="send-worker",
+                application_build="test-build",
+                lease_duration=timedelta(minutes=5),
+                executor_keys=("composio_gmail_send",),
+            )
+        )
+        is None
+    )
+
+
 async def test_interaction_tool_approves_only_loaded_exact_job(
     control_plane: WorkflowControlPlane,
     migrated_postgres_url: str,
@@ -874,7 +1023,7 @@ async def test_interaction_tool_approves_only_loaded_exact_job(
         cause_id="approval-message-tool",
         trusted_workflow_id=created.workflow.id,
     )
-    await toolbox.record_user_cause(context, "I approve sending this exact email")
+    await toolbox.record_interaction_cause(context)
     packet = await toolbox.invoke(
         "read_workflow_packet",
         {"workflow_id": str(created.workflow.id)},

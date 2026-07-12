@@ -7,11 +7,11 @@ from typing import Literal, cast
 import sqlalchemy as sa
 
 from .authority import CurrentBrokerAuthority
-from .contracts import ApprovalGrant, ApproveWorkflowJobCommand, RecordApprovalCauseCommand
+from .contracts import ApprovalGrant, ApproveWorkflowJobCommand, RecordInteractionCauseCommand
 from .database import WorkflowDatabase
 from .email_effects import fingerprint_email_effect, resolve_email_effect
 from .errors import WorkflowAuthorizationError, WorkflowLifecycleError
-from .models import ApprovalCauseRow, WorkflowEventRow, WorkflowJobRow, WorkflowRow
+from .models import InteractionCauseRow, WorkflowEventRow, WorkflowJobRow, WorkflowRow
 from .registry import GMAIL_SEND_EMAIL_KIND
 
 
@@ -26,25 +26,23 @@ class WorkflowApprovalProtocol:
         self._database = database
         self._has_current_broker_authority = has_current_broker_authority
 
-    async def record_cause(self, command: RecordApprovalCauseCommand) -> None:
-        """Record one authenticated human Cause before an agent may interpret it."""
+    async def record_cause(self, command: RecordInteractionCauseCommand) -> None:
+        """Record the original authenticated interaction before agent interpretation."""
 
         async with self._database.transaction() as session:
-            existing = await session.get(ApprovalCauseRow, command.context.cause_id)
+            existing = await session.get(InteractionCauseRow, command.context.cause_id)
             if existing is not None:
                 if (
                     existing.cause_type != command.context.cause_type
                     or existing.actor_party_id != command.context.actor_party_id
-                    or existing.content != command.content
                 ):
                     raise WorkflowLifecycleError("Approval Cause identity conflicts")
                 return
             session.add(
-                ApprovalCauseRow(
+                InteractionCauseRow(
                     id=command.context.cause_id,
                     cause_type=command.context.cause_type,
                     actor_party_id=command.context.actor_party_id,
-                    content=command.content,
                 )
             )
             await session.flush()
@@ -72,7 +70,7 @@ class WorkflowApprovalProtocol:
             if workflow is None or job is None:
                 raise WorkflowLifecycleError("Send Job aggregate does not exist")
 
-            cause = await session.get(ApprovalCauseRow, command.context.cause_id)
+            cause = await session.get(InteractionCauseRow, command.context.cause_id)
             if (
                 cause is None
                 or cause.cause_type != command.context.cause_type
@@ -82,7 +80,6 @@ class WorkflowApprovalProtocol:
 
             existing = await session.scalar(
                 sa.select(WorkflowEventRow).where(
-                    WorkflowEventRow.workflow_id == workflow.id,
                     WorkflowEventRow.event_type == "approval_granted",
                     WorkflowEventRow.cause_type == command.context.cause_type,
                     WorkflowEventRow.cause_id == command.context.cause_id,
