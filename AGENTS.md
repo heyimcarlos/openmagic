@@ -13,7 +13,7 @@ work in GitHub Issues.
 
 ## Reference Repositories
 
-Repos in `.reference` (openpoke, …) are available for patterns. Clone a given Git URL into `.reference` and pull latest before using it.
+Repos in `.reference` (openpoke, composio, cloudflare/agents, executor.sh, …) are available for patterns. Clone a given Git URL into `.reference` and pull latest before using it.
 
 ## Engineering Priorities
 
