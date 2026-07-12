@@ -4,7 +4,7 @@ from uuid import uuid4
 
 import pytest
 import sqlalchemy as sa
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from server.tests.workflows.factories import (
@@ -27,11 +27,11 @@ from server.workflows import (
     WorkflowControlPlane,
     WorkflowDatabase,
     WorkflowJobProposal,
+    WorkflowKindContract,
     WorkflowKindRegistry,
     WorkflowNotFoundError,
     default_workflow_registry,
 )
-from server.workflows.registry import RenewalOutreachInput, WorkflowKindContract
 
 
 async def workflow_count(database_url: str) -> int:
@@ -239,9 +239,12 @@ def test_registry_owns_the_only_v0_job_kinds():
 
 
 def test_registry_rejects_duplicate_versioned_kind_names():
+    class DuplicateWorkflowInput(BaseModel):
+        pass
+
     duplicate = WorkflowKindContract(
         kind="duplicate.v1",
-        input_schema=RenewalOutreachInput,
+        input_schema=DuplicateWorkflowInput,
         allowed_job_kinds=frozenset(),
     )
 

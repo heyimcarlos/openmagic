@@ -24,6 +24,7 @@ from .registry import (
     GMAIL_SEND_EMAIL_KIND,
     RENEWAL_OUTREACH_KIND,
     ExecutionStrategy,
+    WorkflowKindContract,
     WorkflowKindRegistry,
     default_workflow_registry,
 )
@@ -46,6 +47,7 @@ __all__ = [
     "WorkflowDatabase",
     "WorkflowError",
     "WorkflowJobProposal",
+    "WorkflowKindContract",
     "WorkflowKindRegistry",
     "WorkflowModelBase",
     "WorkflowNotFoundError",
