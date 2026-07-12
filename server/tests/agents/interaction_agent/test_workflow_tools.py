@@ -439,12 +439,16 @@ async def test_scripted_workflow_runtime_loads_one_packet_and_never_delegates(
         message_builder=prepare_workflow_message,
     )
 
-    result = await runtime.execute("Prepare John Smith's 2026 renewal email at Acme.")
+    result = await runtime.execute(
+        "Prepare John Smith's 2026 renewal email at Acme.",
+        cause_id="authenticated-message-1",
+    )
 
     assert result.success is True
     assert result.execution_agents_used == 0
     assert result.response == "The renewal work is queued."
     assert len(contexts) == 1
+    assert contexts[0].cause_id == "authenticated-message-1"
     assert contexts[0].loaded_packet is not None
     assert contexts[0].loaded_packet.workflow.workflow_id == TARGET_ID
     assert len(calls) == 4

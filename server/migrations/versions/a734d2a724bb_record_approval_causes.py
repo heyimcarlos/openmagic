@@ -51,6 +51,19 @@ def upgrade() -> None:
         unique=True,
         postgresql_where=sa.text("event_type = 'approval_granted'"),
     )
+    op.execute(
+        sa.text(
+            "UPDATE workflow_jobs AS job SET max_attempts = 3 "
+            "WHERE job.kind = 'gmail.send_email.v1' "
+            "AND job.max_attempts = 1 AND job.attempts <= 1 "
+            "AND job.status IN ('waiting', 'queued') "
+            "AND NOT EXISTS ("
+            "SELECT 1 FROM workflow_events AS event "
+            "WHERE event.job_id = job.id "
+            "AND event.event_type = 'external_effect_dispatch_started'"
+            ")"
+        )
+    )
 
 
 def downgrade() -> None:

@@ -571,6 +571,15 @@ async def test_uncertain_send_never_completes_or_requeues(
     assert trace.workflow.status == "active"
     assert send.status == "waiting"
     assert send.output is None
+    await record_cause(control_plane, "approval-after-dispatch")
+    with pytest.raises(WorkflowLifecycleError, match="already dispatched"):
+        await control_plane.approve_job(
+            ApproveWorkflowJobCommand(
+                context=broker.model_copy(update={"cause_id": "approval-after-dispatch"}),
+                job_id=presentation.send_job_id,
+                expected_draft_revision_id=presentation.draft_job_id,
+            )
+        )
 
 
 @pytest.mark.parametrize(
@@ -1032,6 +1041,51 @@ async def test_membership_revocation_invalidates_every_affected_workflow(
         )
         is None
     )
+
+
+async def test_predispatch_revocation_fails_an_exhausted_send_job(
+    control_plane: WorkflowControlPlane,
+    migrated_postgres_url: str,
+):
+    created, presentation = await presented_send(control_plane)
+    broker = create_command().context
+    engine = create_async_engine(migrated_postgres_url)
+    async with engine.begin() as connection:
+        await connection.execute(
+            sa.update(WorkflowJobRow)
+            .where(WorkflowJobRow.id == presentation.send_job_id)
+            .values(max_attempts=1)
+        )
+    await engine.dispose()
+    await control_plane.approve_job(
+        ApproveWorkflowJobCommand(
+            context=broker.model_copy(update={"cause_id": "approval-message-1"}),
+            job_id=presentation.send_job_id,
+            expected_draft_revision_id=presentation.draft_job_id,
+        )
+    )
+    run = await control_plane.claim_job(
+        ClaimWorkflowJobCommand(
+            worker_id="send-worker",
+            application_build="test-build",
+            lease_duration=timedelta(minutes=5),
+            executor_keys=("composio_gmail_send",),
+        )
+    )
+    assert run is not None
+
+    await control_plane.revoke_authority(
+        RevokeWorkflowAuthorityCommand(
+            context=broker.model_copy(update={"cause_id": "revoke-role-message"}),
+            workflow_id=created.workflow.id,
+            subject_party_id=broker.actor_party_id,
+            reason="broker_role_revoked",
+        )
+    )
+
+    trace = await control_plane.read_workflow_trace(created.workflow.id, broker)
+    send = next(job for job in trace.jobs if job.id == presentation.send_job_id)
+    assert send.status == "failed"
 
 
 async def test_interaction_tool_approves_only_loaded_exact_job(

@@ -79,14 +79,21 @@ class InteractionAgentRuntime:
             )
 
     # Main entry point for processing user messages through the LLM interaction loop
-    async def execute(self, user_message: str) -> InteractionResult:
+    async def execute(
+        self,
+        user_message: str,
+        *,
+        cause_id: str | None = None,
+    ) -> InteractionResult:
         """Handle a user-authored message."""
 
         try:
             transcript_before = self._load_conversation_transcript()
             system_prompt = self._system_prompt_builder()
             messages = self._message_builder(user_message, transcript_before, message_type="user")
-            tool_context = self._tool_context_factory(f"message-{uuid4()}")
+            if self._interaction_cause_recorder is not None and cause_id is None:
+                raise ValueError("Authenticated interaction Cause ID is required")
+            tool_context = self._tool_context_factory(cause_id or f"message-{uuid4()}")
             if self._interaction_cause_recorder is not None:
                 await self._interaction_cause_recorder(tool_context)
             self.conversation_log.record_user_message(user_message)

@@ -177,7 +177,7 @@ class WorkflowLifecycleProtocol:
                 run.finished_at = now
             job = await session.get(WorkflowJobRow, approval.job_id)
             if job is not None and job.status in {"waiting", "queued", "running"}:
-                job.status = "waiting"
+                job.status = "failed" if job.attempts >= job.max_attempts else "waiting"
             invalidated += 1
         return invalidated
 

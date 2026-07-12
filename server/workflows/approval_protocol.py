@@ -101,6 +101,15 @@ class WorkflowApprovalProtocol:
                 raise WorkflowLifecycleError("Job is not approvable")
             if job.status != "waiting":
                 raise WorkflowLifecycleError("Approval command is stale")
+            dispatch_exists = await session.scalar(
+                sa.select(WorkflowEventRow.id).where(
+                    WorkflowEventRow.workflow_id == workflow.id,
+                    WorkflowEventRow.job_id == job.id,
+                    WorkflowEventRow.event_type == "external_effect_dispatch_started",
+                )
+            )
+            if dispatch_exists is not None:
+                raise WorkflowLifecycleError("External Effect already dispatched")
             if not await self._has_current_broker_authority(
                 session,
                 command.context,

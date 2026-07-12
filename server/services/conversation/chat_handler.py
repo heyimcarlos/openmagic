@@ -4,6 +4,7 @@ from fastapi import status
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from ...agents.interaction_agent import create_interaction_runtime
+from ...config import get_settings
 from ...logging_config import logger
 from ...models import ChatMessage, ChatRequest
 from ...utils import error_response
@@ -29,6 +30,11 @@ async def handle_chat_request(payload: ChatRequest) -> PlainTextResponse | JSONR
         return error_response("Missing user message", status_code=status.HTTP_400_BAD_REQUEST)
 
     user_content = user_message.content.strip()  # Already checked in _extract_latest_user_message
+    if get_settings().interaction_mode == "workflow" and user_message.id is None:
+        return error_response(
+            "Authenticated interaction Cause ID is required",
+            status_code=status.HTTP_400_BAD_REQUEST,
+        )
 
     logger.info("chat request", extra={"message_length": len(user_content)})
 
@@ -41,7 +47,7 @@ async def handle_chat_request(payload: ChatRequest) -> PlainTextResponse | JSONR
 
     async def _run_interaction() -> None:
         try:
-            await runtime.execute(user_message=user_content)
+            await runtime.execute(user_message=user_content, cause_id=user_message.id)
         except Exception as exc:  # pragma: no cover - defensive
             logger.error("chat task failed", extra={"error": str(exc)})
 
