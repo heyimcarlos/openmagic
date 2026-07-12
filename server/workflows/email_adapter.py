@@ -108,6 +108,13 @@ class ComposioGmailSendAdapter(_InvokeOnce):
         super().__init__()
         self._client = client
         self._binding = binding
+        self._execute_call_count = 0
+
+    @property
+    def execute_call_count(self) -> int:
+        """Number of calls made to Composio's public tool-execution seam."""
+
+        return self._execute_call_count
 
     def validate_effect(self, effect: EmailSendEffectV1) -> None:
         if (
@@ -136,6 +143,7 @@ class ComposioGmailSendAdapter(_InvokeOnce):
             "is_html": False,
         }
         try:
+            self._execute_call_count += 1
             response = await asyncio.to_thread(
                 self._client.tools.execute,
                 slug=COMPOSIO_GMAIL_TOOL,
