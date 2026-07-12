@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 
 from .contracts import WorkflowContract
 
@@ -32,6 +33,17 @@ class WorkflowSearchRequest(WorkflowContract):
     renewal_period: str | None = Field(default=None, pattern=r"^[0-9]{4}$")
     cursor: str | None = Field(default=None, min_length=1, max_length=2000)
     limit: int = Field(default=5, ge=1, le=10)
+
+    @field_validator("query")
+    @classmethod
+    def normalize_query_signal(cls, value: str) -> str:
+        stripped = value.strip()
+        return stripped if re.search(r"[A-Za-z0-9]", stripped) else ""
+
+    @field_validator("participant", "organization", mode="before")
+    @classmethod
+    def strip_structured_text_filter(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
 
     @model_validator(mode="after")
     def require_retrieval_signal(self) -> WorkflowSearchRequest:

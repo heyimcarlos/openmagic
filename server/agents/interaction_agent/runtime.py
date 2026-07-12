@@ -311,14 +311,14 @@ class InteractionAgentRuntime:
         except Exception as exc:  # pragma: no cover - defensive
             logger.error(
                 "Tool execution crashed",
-                extra={"tool": tool_call.name, "error": str(exc)},
+                extra={"tool": tool_call.name, "error_type": type(exc).__name__},
             )
             self._log_tool_invocation(
                 tool_call,
                 stage="error",
-                detail={"error": str(exc)},
+                detail={"error_type": type(exc).__name__},
             )
-            return ToolResult(success=False, payload={"error": str(exc)})
+            return ToolResult(success=False, payload={"code": "internal_error"})
 
         if not isinstance(result, ToolResult):
             logger.warning(

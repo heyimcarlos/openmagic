@@ -64,6 +64,8 @@ def test_workflow_tool_surface_omits_delegation_and_execution_configuration(
         "handler",
         "prompt",
         "max_attempts",
+        "sender_mailbox",
+        "recipient_email",
     ):
         assert forbidden not in encoded
     proposal_schema = next(
@@ -134,11 +136,7 @@ async def test_workflow_tools_search_read_one_packet_then_propose(
 
     proposal = await workflow_toolbox.invoke(
         "propose_renewal_email",
-        {
-            "workflow_id": str(TARGET_ID),
-            "sender_mailbox": "broker@acme.example",
-            "recipient_email": "john@example.com",
-        },
+        {"workflow_id": str(TARGET_ID)},
         context,
     )
     assert proposal.success is True
@@ -157,11 +155,7 @@ async def test_proposal_requires_packet_in_same_interaction_turn(
 
     result = await workflow_toolbox.invoke(
         "propose_renewal_email",
-        {
-            "workflow_id": str(TARGET_ID),
-            "sender_mailbox": "broker@acme.example",
-            "recipient_email": "john@example.com",
-        },
+        {"workflow_id": str(TARGET_ID)},
         context,
     )
 
@@ -215,6 +209,69 @@ async def test_one_interaction_turn_cannot_load_two_workflow_packets(
     assert second.payload == {"code": "workflow_packet_already_selected"}
 
 
+async def test_selected_authorized_workflow_derives_its_organization_context(
+    workflow_toolbox: WorkflowInteractionToolbox,
+):
+    context = InteractionToolContext(
+        actor_party_id=BROKER_ID,
+        organization_party_id=ACME_ID,
+        cause_id="message-cross-organization",
+    )
+    search = await workflow_toolbox.invoke(
+        "search_workflows",
+        {
+            "query": "John Smith renewal",
+            "workflow_kind": "renewal_outreach.v1",
+            "status": "active",
+            "organization": "Northwind Brokerage",
+            "renewal_period": "2026",
+        },
+        context,
+    )
+    packet = await workflow_toolbox.invoke(
+        "read_workflow_packet",
+        {"workflow_id": str(SAME_NAME_ID)},
+        context,
+    )
+    proposal = await workflow_toolbox.invoke(
+        "propose_renewal_email",
+        {"workflow_id": str(SAME_NAME_ID)},
+        context,
+    )
+
+    assert search.payload["total_matches"] == 1
+    assert packet.success is True
+    assert proposal.success is True
+
+
+async def test_unexpected_tool_errors_are_redacted_before_model_delivery():
+    from server.agents.interaction_agent import runtime as runtime_module
+
+    secret = "postgresql://user:secret@db/private?token=abc"
+
+    class CrashingToolbox:
+        @property
+        def schemas(self):
+            return ()
+
+        async def invoke(self, name, arguments, context):
+            raise RuntimeError(secret)
+
+    runtime = object.__new__(InteractionAgentRuntime)
+    runtime.toolbox = CrashingToolbox()
+    result = await runtime._execute_tool(
+        runtime_module._ToolCall(identifier="call", name="crash", arguments={}),
+        InteractionToolContext(
+            actor_party_id=BROKER_ID,
+            organization_party_id=ACME_ID,
+            cause_id="message-error-redaction",
+        ),
+    )
+
+    assert result.payload == {"code": "internal_error"}
+    assert secret not in json.dumps(result.payload)
+
+
 async def test_ambiguous_search_cannot_read_or_propose_the_first_candidate(
     workflow_toolbox: WorkflowInteractionToolbox,
     migrated_postgres_url: str,
@@ -239,11 +296,7 @@ async def test_ambiguous_search_cannot_read_or_propose_the_first_candidate(
     )
     proposal = await workflow_toolbox.invoke(
         "propose_renewal_email",
-        {
-            "workflow_id": str(TARGET_ID),
-            "sender_mailbox": "broker@acme.example",
-            "recipient_email": "john@example.com",
-        },
+        {"workflow_id": str(TARGET_ID)},
         context,
     )
 
@@ -275,11 +328,7 @@ async def test_ambiguous_search_cannot_read_or_propose_the_first_candidate(
     )
     accepted = await workflow_toolbox.invoke(
         "propose_renewal_email",
-        {
-            "workflow_id": str(TARGET_ID),
-            "sender_mailbox": "broker@acme.example",
-            "recipient_email": "john@example.com",
-        },
+        {"workflow_id": str(TARGET_ID)},
         context,
     )
 
@@ -335,8 +384,6 @@ async def test_scripted_workflow_runtime_loads_one_packet_and_never_delegates(
             "propose_renewal_email",
             {
                 "workflow_id": str(TARGET_ID),
-                "sender_mailbox": "broker@acme.example",
-                "recipient_email": "john@example.com",
             },
         ),
         None,

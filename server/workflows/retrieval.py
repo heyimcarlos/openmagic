@@ -6,6 +6,7 @@ import base64
 import hashlib
 import hmac
 import json
+import math
 import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass
@@ -20,6 +21,7 @@ from .database import WorkflowDatabase
 from .errors import (
     InvalidWorkflowSearchError,
     StaleWorkflowCursorError,
+    WorkflowLifecycleError,
     WorkflowNotFoundError,
 )
 from .identity_models import (
@@ -117,6 +119,13 @@ class _Candidate:
 class _WorkflowIdentifiers:
     participants: tuple[str, ...] = ()
     organization: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class RenewalEmailAddresses:
+    organization_party_id: UUID
+    sender_mailbox: str
+    recipient_email: str
 
 
 class WorkflowRetrieval:
@@ -227,6 +236,11 @@ class WorkflowRetrieval:
             runs_by_job[run.job_id].append(run)
         jobs_by_id = {job.id: job for job in jobs}
         events_by_job: dict[UUID, list[WorkflowEventRow]] = defaultdict(list)
+        invalidated_approval_ids = {
+            event.approval_grant_id
+            for event in events
+            if event.event_type == "approval_invalidated" and event.approval_grant_id is not None
+        }
         for event in events:
             if event.job_id is not None:
                 events_by_job[event.job_id].append(event)
@@ -252,6 +266,7 @@ class WorkflowRetrieval:
                     runs_by_job[job.id],
                     events_by_job[job.id],
                     jobs_by_id,
+                    invalidated_approval_ids,
                 )
                 for job in jobs
             ),
@@ -261,6 +276,59 @@ class WorkflowRetrieval:
                 total=len(events),
                 has_earlier=len(events) > EVENT_LIMIT,
             ),
+        )
+
+    async def resolve_renewal_email_addresses(
+        self,
+        context: WorkflowInspectionContext,
+        workflow_id: UUID,
+    ) -> RenewalEmailAddresses:
+        """Resolve current verified mailboxes without exposing them to the model."""
+
+        async with self._database.read_transaction() as session:
+            authorized = self._authorized_workflows(context.actor_party_id).where(
+                WorkflowRow.id == workflow_id,
+                WorkflowRow.kind == RENEWAL_OUTREACH_KIND,
+            )
+            authorized_row = (await session.execute(authorized)).one_or_none()
+            if authorized_row is None:
+                raise WorkflowNotFoundError(str(workflow_id))
+            workflow, _organization = authorized_row
+            broker_emails = (
+                await session.scalars(
+                    sa.select(PartyIdentifierRow.value).where(
+                        PartyIdentifierRow.party_id == context.actor_party_id,
+                        PartyIdentifierRow.kind == "email",
+                        PartyIdentifierRow.verified_at.is_not(None),
+                        PartyIdentifierRow.revoked_at.is_(None),
+                    )
+                )
+            ).all()
+            policyholder_emails = (
+                await session.scalars(
+                    sa.select(PartyIdentifierRow.value)
+                    .join(
+                        WorkflowParticipantRoleRow,
+                        WorkflowParticipantRoleRow.party_id == PartyIdentifierRow.party_id,
+                    )
+                    .where(
+                        WorkflowParticipantRoleRow.workflow_id == workflow_id,
+                        WorkflowParticipantRoleRow.role == "Policyholder",
+                        WorkflowParticipantRoleRow.revoked_at.is_(None),
+                        PartyIdentifierRow.kind == "email",
+                        PartyIdentifierRow.verified_at.is_not(None),
+                        PartyIdentifierRow.revoked_at.is_(None),
+                    )
+                )
+            ).all()
+        if len(broker_emails) != 1 or len(policyholder_emails) != 1:
+            raise WorkflowLifecycleError(
+                "renewal email requires one verified Broker and Policyholder mailbox"
+            )
+        return RenewalEmailAddresses(
+            organization_party_id=workflow.organization_party_id,
+            sender_mailbox=broker_emails[0],
+            recipient_email=policyholder_emails[0],
         )
 
     @staticmethod
@@ -402,29 +470,42 @@ class WorkflowRetrieval:
             )
 
         normalized_query = cls._normalize_text(request.query)
-        query_terms = cls._query_terms(request.query)
+        try:
+            explicit_workflow_id = UUID(request.query.strip())
+        except ValueError:
+            explicit_workflow_id = None
+        query_terms = [] if explicit_workflow_id is not None else cls._query_terms(request.query)
+        if explicit_workflow_id is not None:
+            query = query.where(WorkflowRow.id == explicit_workflow_id)
         normalized_kind = sa.func.replace(
             sa.func.replace(sa.func.lower(WorkflowRow.kind), "_", " "),
             ".v1",
             "",
         )
         period = WorkflowRow.input["renewal_period"].as_string()
+        matched_term_count: sa.ColumnElement[int] = sa.literal(0)
         for term in query_terms:
-            query = query.where(
-                sa.or_(
-                    sa.cast(WorkflowRow.id, sa.Text).contains(term, autoescape=True),
-                    sa.func.lower(WorkflowRow.objective).contains(term, autoescape=True),
-                    normalized_kind.contains(term, autoescape=True),
-                    sa.func.lower(WorkflowRow.status).contains(term, autoescape=True),
-                    sa.func.lower(PartyRow.display_name).contains(term, autoescape=True),
-                    period.contains(term, autoescape=True),
-                    participant_matches(term),
-                    organization_identifier_matches(term),
-                )
+            term_matches = sa.or_(
+                sa.cast(WorkflowRow.id, sa.Text).contains(term, autoescape=True),
+                sa.func.lower(WorkflowRow.objective).contains(term, autoescape=True),
+                normalized_kind.contains(term, autoescape=True),
+                sa.func.lower(WorkflowRow.status).contains(term, autoescape=True),
+                sa.func.lower(PartyRow.display_name).contains(term, autoescape=True),
+                period.contains(term, autoescape=True),
+                participant_matches(term),
+                organization_identifier_matches(term),
             )
+            matched_term_count = matched_term_count + sa.case(
+                (term_matches, 1),
+                else_=0,
+            )
+        if query_terms:
+            query = query.where(matched_term_count >= math.ceil(len(query_terms) * 0.6))
 
         participant_exact_value = request.participant or normalized_query
-        organization_exact_value = request.organization or normalized_query
+        organization_exact_value = (
+            request.organization.casefold() if request.organization else normalized_query
+        )
         participant_exact = (
             participant_equals(participant_exact_value) if participant_exact_value else sa.false()
         )
@@ -463,7 +544,12 @@ class WorkflowRetrieval:
             )
         score = (
             text_score
-            + sa.case((sa.cast(WorkflowRow.id, sa.Text) == normalized_query, 1000), else_=0)
+            + sa.case(
+                (WorkflowRow.id == explicit_workflow_id, 1000)
+                if explicit_workflow_id is not None
+                else (sa.false(), 1000),
+                else_=0,
+            )
             + sa.case((participant_exact, 200), else_=0)
             + sa.case((organization_exact, 180), else_=0)
             + sa.case(
@@ -605,7 +691,7 @@ class WorkflowRetrieval:
 
         score = int(persisted_score)
         reasons: list[str] = []
-        if query == str(workflow.id).casefold():
+        if request.query.strip().casefold() == str(workflow.id):
             reasons.append(f"exact workflow identifier: {workflow.id}")
         for name in participant_names:
             if name.casefold() in query or (
@@ -670,6 +756,7 @@ class WorkflowRetrieval:
         runs: list[WorkflowJobRunRow],
         events: list[WorkflowEventRow],
         jobs_by_id: dict[UUID, WorkflowJobRow],
+        invalidated_approval_ids: set[UUID],
     ) -> WorkflowPacketJob:
         latest_run = runs[-1] if runs else None
         approval = next(
@@ -680,10 +767,7 @@ class WorkflowRetrieval:
             (event for event in events if event.event_type == "external_effect_dispatch_started"),
             None,
         )
-        invalidated = approval is not None and any(
-            event.event_type == "approval_invalidated" and event.approval_grant_id == approval.id
-            for event in events
-        )
+        invalidated = approval is not None and approval.id in invalidated_approval_ids
         unresolved = [
             dependency_id
             for dependency_id in dependency_ids
@@ -849,7 +933,11 @@ class WorkflowRetrieval:
     @staticmethod
     def _applied_filters(request: WorkflowSearchRequest) -> dict[str, str]:
         return {
-            key: value
+            key: (
+                " ".join(value.casefold().split())
+                if key in {"participant", "organization"}
+                else value
+            )
             for key, value in (
                 ("workflow_kind", request.workflow_kind),
                 ("status", request.status),

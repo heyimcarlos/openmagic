@@ -408,7 +408,6 @@ async def test_packet_explains_invalidated_approval_after_dependency_succeeds(
         session.add(
             WorkflowEventRow(
                 workflow_id=TARGET_ID,
-                job_id=send.id,
                 event_type="approval_invalidated",
                 actor_type="system",
                 actor_id="control-plane",

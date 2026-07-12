@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from server.services.conversation import get_conversation_log
 from server.workflows import (
@@ -34,8 +34,6 @@ class _PacketArguments(_ToolArguments):
 
 class _ProposalArguments(_ToolArguments):
     workflow_id: UUID
-    sender_mailbox: EmailStr
-    recipient_email: EmailStr
 
 
 class _MessageArguments(_ToolArguments):
@@ -200,10 +198,14 @@ class WorkflowInteractionToolbox:
         period = packet.workflow.input.get("renewal_period")
         if not isinstance(period, str):
             return ToolResult(success=False, payload={"code": "renewal_period_missing"})
+        addresses = await self._retrieval.resolve_renewal_email_addresses(
+            WorkflowInspectionContext(actor_party_id=context.actor_party_id),
+            request.workflow_id,
+        )
         command = ProposeWorkflowJobsCommand(
             context=WorkflowCommandContext(
                 actor_party_id=context.actor_party_id,
-                organization_party_id=context.organization_party_id,
+                organization_party_id=addresses.organization_party_id,
                 cause_type="message",
                 cause_id=context.cause_id,
             ),
@@ -221,8 +223,8 @@ class WorkflowInteractionToolbox:
                     key="send",
                     kind=GMAIL_SEND_EMAIL_KIND,
                     input={
-                        "sender_mailbox": str(request.sender_mailbox),
-                        "to": [str(request.recipient_email)],
+                        "sender_mailbox": addresses.sender_mailbox,
+                        "to": [addresses.recipient_email],
                         "subject": {"job_output": "draft", "field": "subject"},
                         "body": {"job_output": "draft", "field": "body"},
                     },

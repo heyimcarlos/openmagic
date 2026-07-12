@@ -73,6 +73,10 @@ async def test_search_accepts_full_human_request_and_relational_identifiers(
             query="Can you prepare John Smith's 2026 renewal email at Acme Brokerage?"
         ),
     )
+    descriptive = await retrieval.search_workflows(
+        WorkflowInspectionContext(actor_party_id=BROKER_ID),
+        WorkflowSearchRequest(query="Please prepare John Smith's urgent renewal"),
+    )
     identifier = await retrieval.search_workflows(
         WorkflowInspectionContext(actor_party_id=BROKER_ID),
         WorkflowSearchRequest(
@@ -84,6 +88,8 @@ async def test_search_accepts_full_human_request_and_relational_identifiers(
 
     assert natural_language.total_matches > 0
     assert natural_language.results[0].workflow_id == TARGET_ID
+    assert descriptive.total_matches > 0
+    assert descriptive.results[0].workflow_id == TARGET_ID
     assert identifier.total_matches == 1
     assert identifier.results[0].workflow_id == TARGET_ID
     assert "exact participant identifier match" in identifier.results[0].match_reasons
@@ -131,6 +137,7 @@ async def test_search_cursor_is_bounded_and_bound_to_normalized_request(
     request = WorkflowSearchRequest(
         workflow_kind="renewal_outreach.v1",
         status="active",
+        organization="Acme Brokerage",
         renewal_period="2026",
         limit=1,
     )
@@ -138,12 +145,12 @@ async def test_search_cursor_is_bounded_and_bound_to_normalized_request(
     first = await retrieval.search_workflows(
         WorkflowInspectionContext(actor_party_id=BROKER_ID), request
     )
-    assert first.total_matches == 3
+    assert first.total_matches == 2
     assert first.has_more is True
     assert first.next_cursor is not None
     second = await retrieval.search_workflows(
         WorkflowInspectionContext(actor_party_id=BROKER_ID),
-        request.model_copy(update={"cursor": first.next_cursor}),
+        request.model_copy(update={"organization": "acme brokerage", "cursor": first.next_cursor}),
     )
     assert second.results[0].workflow_id != first.results[0].workflow_id
 
@@ -160,6 +167,10 @@ async def test_invalid_search_inputs_create_or_change_nothing(
 ):
     with pytest.raises(ValidationError):
         WorkflowSearchRequest()
+    with pytest.raises(ValidationError):
+        WorkflowSearchRequest(query="%")
+    with pytest.raises(ValidationError):
+        WorkflowSearchRequest(participant="   ")
     with pytest.raises(InvalidWorkflowSearchError):
         await retrieval.search_workflows(
             WorkflowInspectionContext(actor_party_id=BROKER_ID),
