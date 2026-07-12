@@ -153,6 +153,34 @@ async def test_exact_presented_send_approval_is_idempotent(
         )
 
 
+async def test_one_cause_cannot_concurrently_approve_two_jobs(
+    control_plane: WorkflowControlPlane,
+):
+    _first, first_presentation = await presented_send(control_plane)
+    _second, second_presentation = await presented_send(control_plane)
+    broker = create_command().context
+
+    results = await asyncio.gather(
+        *[
+            control_plane.approve_job(
+                ApproveWorkflowJobCommand(
+                    context=broker.model_copy(update={"cause_id": "approval-message-1"}),
+                    job_id=presentation.send_job_id,
+                    expected_draft_revision_id=presentation.draft_job_id,
+                )
+            )
+            for presentation in (first_presentation, second_presentation)
+        ],
+        return_exceptions=True,
+    )
+
+    assert sum(not isinstance(result, BaseException) for result in results) == 1
+    conflicts = [result for result in results if isinstance(result, BaseException)]
+    assert len(conflicts) == 1
+    assert isinstance(conflicts[0], WorkflowLifecycleError)
+    assert "Cause was already used" in str(conflicts[0])
+
+
 async def test_stale_or_unauthorized_approval_changes_nothing(
     control_plane: WorkflowControlPlane,
     migrated_postgres_url: str,

@@ -70,7 +70,11 @@ class WorkflowApprovalProtocol:
             if workflow is None or job is None:
                 raise WorkflowLifecycleError("Send Job aggregate does not exist")
 
-            cause = await session.get(InteractionCauseRow, command.context.cause_id)
+            cause = await session.scalar(
+                sa.select(InteractionCauseRow)
+                .where(InteractionCauseRow.id == command.context.cause_id)
+                .with_for_update()
+            )
             if (
                 cause is None
                 or cause.cause_type != command.context.cause_type
