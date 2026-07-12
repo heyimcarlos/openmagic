@@ -55,7 +55,7 @@ An explicit toolkit version is required. The stable result surface is
 and session details.
 
 OpenMagic therefore calls only the public path, pins SDK 0.17.1 and Gmail
-toolkit `20260703_00`, treats only `successful=true` with an empty error as a
+toolkit `20260702_01`, treats only `successful=true` with an empty error as a
 positive acknowledgement, and maps every ambiguous post-dispatch observation
 to `uncertain`.
 
@@ -148,3 +148,19 @@ attachments, HTML, aliases, drafts, and reconciliation machinery.
 This recommendation would change when multiple unrelated side-effecting Job
 Kinds demonstrate a genuinely shared execution lifecycle beyond the current
 email-specific adapter seam.
+
+## Live Verification Note
+
+Credentialed inspection on 2026-07-12 confirmed that Composio exposes Gmail
+toolkit version `20260702_01`. Its successful send receipt uses provider keys
+`id` and `threadId`, which OpenMagic normalizes into `message_id` and
+`thread_id`.
+
+The configured Google Cloud project rejected both the Gmail send and a
+read-only Sent-mail reconciliation query with `403 PERMISSION_DENIED` because
+the Gmail API is disabled for that project. The uniquely correlated messages
+did not appear in the disposable recipient inbox. In both cases OpenMagic had
+already committed one dispatch event, so it conservatively left the Send Job
+waiting and did not retry. A live happy-path smoke remains blocked on enabling
+the Gmail API in the connected Google Cloud project. Deterministic browser QA
+still confirmed that a vague approval creates no Approval Grant or dispatch.

@@ -13,7 +13,7 @@ from .contracts import RunResult
 from .email_effects import EmailSendEffectV1, EmailSendExecutionContextV1
 
 COMPOSIO_GMAIL_TOOL = "GMAIL_SEND_EMAIL"
-COMPOSIO_GMAIL_TOOLKIT_VERSION = "20260703_00"
+COMPOSIO_GMAIL_TOOLKIT_VERSION = "20260702_01"
 
 
 class DuplicateEmailSendError(RuntimeError):
@@ -160,8 +160,8 @@ def _normalize_response(response: object) -> RunResult:
 
 
 def _successful_result(data: Mapping[str, object]) -> RunResult:
-    message_id = data.get("message_id")
-    thread_id = data.get("thread_id")
+    message_id = data.get("message_id") or data.get("id")
+    thread_id = data.get("thread_id") or data.get("threadId")
     return RunResult(
         outcome="succeeded",
         data={

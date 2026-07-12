@@ -427,7 +427,7 @@ def default_workflow_registry() -> WorkflowKindRegistry:
         retry_backoff=timedelta(seconds=2),
         requires_approval=True,
         adapter_version="openmagic.composio_gmail.v1",
-        provider_tool_version="GMAIL_SEND_EMAIL@20260703_00",
+        provider_tool_version="GMAIL_SEND_EMAIL@20260702_01",
     )
     renewal = WorkflowKindContract(
         kind=RENEWAL_OUTREACH_KIND,

@@ -283,7 +283,13 @@ async def test_composio_adapter_uses_pinned_public_execute_and_normalizes_succes
     dispatch = await control_plane.begin_external_effect_dispatch(
         BeginExternalEffectDispatchCommand(run_id=run.run_id)
     )
-    tools = _Tools({"successful": True, "error": None, "data": {"message_id": "gmail-message-1"}})
+    tools = _Tools(
+        {
+            "successful": True,
+            "error": None,
+            "data": {"id": "gmail-message-1", "threadId": "gmail-thread-1"},
+        }
+    )
     adapter = ComposioGmailSendAdapter(
         client=SimpleNamespace(tools=tools),
         binding=ComposioMailboxBinding(
@@ -299,15 +305,15 @@ async def test_composio_adapter_uses_pinned_public_execute_and_normalizes_succes
     assert result.data == {
         "provider": "composio_gmail",
         "acknowledged": True,
-        "tool_version": "20260703_00",
+        "tool_version": "20260702_01",
         "message_id": "gmail-message-1",
-        "thread_id": None,
+        "thread_id": "gmail-thread-1",
     }
     assert tools.calls == [
         {
             "slug": "GMAIL_SEND_EMAIL",
             "user_id": "broker-connection",
-            "version": "20260703_00",
+            "version": "20260702_01",
             "arguments": {
                 "user_id": "me",
                 "recipient_email": "john@example.com",
@@ -422,7 +428,7 @@ async def test_worker_sends_once_and_completes_workflow_atomically(
     assert send.output == {
         "provider": "composio_gmail",
         "acknowledged": True,
-        "tool_version": "20260703_00",
+        "tool_version": "20260702_01",
         "message_id": None,
         "thread_id": None,
     }
