@@ -3,7 +3,7 @@ import asyncio
 from fastapi import status
 from fastapi.responses import JSONResponse, PlainTextResponse
 
-from ...agents.interaction_agent.factory import create_interaction_runtime
+from ...agents.interaction_agent import create_interaction_runtime
 from ...logging_config import logger
 from ...models import ChatMessage, ChatRequest
 from ...utils import error_response

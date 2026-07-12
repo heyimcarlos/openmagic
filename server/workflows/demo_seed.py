@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import cast
 from uuid import UUID
 
+import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from .identity_models import (
@@ -28,8 +30,23 @@ DEMO_CREATED_EVENT_ID = UUID("54000000-0000-0000-0000-000000000001")
 
 
 async def _add_if_missing(session: AsyncSession, row: object, identity: object) -> None:
-    if await session.get(type(row), identity) is None:
+    existing = await session.get(type(row), identity)
+    if existing is None:
         session.add(row)
+        return
+    ignored_fields = {"created_at", "granted_at", "verified_at", "occurred_at"}
+    for column in sa.inspect(type(row)).columns:
+        if column.key in ignored_fields:
+            continue
+        if getattr(existing, column.key) != getattr(row, column.key):
+            raise ValueError(
+                f"V0 demo seed conflict for {type(row).__name__} {identity}: {column.key}"
+            )
+    if (
+        isinstance(row, PartyIdentifierRow)
+        and cast(PartyIdentifierRow, existing).verified_at is None
+    ):
+        raise ValueError(f"V0 demo seed conflict for PartyIdentifierRow {identity}: unverified")
 
 
 async def seed_v0_demo(

@@ -69,7 +69,9 @@ async def test_search_accepts_full_human_request_and_relational_identifiers(
 ):
     natural_language = await retrieval.search_workflows(
         WorkflowInspectionContext(actor_party_id=BROKER_ID),
-        WorkflowSearchRequest(query="Prepare John Smith's 2026 renewal email at Acme Brokerage"),
+        WorkflowSearchRequest(
+            query="Can you prepare John Smith's 2026 renewal email at Acme Brokerage?"
+        ),
     )
     identifier = await retrieval.search_workflows(
         WorkflowInspectionContext(actor_party_id=BROKER_ID),
@@ -97,6 +99,30 @@ async def test_renewal_period_filter_is_scoped_to_declaring_workflow_kind(
 
     assert page.total_matches == 3
     assert {result.workflow_kind for result in page.results} == {"renewal_outreach.v1"}
+
+
+async def test_partial_identifiers_are_explained_without_exact_rank_or_wildcards(
+    retrieval: WorkflowRetrieval,
+):
+    partial = await retrieval.search_workflows(
+        WorkflowInspectionContext(actor_party_id=BROKER_ID),
+        WorkflowSearchRequest(organization="acme", limit=10),
+    )
+    wildcard = await retrieval.search_workflows(
+        WorkflowInspectionContext(actor_party_id=BROKER_ID),
+        WorkflowSearchRequest(organization="%", limit=10),
+    )
+
+    assert partial.total_matches == 4
+    assert all(
+        any(reason.startswith("organization filter matched") for reason in result.match_reasons)
+        for result in partial.results
+    )
+    assert all(
+        "exact organization identifier match" not in result.match_reasons
+        for result in partial.results
+    )
+    assert wildcard.total_matches == 0
 
 
 async def test_search_cursor_is_bounded_and_bound_to_normalized_request(

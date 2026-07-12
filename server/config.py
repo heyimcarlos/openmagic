@@ -39,6 +39,13 @@ def _env_int(name: str, fallback: int) -> int:
         return fallback
 
 
+def _interaction_mode() -> Literal["workflow", "legacy"]:
+    value = os.getenv("OPENMAGIC_INTERACTION_MODE", "workflow")
+    if value not in {"workflow", "legacy"}:
+        raise ValueError("OPENMAGIC_INTERACTION_MODE must be 'workflow' or 'legacy'")
+    return cast(Literal["workflow", "legacy"], value)
+
+
 class Settings(BaseModel):
     """Application settings with lightweight env fallbacks."""
 
@@ -73,12 +80,7 @@ class Settings(BaseModel):
     workflow_organization_party_id: str | None = Field(
         default=os.getenv("OPENMAGIC_WORKFLOW_ORGANIZATION_PARTY_ID")
     )
-    interaction_mode: Literal["workflow", "legacy"] = Field(
-        default=cast(
-            Literal["workflow", "legacy"],
-            os.getenv("OPENMAGIC_INTERACTION_MODE", "workflow"),
-        )
-    )
+    interaction_mode: Literal["workflow", "legacy"] = Field(default_factory=_interaction_mode)
 
     # HTTP behaviour
     cors_allow_origins_raw: str = Field(default=os.getenv("OPENPOKE_CORS_ALLOW_ORIGINS", "*"))

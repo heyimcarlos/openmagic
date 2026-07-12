@@ -50,6 +50,7 @@ from .retrieval_contracts import (
     WorkflowPacketEventWindow,
     WorkflowPacketJob,
     WorkflowPacketRun,
+    WorkflowPacketWaitingReason,
     WorkflowPacketWorkflow,
     WorkflowParticipantSummary,
     WorkflowRunStatus,
@@ -71,14 +72,34 @@ QUERY_NOISE_TERMS = frozenset(
         "a",
         "an",
         "at",
+        "can",
+        "could",
+        "create",
+        "draft",
         "email",
+        "find",
         "for",
+        "help",
+        "i",
+        "is",
+        "it",
+        "like",
         "me",
+        "my",
+        "need",
+        "of",
+        "our",
         "please",
         "prepare",
+        "send",
+        "that",
         "the",
+        "this",
         "to",
+        "want",
+        "would",
         "workflow",
+        "you",
     }
 )
 
@@ -287,7 +308,7 @@ class WorkflowRetrieval:
         organization_identifier = aliased(PartyIdentifierRow)
 
         def participant_matches(value: str) -> sa.ColumnElement[bool]:
-            pattern = f"%{value.casefold()}%"
+            normalized = value.casefold()
             return sa.exists(
                 sa.select(participant.workflow_id)
                 .select_from(participant)
@@ -303,8 +324,35 @@ class WorkflowRetrieval:
                 .where(
                     participant.workflow_id == WorkflowRow.id,
                     sa.or_(
-                        sa.func.lower(participant_party.display_name).like(pattern),
-                        sa.func.lower(participant_identifier.value).like(pattern),
+                        sa.func.lower(participant_party.display_name).contains(
+                            normalized, autoescape=True
+                        ),
+                        sa.func.lower(participant_identifier.value).contains(
+                            normalized, autoescape=True
+                        ),
+                    ),
+                )
+            )
+
+        def participant_equals(value: str) -> sa.ColumnElement[bool]:
+            normalized = value.casefold()
+            return sa.exists(
+                sa.select(participant.workflow_id)
+                .select_from(participant)
+                .join(participant_party, participant_party.id == participant.party_id)
+                .outerjoin(
+                    participant_identifier,
+                    sa.and_(
+                        participant_identifier.party_id == participant.party_id,
+                        participant_identifier.verified_at.is_not(None),
+                        participant_identifier.revoked_at.is_(None),
+                    ),
+                )
+                .where(
+                    participant.workflow_id == WorkflowRow.id,
+                    sa.or_(
+                        sa.func.lower(participant_party.display_name) == normalized,
+                        sa.func.lower(participant_identifier.value) == normalized,
                     ),
                 )
             )
@@ -315,7 +363,19 @@ class WorkflowRetrieval:
                     organization_identifier.party_id == WorkflowRow.organization_party_id,
                     organization_identifier.verified_at.is_not(None),
                     organization_identifier.revoked_at.is_(None),
-                    sa.func.lower(organization_identifier.value).like(f"%{value.casefold()}%"),
+                    sa.func.lower(organization_identifier.value).contains(
+                        value.casefold(), autoescape=True
+                    ),
+                )
+            )
+
+        def organization_identifier_equals(value: str) -> sa.ColumnElement[bool]:
+            return sa.exists(
+                sa.select(organization_identifier.id).where(
+                    organization_identifier.party_id == WorkflowRow.organization_party_id,
+                    organization_identifier.verified_at.is_not(None),
+                    organization_identifier.revoked_at.is_(None),
+                    sa.func.lower(organization_identifier.value) == value.casefold(),
                 )
             )
 
@@ -334,8 +394,8 @@ class WorkflowRetrieval:
         if request.organization:
             query = query.where(
                 sa.or_(
-                    sa.func.lower(PartyRow.display_name).like(
-                        f"%{request.organization.casefold()}%"
+                    sa.func.lower(PartyRow.display_name).contains(
+                        request.organization.casefold(), autoescape=True
                     ),
                     organization_identifier_matches(request.organization),
                 )
@@ -350,15 +410,14 @@ class WorkflowRetrieval:
         )
         period = WorkflowRow.input["renewal_period"].as_string()
         for term in query_terms:
-            pattern = f"%{term}%"
             query = query.where(
                 sa.or_(
-                    sa.cast(WorkflowRow.id, sa.Text).like(pattern),
-                    sa.func.lower(WorkflowRow.objective).like(pattern),
-                    normalized_kind.like(pattern),
-                    sa.func.lower(WorkflowRow.status).like(pattern),
-                    sa.func.lower(PartyRow.display_name).like(pattern),
-                    period.like(pattern),
+                    sa.cast(WorkflowRow.id, sa.Text).contains(term, autoescape=True),
+                    sa.func.lower(WorkflowRow.objective).contains(term, autoescape=True),
+                    normalized_kind.contains(term, autoescape=True),
+                    sa.func.lower(WorkflowRow.status).contains(term, autoescape=True),
+                    sa.func.lower(PartyRow.display_name).contains(term, autoescape=True),
+                    period.contains(term, autoescape=True),
                     participant_matches(term),
                     organization_identifier_matches(term),
                 )
@@ -367,18 +426,43 @@ class WorkflowRetrieval:
         participant_exact_value = request.participant or normalized_query
         organization_exact_value = request.organization or normalized_query
         participant_exact = (
-            participant_matches(participant_exact_value) if participant_exact_value else sa.false()
+            participant_equals(participant_exact_value) if participant_exact_value else sa.false()
         )
         organization_exact = (
             sa.or_(
                 sa.func.lower(PartyRow.display_name) == organization_exact_value,
-                organization_identifier_matches(organization_exact_value),
+                organization_identifier_equals(organization_exact_value),
             )
             if organization_exact_value
             else sa.false()
         )
+        text_score: sa.ColumnElement[int] = sa.literal(0)
+        for term in query_terms:
+            text_score = (
+                text_score
+                + sa.case(
+                    (
+                        sa.func.lower(WorkflowRow.objective).contains(term, autoescape=True),
+                        8,
+                    ),
+                    else_=0,
+                )
+                + sa.case((participant_matches(term), 6), else_=0)
+                + sa.case(
+                    (
+                        sa.or_(
+                            sa.func.lower(PartyRow.display_name).contains(term, autoescape=True),
+                            organization_identifier_matches(term),
+                        ),
+                        5,
+                    ),
+                    else_=0,
+                )
+                + sa.case((normalized_kind.contains(term, autoescape=True), 4), else_=0)
+                + sa.case((period.contains(term, autoescape=True), 3), else_=0)
+            )
         score = (
-            sa.literal(len(query_terms) * 5)
+            text_score
             + sa.case((sa.cast(WorkflowRow.id, sa.Text) == normalized_query, 1000), else_=0)
             + sa.case((participant_exact, 200), else_=0)
             + sa.case((organization_exact, 180), else_=0)
@@ -533,6 +617,10 @@ class WorkflowRetrieval:
             request.participant.casefold() == value.casefold() for value in identifiers.participants
         ):
             reasons.append("exact participant identifier match")
+        elif request.participant and not any(
+            reason.startswith("exact participant") for reason in reasons
+        ):
+            reasons.append("participant filter matched")
         if organization.casefold() in query or (
             request.organization and request.organization.casefold() == organization.casefold()
         ):
@@ -542,6 +630,8 @@ class WorkflowRetrieval:
             for value in identifiers.organization
         ):
             reasons.append("exact organization identifier match")
+        elif request.organization:
+            reasons.append(f"organization filter matched: {organization}")
         kind_words = workflow.kind.replace("_", " ").split(".", 1)[0].casefold()
         if kind_words in query or request.workflow_kind == workflow.kind:
             reasons.append(f"workflow kind matched: {workflow.kind}")
@@ -599,17 +689,28 @@ class WorkflowRetrieval:
             for dependency_id in dependency_ids
             if jobs_by_id[dependency_id].status != "succeeded"
         ]
-        waiting_reasons: list[str] = []
+        waiting_reasons: list[WorkflowPacketWaitingReason] = []
         if job.status == "waiting":
-            waiting_reasons.extend(f"dependency:{dependency_id}" for dependency_id in unresolved)
-            if not unresolved and job.kind == "gmail.send_email.v1" and approval is None:
-                waiting_reasons.append("exact_approval")
+            waiting_reasons.extend(
+                WorkflowPacketWaitingReason(
+                    kind="dependency",
+                    dependency_job_id=dependency_id,
+                )
+                for dependency_id in unresolved
+            )
+            if not unresolved and job.kind == "gmail.send_email.v1":
+                if approval is None:
+                    waiting_reasons.append(WorkflowPacketWaitingReason(kind="exact_approval"))
+                elif invalidated:
+                    waiting_reasons.append(WorkflowPacketWaitingReason(kind="approval_invalidated"))
             if (
                 latest_run is not None
                 and latest_run.result
                 and latest_run.result.get("outcome") == "uncertain"
             ):
-                waiting_reasons.append("uncertain_external_effect")
+                waiting_reasons.append(
+                    WorkflowPacketWaitingReason(kind="uncertain_external_effect")
+                )
 
         return WorkflowPacketJob(
             job_id=job.id,
@@ -627,7 +728,19 @@ class WorkflowRetrieval:
             latest_run=self._packet_run(latest_run),
             approval=self._packet_approval(approval, invalidated, dispatch is not None),
             dispatch=(
-                WorkflowPacketDispatch(started_at=dispatch.occurred_at, run_id=dispatch.run_id)
+                WorkflowPacketDispatch(
+                    started_at=dispatch.occurred_at,
+                    run_id=dispatch.run_id,
+                    evidence=(
+                        "outcome_uncertain"
+                        if latest_run is not None
+                        and latest_run.result
+                        and latest_run.result.get("outcome") == "uncertain"
+                        else "provider_confirmed"
+                        if job.status == "succeeded"
+                        else "dispatch_started"
+                    ),
+                )
                 if dispatch is not None
                 else None
             ),

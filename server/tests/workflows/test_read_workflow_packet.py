@@ -145,7 +145,11 @@ async def test_packet_projects_graph_and_latest_run_without_raw_execution_data(
     assert draft.latest_run.status == "failed"
     assert draft.latest_run.error_summary == "Run failed"
     assert send.depends_on_job_ids == (draft_job.id,)
-    assert send.waiting_reasons == (f"dependency:{draft_job.id}",)
+    assert len(send.waiting_reasons) == 1
+    assert send.waiting_reasons[0].model_dump() == {
+        "kind": "dependency",
+        "dependency_job_id": draft_job.id,
+    }
     encoded = packet.model_dump_json()
     for hidden in (
         "secret-worker-host",
@@ -271,3 +275,160 @@ async def test_packet_keeps_participants_without_a_current_role(
         if participant.party_id == roleless_party_id
     )
     assert participant.roles == ()
+
+
+async def test_packet_explains_consumed_approval_and_uncertain_dispatch(
+    retrieval: WorkflowRetrieval,
+    migrated_postgres_url: str,
+):
+    database = WorkflowDatabase(migrated_postgres_url)
+    control_plane = WorkflowControlPlane(
+        database=database,
+        registry=default_workflow_registry(),
+        authority=StaticWorkflowAuthority(grants=set()),
+    )
+    trace = await control_plane.propose_jobs(renewal_job_command())
+    draft = next(job for job in trace.jobs if job.kind == "renewal_email.draft.v1")
+    send = next(job for job in trace.jobs if job.kind == "gmail.send_email.v1")
+    run_id = uuid4()
+    approval_id = uuid4()
+    now = datetime.now(UTC)
+    engine = create_async_engine(migrated_postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    async with sessions.begin() as session:
+        await session.execute(
+            sa.update(WorkflowJobRow).where(WorkflowJobRow.id == send.id).values(attempts=1)
+        )
+        session.add(
+            WorkflowJobRunRow(
+                id=run_id,
+                workflow_id=TARGET_ID,
+                job_id=send.id,
+                status="failed",
+                worker_id="worker",
+                lease_expires_at=now,
+                application_build="test",
+                result={
+                    "outcome": "uncertain",
+                    "evidence": {"provider": "redacted"},
+                    "data": None,
+                    "error": {"message": "raw provider detail"},
+                },
+                created_at=now,
+                finished_at=now,
+            )
+        )
+        await session.flush()
+        session.add_all(
+            [
+                WorkflowEventRow(
+                    id=approval_id,
+                    workflow_id=TARGET_ID,
+                    job_id=send.id,
+                    event_type="approval_granted",
+                    actor_type="party",
+                    actor_id=str(BROKER_ID),
+                    cause_type="message",
+                    cause_id="approval-message",
+                    data={"draft_revision_id": str(draft.id)},
+                    occurred_at=now,
+                ),
+                WorkflowEventRow(
+                    workflow_id=TARGET_ID,
+                    job_id=send.id,
+                    run_id=run_id,
+                    event_type="external_effect_dispatch_started",
+                    actor_type="worker",
+                    actor_id="worker",
+                    cause_type="run",
+                    cause_id=str(run_id),
+                    data={},
+                    occurred_at=now,
+                ),
+            ]
+        )
+    await engine.dispose()
+
+    packet = await retrieval.read_workflow_packet(
+        WorkflowInspectionContext(actor_party_id=BROKER_ID),
+        TARGET_ID,
+    )
+    send_packet = next(job for job in packet.jobs if job.job_id == send.id)
+
+    assert send_packet.approval is not None
+    assert send_packet.approval.outcome == "consumed"
+    assert send_packet.dispatch is not None
+    assert send_packet.dispatch.evidence == "outcome_uncertain"
+    assert any(reason.kind == "uncertain_external_effect" for reason in send_packet.waiting_reasons)
+    assert "raw provider detail" not in packet.model_dump_json()
+    await database.dispose()
+
+
+async def test_packet_explains_invalidated_approval_after_dependency_succeeds(
+    retrieval: WorkflowRetrieval,
+    migrated_postgres_url: str,
+):
+    database = WorkflowDatabase(migrated_postgres_url)
+    control_plane = WorkflowControlPlane(
+        database=database,
+        registry=default_workflow_registry(),
+        authority=StaticWorkflowAuthority(grants=set()),
+    )
+    trace = await control_plane.propose_jobs(renewal_job_command())
+    draft = next(job for job in trace.jobs if job.kind == "renewal_email.draft.v1")
+    send = next(job for job in trace.jobs if job.kind == "gmail.send_email.v1")
+    approval_id = uuid4()
+    now = datetime.now(UTC)
+    engine = create_async_engine(migrated_postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    async with sessions.begin() as session:
+        await session.execute(
+            sa.update(WorkflowJobRow)
+            .where(WorkflowJobRow.id == draft.id)
+            .values(
+                status="succeeded",
+                output={"subject": "Renewal", "body": "Body"},
+            )
+        )
+        session.add(
+            WorkflowEventRow(
+                id=approval_id,
+                workflow_id=TARGET_ID,
+                job_id=send.id,
+                event_type="approval_granted",
+                actor_type="party",
+                actor_id=str(BROKER_ID),
+                cause_type="message",
+                cause_id="approval-message",
+                data={"draft_revision_id": str(draft.id)},
+                occurred_at=now,
+            )
+        )
+        await session.flush()
+        session.add(
+            WorkflowEventRow(
+                workflow_id=TARGET_ID,
+                job_id=send.id,
+                event_type="approval_invalidated",
+                actor_type="system",
+                actor_id="control-plane",
+                cause_type="message",
+                cause_id="role-revoked",
+                approval_grant_id=approval_id,
+                data={"reason": "broker_role_revoked"},
+                occurred_at=now,
+            )
+        )
+    await engine.dispose()
+
+    packet = await retrieval.read_workflow_packet(
+        WorkflowInspectionContext(actor_party_id=BROKER_ID),
+        TARGET_ID,
+    )
+    send_packet = next(job for job in packet.jobs if job.job_id == send.id)
+
+    assert send_packet.approval is not None
+    assert send_packet.approval.outcome == "invalidated"
+    assert len(send_packet.waiting_reasons) == 1
+    assert send_packet.waiting_reasons[0].kind == "approval_invalidated"
+    await database.dispose()

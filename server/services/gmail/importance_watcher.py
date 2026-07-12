@@ -19,7 +19,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 
 def _resolve_interaction_runtime() -> InteractionAgentRuntime:
-    from ...agents.interaction_agent.factory import create_interaction_runtime
+    from ...agents.interaction_agent import create_interaction_runtime
 
     return create_interaction_runtime()
 

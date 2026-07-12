@@ -6,7 +6,7 @@ import asyncio
 from uuid import UUID
 
 from server.config import get_settings
-from server.workflows.demo_seed import seed_v0_demo
+from server.workflows import seed_v0_demo
 
 
 def _required(value: str | None, variable: str) -> str:

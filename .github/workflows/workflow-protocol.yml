@@ -54,6 +54,7 @@ jobs:
           server/agents/execution_agent/batch_manager.py
           server/services/conversation/chat_handler.py
           server/services/gmail/importance_watcher.py
+          server/services/trigger_scheduler.py
           server/scripts
           server/config.py
           server/tests
@@ -66,6 +67,7 @@ jobs:
           server/agents/execution_agent/batch_manager.py
           server/services/conversation/chat_handler.py
           server/services/gmail/importance_watcher.py
+          server/services/trigger_scheduler.py
           server/scripts
           server/config.py
           server/tests
@@ -78,6 +80,7 @@ jobs:
           server/agents/execution_agent/batch_manager.py
           server/services/conversation/chat_handler.py
           server/services/gmail/importance_watcher.py
+          server/services/trigger_scheduler.py
           server/scripts
           server/config.py
       - name: Apply and verify migrations
@@ -85,4 +88,4 @@ jobs:
           uv run alembic upgrade head
           uv run alembic check
       - name: Run Workflow integration tests
-        run: uv run pytest server/tests/workflows server/tests/agents server/tests/evals
+        run: uv run pytest

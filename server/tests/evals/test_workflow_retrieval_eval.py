@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import pytest
 
 from server.tests.workflows.retrieval_fixtures import (
@@ -25,7 +27,10 @@ async def retrieval(migrated_postgres_url: str, clean_workflow_database):
     await database.dispose()
 
 
-async def test_target_is_found_early_with_bounded_context(retrieval: WorkflowRetrieval):
+async def test_target_is_found_early_with_bounded_context(
+    retrieval: WorkflowRetrieval,
+    record_property: Callable[[str, object], None],
+):
     requests = (
         WorkflowSearchRequest(
             query="John Smith renewal",
@@ -64,6 +69,11 @@ async def test_target_is_found_early_with_bounded_context(retrieval: WorkflowRet
     hit_at_3 = sum(rank <= 3 for rank in ranks) / len(ranks)
     mean_reciprocal_rank = sum(1 / rank for rank in ranks) / len(ranks)
     approximate_token_burdens = [size // 4 for size in response_sizes]
+    record_property("hit_at_1", hit_at_1)
+    record_property("hit_at_3", hit_at_3)
+    record_property("mean_reciprocal_rank", mean_reciprocal_rank)
+    record_property("max_response_bytes", max(response_sizes))
+    record_property("max_approximate_tokens", max(approximate_token_burdens))
 
     assert hit_at_1 == 1.0
     assert hit_at_3 == 1.0

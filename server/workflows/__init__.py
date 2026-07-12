@@ -13,6 +13,7 @@ from .contracts import (
 )
 from .control_plane import WorkflowControlPlane
 from .database import WorkflowDatabase
+from .demo_seed import seed_v0_demo
 from .errors import (
     InvalidWorkflowProposalError,
     InvalidWorkflowSearchError,
@@ -76,4 +77,5 @@ __all__ = [
     "WorkflowSearchRequest",
     "WorkflowTrace",
     "default_workflow_registry",
+    "seed_v0_demo",
 ]

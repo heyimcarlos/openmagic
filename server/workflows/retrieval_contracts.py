@@ -131,6 +131,23 @@ class WorkflowPacketApproval(WorkflowContract):
 class WorkflowPacketDispatch(WorkflowContract):
     started_at: datetime
     run_id: UUID | None
+    evidence: Literal["dispatch_started", "provider_confirmed", "outcome_uncertain"]
+
+
+class WorkflowPacketWaitingReason(WorkflowContract):
+    kind: Literal[
+        "dependency",
+        "exact_approval",
+        "approval_invalidated",
+        "uncertain_external_effect",
+    ]
+    dependency_job_id: UUID | None = None
+
+    @model_validator(mode="after")
+    def validate_dependency_reference(self) -> WorkflowPacketWaitingReason:
+        if (self.kind == "dependency") != (self.dependency_job_id is not None):
+            raise ValueError("only dependency waiting reasons carry dependency_job_id")
+        return self
 
 
 class WorkflowPacketJob(WorkflowContract):
@@ -145,7 +162,7 @@ class WorkflowPacketJob(WorkflowContract):
     attempts: int
     max_attempts: int
     available_at: datetime
-    waiting_reasons: tuple[str, ...]
+    waiting_reasons: tuple[WorkflowPacketWaitingReason, ...]
     latest_run: WorkflowPacketRun | None
     approval: WorkflowPacketApproval | None
     dispatch: WorkflowPacketDispatch | None
