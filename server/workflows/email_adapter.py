@@ -55,6 +55,12 @@ class _InvokeOnce:
             raise DuplicateEmailSendError(f"Email Job {job_id} was already invoked")
         self._invoked_job_ids.add(job_id)
 
+    @property
+    def invocation_count(self) -> int:
+        """Number of distinct Job effects admitted to the provider boundary."""
+
+        return len(self._invoked_job_ids)
+
 
 class DeterministicEmailSendAdapter(_InvokeOnce):
     """Stateful inspectable fake that satisfies the live adapter contract."""

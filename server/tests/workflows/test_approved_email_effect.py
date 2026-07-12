@@ -401,6 +401,7 @@ async def test_composio_adapter_uses_pinned_public_execute_and_normalizes_succes
     result = await adapter.send_email(dispatch.effect, dispatch.context)
 
     assert result.outcome == "succeeded"
+    assert adapter.invocation_count == 1
     assert result.data == {
         "provider": "composio_gmail",
         "acknowledged": True,
