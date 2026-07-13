@@ -6,9 +6,10 @@ import { buildBackpressureFlow, parseBackpressureSnapshot } from './backpressure
 const payload = {
   captured_at: '2026-07-13T14:00:05Z',
   worker: {
-    job_concurrency: 1,
-    notification_concurrency: 1,
+    configured_job_concurrency: 1,
+    configured_notification_concurrency: 1,
     claim_policy: 'one eligible Job per tick',
+    liveness: 'not_persisted',
   },
   counts: {
     workflows: 3,
@@ -72,6 +73,7 @@ const payload = {
       status: 'queued',
       attempts: 0,
       claimed_by: null,
+      delivered_by: null,
       created_at: '2026-07-13T14:00:04Z',
       delivered_at: null,
     },
@@ -82,6 +84,7 @@ const payload = {
       status: 'delivered',
       attempts: 1,
       claimed_by: null,
+      delivered_by: 'notification-worker:12345678',
       created_at: '2026-07-13T13:59:57Z',
       delivered_at: '2026-07-13T14:00:03Z',
     },
@@ -104,6 +107,24 @@ const payload = {
       job_id: null,
       run_id: null,
       occurred_at: '2026-07-13T14:00:04Z',
+    },
+    {
+      id: 'run-started-1',
+      type: 'run_started',
+      source: 'workflow_event',
+      workflow_id: 'workflow-2',
+      job_id: 'job-running',
+      run_id: 'run-1',
+      occurred_at: '2026-07-13T14:00:04Z',
+    },
+    {
+      id: 'interaction-finished-1',
+      type: 'approval_presentation_committed',
+      source: 'workflow_event',
+      workflow_id: 'workflow-3',
+      job_id: null,
+      run_id: null,
+      occurred_at: '2026-07-13T14:00:03Z',
     },
   ],
 };
@@ -132,6 +153,8 @@ test('parses the sanitized live projection and derives each real pipeline stage'
   assert.equal(flow[4]?.tokens[0]?.id, 'runtime-fresh-1');
   assert.equal(flow[4]?.tokens[0]?.detail, 'Draft the 2026 renewal for Demo Policyholder 2');
   assert.equal(flow[6]?.tokens[0]?.id, 'notification-delivered');
+  assert.equal(flow[6]?.tokens[0]?.detail, 'worker 12345678');
+  assert.deepEqual(flow.map((stage) => stage.signal), [true, true, true, true, true, true, true]);
 });
 
 test('rejects malformed operational projections instead of animating invented state', () => {

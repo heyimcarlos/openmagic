@@ -96,6 +96,9 @@ class Settings(BaseModel):
         )
     )
     interaction_mode: Literal["workflow", "legacy"] = Field(default_factory=_interaction_mode)
+    enable_backpressure_demo: bool = Field(
+        default=os.getenv("OPENMAGIC_ENABLE_BACKPRESSURE_DEMO", "0") == "1"
+    )
 
     # HTTP behaviour
     cors_allow_origins_raw: str = Field(default=os.getenv("OPENPOKE_CORS_ALLOW_ORIGINS", ""))

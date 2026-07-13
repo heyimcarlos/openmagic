@@ -13,6 +13,7 @@ from server.services.backpressure_demo import BackpressureDemoService, Backpress
 
 router = APIRouter(prefix="/demo/backpressure", tags=["demo"])
 SettingsDependency = Annotated[Settings, Depends(get_settings)]
+_services: set[BackpressureDemoService] = set()
 
 
 class EnqueueDemoJobsRequest(BaseModel):
@@ -28,6 +29,11 @@ class EnqueueDemoJobsRequest(BaseModel):
 
 
 def _service(settings: Settings) -> BackpressureDemoService:
+    if not settings.enable_backpressure_demo:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="The backpressure demo is not enabled",
+        )
     if settings.interaction_mode != "workflow":
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -56,7 +62,7 @@ def _cached_service(
     broker_email: str,
     policyholder_email: str,
 ) -> BackpressureDemoService:
-    return BackpressureDemoService(
+    service = BackpressureDemoService(
         Settings(
             database_url=database_url,
             workflow_broker_party_id=broker_party_id,
@@ -66,6 +72,15 @@ def _cached_service(
             interaction_mode="workflow",
         )
     )
+    _services.add(service)
+    return service
+
+
+async def dispose_backpressure_demo_services() -> None:
+    for service in tuple(_services):
+        await service.dispose()
+    _services.clear()
+    _cached_service.cache_clear()
 
 
 @router.get("", response_model=BackpressureSnapshot)
@@ -83,4 +98,4 @@ async def enqueue_demo_jobs(
     return await _service(settings).enqueue_jobs(payload.job_count)
 
 
-__all__ = ["router"]
+__all__ = ["dispose_backpressure_demo_services", "router"]

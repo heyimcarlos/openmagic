@@ -45,8 +45,9 @@ async def test_job_burst_uses_atomic_workflow_commands_and_projects_queue_pressu
     assert snapshot.counts.running == 0
     assert snapshot.counts.succeeded == 0
     assert snapshot.counts.notifications_queued == 0
-    assert snapshot.worker.job_concurrency == 1
-    assert snapshot.worker.notification_concurrency == 1
+    assert snapshot.worker.configured_job_concurrency == 1
+    assert snapshot.worker.configured_notification_concurrency == 1
+    assert snapshot.worker.liveness == "not_persisted"
     assert len(snapshot.jobs) == 10
     assert {job.kind for job in snapshot.jobs} == {
         "renewal_email.draft.v1",
@@ -116,4 +117,22 @@ async def test_snapshot_separates_run_completion_from_notification_delivery(
     ]
 
     await database.dispose()
+    await service.dispose()
+
+
+async def test_snapshot_bounds_repeated_demo_history(
+    migrated_postgres_url: str,
+    seeded_workflow_identity,
+):
+    service = BackpressureDemoService(_settings(migrated_postgres_url))
+
+    await service.enqueue_jobs(40)
+    await service.enqueue_jobs(40)
+    snapshot = await service.enqueue_jobs(40)
+
+    assert snapshot.counts.workflows == 50
+    assert snapshot.counts.jobs == 100
+    assert len(snapshot.jobs) == 100
+    assert len(snapshot.activity) <= 80
+
     await service.dispose()

@@ -17,9 +17,10 @@ export type BackpressureStageId =
   | 'interaction';
 
 interface WorkerView {
-  jobConcurrency: number;
-  notificationConcurrency: number;
+  configuredJobConcurrency: number;
+  configuredNotificationConcurrency: number;
   claimPolicy: string;
+  liveness: 'not_persisted';
 }
 
 export interface BackpressureCounts {
@@ -71,6 +72,7 @@ export interface BackpressureNotification {
   status: BackpressureNotificationStatus;
   attempts: number;
   claimedBy?: string;
+  deliveredBy?: string;
   createdAt: string;
   deliveredAt?: string;
 }
@@ -109,6 +111,7 @@ export interface BackpressureFlowStage {
   eyebrow: string;
   count: number;
   active: boolean;
+  signal: boolean;
   secondary: string;
   tokens: ReadonlyArray<FlowToken>;
 }
@@ -140,11 +143,13 @@ function status<T extends string>(value: unknown, allowed: ReadonlySet<string>):
 
 function parseWorker(value: unknown): WorkerView | undefined {
   if (!isRecord(value)) return undefined;
-  const jobConcurrency = count(value.job_concurrency);
-  const notificationConcurrency = count(value.notification_concurrency);
+  const configuredJobConcurrency = count(value.configured_job_concurrency);
+  const configuredNotificationConcurrency = count(value.configured_notification_concurrency);
   const claimPolicy = text(value.claim_policy);
-  return jobConcurrency !== undefined && notificationConcurrency !== undefined && claimPolicy
-    ? { jobConcurrency, notificationConcurrency, claimPolicy }
+  const liveness = value.liveness === 'not_persisted' ? value.liveness : undefined;
+  return configuredJobConcurrency !== undefined &&
+    configuredNotificationConcurrency !== undefined && claimPolicy && liveness
+    ? { configuredJobConcurrency, configuredNotificationConcurrency, claimPolicy, liveness }
     : undefined;
 }
 
@@ -220,13 +225,25 @@ function parseNotification(value: unknown): BackpressureNotification | undefined
   );
   const attempts = count(value.attempts);
   const claimedBy = optionalText(value.claimed_by);
+  const deliveredBy = optionalText(value.delivered_by);
   const createdAt = date(value.created_at);
   const deliveredAt = value.delivered_at === null ? undefined : date(value.delivered_at);
   if (!id || !workflowId || !kind || !notificationStatus || attempts === undefined ||
-    claimedBy === false || !createdAt || (value.delivered_at !== null && !deliveredAt)) {
+    claimedBy === false || deliveredBy === false || !createdAt ||
+    (value.delivered_at !== null && !deliveredAt)) {
     return undefined;
   }
-  return { id, workflowId, kind, status: notificationStatus, attempts, claimedBy, createdAt, deliveredAt };
+  return {
+    id,
+    workflowId,
+    kind,
+    status: notificationStatus,
+    attempts,
+    claimedBy,
+    deliveredBy,
+    createdAt,
+    deliveredAt,
+  };
 }
 
 function parseActivity(value: unknown): BackpressureActivity | undefined {
@@ -307,6 +324,22 @@ export function buildBackpressureFlow(
   const recentDeliveries = delivered.filter(
     (item) => item.deliveredAt && happenedRecently(snapshot.capturedAt, item.deliveredAt),
   );
+  const recentRunStarts = snapshot.activity.filter(
+    (item) => item.type === 'run_started' &&
+      happenedRecently(snapshot.capturedAt, item.occurredAt, 8),
+  );
+  const recentDrafts = snapshot.activity.filter(
+    (item) => item.type === 'draft_ready' &&
+      happenedRecently(snapshot.capturedAt, item.occurredAt, 8),
+  );
+  const recentNotificationEnqueues = snapshot.activity.filter(
+    (item) => item.type === 'notification_queued' &&
+      happenedRecently(snapshot.capturedAt, item.occurredAt, 8),
+  );
+  const recentInteractionCompletions = snapshot.activity.filter(
+    (item) => item.type === 'approval_presentation_committed' &&
+      happenedRecently(snapshot.capturedAt, item.occurredAt, 8),
+  );
   return [
     {
       id: 'tooling',
@@ -314,6 +347,7 @@ export function buildBackpressureFlow(
       eyebrow: 'Business intent, closed schema',
       count: snapshot.counts.workflows,
       active: recentCommands.length > 0,
+      signal: recentCommands.length > 0,
       secondary: `${snapshot.counts.jobs} durable Jobs`,
       tokens: recentCommands.slice(0, 4).map((item) =>
         token(item.id, 'create_workflow', `Workflow ${shortId(item.workflowId)}`, 'committed')),
@@ -324,6 +358,7 @@ export function buildBackpressureFlow(
       eyebrow: 'Durable backpressure buffer',
       count: snapshot.counts.queued,
       active: snapshot.counts.queued > 0,
+      signal: recentCommands.length > 0,
       secondary: `${snapshot.counts.waiting} waiting on prerequisites`,
       tokens: queued.slice(0, 4).map((item) =>
         token(item.id, item.label, `Job ${shortId(item.id)}`, item.status)),
@@ -334,32 +369,35 @@ export function buildBackpressureFlow(
       eyebrow: snapshot.worker.claimPolicy,
       count: snapshot.counts.running,
       active: snapshot.counts.running > 0,
-      secondary: `${snapshot.worker.jobConcurrency} Job at a time`,
+      signal: recentRunStarts.length > 0,
+      secondary: `${snapshot.worker.configuredJobConcurrency} configured, liveness not persisted`,
       tokens: runningJobs.slice(0, 4).map((item) =>
         token(item.id, item.label, item.taskSummary, item.status)),
     },
     {
       id: 'runs',
-      title: 'Fresh Workflow Run',
+      title: 'Fresh Workflow Job Run',
       eyebrow: 'One isolated attempt + lease',
       count: snapshot.counts.runsRunning,
       active: snapshot.counts.runsRunning > 0,
+      signal: recentRunStarts.length > 0,
       secondary: `${snapshot.counts.runsSucceeded} succeeded, ${snapshot.counts.runsFailed} failed`,
       tokens: visibleRuns.slice(0, 4).map((item) =>
-        token(item.id, `Run ${shortId(item.id)}`, item.workerId, item.status)),
+        token(item.id, `Job Run ${shortId(item.id)}`, item.workerId, item.status)),
     },
     {
       id: 'execution',
       title: 'Fresh Execution Agent',
-      eyebrow: 'Run-scoped LLM context',
+      eyebrow: 'Workflow Job Run-scoped LLM context',
       count: snapshot.counts.runsRunning,
       active: runningAgents.length > 0 || visibleAgents.length > 0,
+      signal: recentRunStarts.length > 0,
       secondary: `${snapshot.counts.runsSucceeded} contexts destroyed after success`,
       tokens: visibleAgents.slice(0, 4).map((item) =>
         token(
           item.runtimeInstanceId!,
           `Agent ${shortId(item.runtimeInstanceId!)}`,
-          jobById.get(item.jobId)?.taskSummary ?? `Run ${shortId(item.id)}`,
+          jobById.get(item.jobId)?.taskSummary ?? `Job Run ${shortId(item.id)}`,
           item.status,
         )),
     },
@@ -369,19 +407,26 @@ export function buildBackpressureFlow(
       eyebrow: 'Independent delivery obligation',
       count: snapshot.counts.notificationsQueued + snapshot.counts.notificationsDelivering,
       active: snapshot.counts.notificationsQueued + snapshot.counts.notificationsDelivering > 0,
+      signal: recentDrafts.length > 0 || recentNotificationEnqueues.length > 0,
       secondary: `${snapshot.counts.notificationsDelivered} delivered`,
       tokens: pendingNotifications.slice(0, 4).map((item) =>
         token(item.id, item.kind, `attempt ${item.attempts}`, item.status)),
     },
     {
       id: 'interaction',
-      title: 'Fresh Interaction Agent',
-      eyebrow: 'Reloads a new Workflow Packet',
+      title: 'Fresh Interaction Agent turn',
+      eyebrow: 'Fresh turn from durable identifiers',
       count: snapshot.counts.notificationsDelivered,
-      active: recentDeliveries.length > 0,
-      secondary: 'No execution context inherited',
+      active: recentDeliveries.length > 0 || recentInteractionCompletions.length > 0,
+      signal: recentDeliveries.length > 0 || recentInteractionCompletions.length > 0,
+      secondary: 'Runtime identity is not persisted today',
       tokens: recentDeliveries.slice(0, 4).map((item) =>
-        token(item.id, item.kind, `Notification ${shortId(item.id)}`, item.status)),
+        token(
+          item.id,
+          `Turn ${shortId(item.id)}`,
+          item.deliveredBy ? `worker ${shortId(item.deliveredBy)}` : item.kind,
+          item.status,
+        )),
     },
   ];
 }

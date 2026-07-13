@@ -4,11 +4,10 @@ from __future__ import annotations
 
 import asyncio
 from collections import Counter
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import Literal, cast
 from uuid import UUID, uuid4
 
-import sqlalchemy as sa
 from pydantic import BaseModel, ConfigDict, Field
 
 from server.config import Settings
@@ -23,15 +22,10 @@ from server.workflows import (
     WorkflowControlPlane,
     WorkflowDatabase,
     WorkflowJobProposal,
+    WorkflowOperationalJob,
+    WorkflowOperationsProjection,
     WorkflowProposal,
     default_workflow_registry,
-)
-from server.workflows.models import (
-    NotificationRow,
-    WorkflowEventRow,
-    WorkflowJobRow,
-    WorkflowJobRunRow,
-    WorkflowRow,
 )
 
 _CAUSE_PREFIX = "demo-backpressure:"
@@ -46,9 +40,10 @@ class DemoModel(BaseModel):
 
 
 class BackpressureWorkerView(DemoModel):
-    job_concurrency: int = 1
-    notification_concurrency: int = 1
+    configured_job_concurrency: int = 1
+    configured_notification_concurrency: int = 1
     claim_policy: str = "one eligible Job per tick"
+    liveness: Literal["not_persisted"] = "not_persisted"
 
 
 class BackpressureCounts(DemoModel):
@@ -100,6 +95,7 @@ class BackpressureNotificationView(DemoModel):
     status: NotificationStatus
     attempts: int
     claimed_by: str | None
+    delivered_by: str | None
     created_at: datetime
     delivered_at: datetime | None
 
@@ -136,6 +132,7 @@ class BackpressureDemoService:
         self._broker_party_id = UUID(settings.workflow_broker_party_id)
         self._organization_party_id = UUID(settings.workflow_organization_party_id)
         self._database = WorkflowDatabase(settings.database_url)
+        self._projection = WorkflowOperationsProjection(self._database)
         self._control_plane = WorkflowControlPlane(
             database=self._database,
             registry=default_workflow_registry(),
@@ -208,53 +205,11 @@ class BackpressureDemoService:
         )
 
     async def snapshot(self) -> BackpressureSnapshot:
-        now = datetime.now(UTC)
-        demo_workflow_ids = (
-            sa.select(WorkflowEventRow.workflow_id)
-            .where(
-                WorkflowEventRow.event_type == "workflow_jobs_proposed",
-                WorkflowEventRow.cause_id.startswith(_CAUSE_PREFIX),
-            )
-            .scalar_subquery()
-        )
-        async with self._database.read_transaction() as session:
-            workflows = (
-                await session.scalars(
-                    sa.select(WorkflowRow)
-                    .where(WorkflowRow.id.in_(demo_workflow_ids))
-                    .order_by(WorkflowRow.created_at.desc(), WorkflowRow.id.desc())
-                )
-            ).all()
-            jobs = (
-                await session.scalars(
-                    sa.select(WorkflowJobRow)
-                    .where(WorkflowJobRow.workflow_id.in_(demo_workflow_ids))
-                    .order_by(WorkflowJobRow.created_at.desc(), WorkflowJobRow.id.desc())
-                )
-            ).all()
-            runs = (
-                await session.scalars(
-                    sa.select(WorkflowJobRunRow)
-                    .where(WorkflowJobRunRow.workflow_id.in_(demo_workflow_ids))
-                    .order_by(WorkflowJobRunRow.created_at.desc(), WorkflowJobRunRow.id.desc())
-                )
-            ).all()
-            notifications = (
-                await session.scalars(
-                    sa.select(NotificationRow)
-                    .where(NotificationRow.workflow_id.in_(demo_workflow_ids))
-                    .order_by(NotificationRow.created_at.desc(), NotificationRow.id.desc())
-                )
-            ).all()
-            events = (
-                await session.scalars(
-                    sa.select(WorkflowEventRow)
-                    .where(WorkflowEventRow.workflow_id.in_(demo_workflow_ids))
-                    .order_by(WorkflowEventRow.occurred_at.desc(), WorkflowEventRow.id.desc())
-                    .limit(80)
-                )
-            ).all()
-
+        projected = await self._projection.project(cause_prefix=_CAUSE_PREFIX)
+        now = projected.captured_at
+        jobs = projected.jobs
+        runs = projected.job_runs
+        notifications = projected.notifications
         job_counts = Counter(job.status for job in jobs)
         run_counts = Counter(run.status for run in runs)
         notification_counts = Counter(item.status for item in notifications)
@@ -272,7 +227,7 @@ class BackpressureDemoService:
                 run_id=event.run_id,
                 occurred_at=event.occurred_at,
             )
-            for event in events
+            for event in projected.events
         ]
         activity.extend(
             BackpressureActivityView(
@@ -291,7 +246,7 @@ class BackpressureDemoService:
         return BackpressureSnapshot(
             captured_at=now,
             counts=BackpressureCounts(
-                workflows=len(workflows),
+                workflows=projected.workflow_count,
                 jobs=len(jobs),
                 waiting=job_counts["waiting"],
                 queued=job_counts["queued"],
@@ -353,6 +308,7 @@ class BackpressureDemoService:
                     status=cast(NotificationStatus, item.status),
                     attempts=item.attempts,
                     claimed_by=item.claimed_by,
+                    delivered_by=item.delivered_by,
                     created_at=item.created_at,
                     delivered_at=item.delivered_at,
                 )
@@ -365,7 +321,7 @@ class BackpressureDemoService:
         await self._database.dispose()
 
     @staticmethod
-    def _task_summary(job: WorkflowJobRow) -> str:
+    def _task_summary(job: WorkflowOperationalJob) -> str:
         if job.kind == DRAFT_RENEWAL_EMAIL_KIND:
             recipient = job.input.get("recipient_name")
             period = job.input.get("renewal_period")

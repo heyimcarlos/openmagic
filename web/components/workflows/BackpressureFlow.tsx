@@ -68,7 +68,7 @@ export function BackpressureFlow({ stages }: { stages: ReadonlyArray<Backpressur
     type: 'signal',
     source: stage.id,
     target: stages[index + 1]!.id,
-    data: { active: stage.active || stages[index + 1]!.active },
+    data: { active: stages[index + 1]!.signal },
   }));
 
   return (
@@ -204,7 +204,7 @@ function SignalEdge({
     <>
       <BaseEdge id={id} path={path} style={{ stroke: '#334155', strokeWidth: 2 }} />
       {data?.active && (
-        <circle r="4" fill="#38bdf8" className="drop-shadow-[0_0_6px_#38bdf8]">
+        <circle r="4" fill="#38bdf8" className="drop-shadow-[0_0_6px_#38bdf8] motion-reduce:hidden">
           <animateMotion dur="1.45s" repeatCount="indefinite" path={path} />
         </circle>
       )}

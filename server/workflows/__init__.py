@@ -77,6 +77,14 @@ from .errors import (
 )
 from .mailbox_directory import VerifiedMailbox, resolve_verified_mailbox
 from .models import Base as WorkflowModelBase
+from .operations_projection import (
+    WorkflowOperationalEvent,
+    WorkflowOperationalJob,
+    WorkflowOperationalJobRun,
+    WorkflowOperationalNotification,
+    WorkflowOperationalSnapshot,
+    WorkflowOperationsProjection,
+)
 from .party_resolution import (
     ResolvedSmsParty,
     find_sms_party,
@@ -203,6 +211,12 @@ __all__ = [
     "WorkflowLifecycleError",
     "WorkflowModelBase",
     "WorkflowNotFoundError",
+    "WorkflowOperationalEvent",
+    "WorkflowOperationalJob",
+    "WorkflowOperationalJobRun",
+    "WorkflowOperationalNotification",
+    "WorkflowOperationalSnapshot",
+    "WorkflowOperationsProjection",
     "WorkflowPacket",
     "WorkflowPacketJob",
     "WorkflowProposal",

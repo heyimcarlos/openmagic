@@ -10,13 +10,13 @@ React Flow is the best fit because the thing being shown is already a fixed node
 
 The current npm release is `@xyflow/react` 12.11.2. Official registry metadata declares `react` and `react-dom` peers as `>17`, plus `@types/react` and `@types/react-dom` peers as `>=17`. This includes this repo's React 19.2.3. [npm package](https://www.npmjs.com/package/%40xyflow/react), [official raw registry metadata](https://registry.npmjs.org/%40xyflow%2Freact/latest).
 
-Use React Flow only for rendering and interaction. The server projection remains the source of truth for queue depth, worker state, runs, notifications, and completions.
+Use React Flow only for rendering and interaction. The server projection remains the source of truth for queue depth, worker state, Workflow Job Runs, Notifications, and completions.
 
 ```mermaid
 flowchart LR
     IA["Interaction agent"] --> JQ["Durable job backlog"]
     JQ --> WW["Workflow worker"]
-    WW --> RUN["Job run and execution agent"]
+    WW --> RUN["Workflow Job Run and Execution Agent"]
     RUN --> NQ["Durable notification backlog"]
     NQ --> NW["Notification worker"]
     NW --> FIA["Fresh interaction agent"]
@@ -51,19 +51,18 @@ The most directly relevant official option is not another general animation libr
 
 ## Live data contract needed
 
-The existing `/api/chat/telemetry/latest` response is turn-oriented. It contains activity and workflow stages, but not fleet-wide queue counts, worker capacity, notification backlog, or a cursor of newly observed transitions. Polling that response can therefore update labels, but it cannot reliably animate every pickup and delivery.
+The existing `/api/chat/telemetry/latest` response is turn-oriented. It contains activity and Workflow stages, but not system-wide queue counts, configured worker capacity, Notification backlog, or a bounded window of durable transitions. Polling that response can therefore update labels, but it cannot reliably animate every pickup and delivery.
 
 Add a dedicated, read-only operational projection for the demo with:
 
 ```ts
 interface WorkflowSystemSnapshot {
-  sequence: string;
   capturedAt: string;
   jobs: { waiting: number; queued: number; running: number; terminal: number };
-  workflowWorker: { capacity: number; busy: number };
-  runs: { active: number };
+  workflowWorker: { configuredCapacity: number; busy: number; liveness: 'not_persisted' };
+  jobRuns: { active: number };
   notifications: { queued: number; running: number; delivered: number };
-  notificationWorker: { capacity: number; busy: number };
+  notificationWorker: { configuredCapacity: number; busy: number };
   recentTransitions: Array<{
     id: string;
     kind: 'job_picked_up' | 'run_started' | 'run_finished' | 'notification_queued' | 'notification_delivered' | 'interaction_completed';
@@ -72,7 +71,7 @@ interface WorkflowSystemSnapshot {
 }
 ```
 
-Use bounded polling with an `after=<sequence>` cursor for the demo. This matches the existing reliable polling pattern, survives reconnects, and avoids missing short transitions. Counts are snapshot truth. A traveling token is only emitted for a newly returned durable transition ID.
+The implemented projection is bounded to the latest 50 demo Workflows and 200 durable Workflow Events. The 400 ms poll captures those persistent transitions into the browser timeline, so short `running` or `delivering` row states are not the sole animation trigger. Counts are snapshot truth, and a traveling token appears only when its receiving stage has recent durable transition evidence. An `after=<sequence>` cursor remains the production follow-up for larger fleets.
 
 ## Presentation shape
 
@@ -81,12 +80,12 @@ Use bounded polling with an `after=<sequence>` cursor for the demo. This matches
 3. Animate at most a small bounded number of representative tokens. A burst of 50 jobs should show `50 queued`, not render 50 expensive animated graph nodes.
 4. Wire **Create workflow** and **Burst jobs** to real demo endpoints. Disable each button while its request is in flight and show the accepted count.
 5. Lock editing interactions for interview reliability: no dragging, connecting, deleting, or selection. Keep `fitView`; disable wheel zoom unless the final layout needs it.
-6. Add **Reset demo** and a deterministic replay fallback. Label replay mode clearly so it cannot be mistaken for live system state.
+6. Retain a bounded observed-state timeline with explicit live and historical labels.
 7. Respect `prefers-reduced-motion`: retain counts and status colors, remove traveling particles and pulsing borders.
 
 ## Truthfulness constraint
 
-[`WorkflowRuntimeService`](../../server/services/workflow_runtime.py) currently describes itself as polling one Job and one Notification at a time, and its loop invokes the workflow worker before the main notification worker. The visual should therefore show the actual capacity as one unless the runtime changes. The scalable claim demonstrated today is durable buffering and decoupled processing rates. It is not yet a claim that multiple workers are active concurrently.
+[`WorkflowRuntimeService`](../../server/services/workflow_runtime.py) currently describes itself as polling one Job and one Notification at a time, and its loop invokes the Workflow Worker before the main Notification Worker. The visual therefore labels one as configured capacity and explicitly says worker liveness is not persisted. Claims are proven by durable Workflow Job Run events. The scalable claim demonstrated today is durable buffering and decoupled processing rates. It is not yet a claim that multiple Workers are active concurrently.
 
 ## Product command boundary
 
@@ -106,4 +105,8 @@ The `/system` load controls call the typed `create_workflow` Control Plane comma
 
 The OpenMagic translation is a stable seven-stage infrastructure graph, a durable activity trace, queue and delivery metrics, real load controls, and an observed-state timeline. The browser retains up to 450 real PostgreSQL captures, roughly three minutes at the 400 ms poll rate. The viewer can pause, scrub backward or forward, and return to live state while new captures continue arriving.
 
-The timeline is observational. It never rolls the database backward and never invents events between captures. Worker capacity also remains fixed at the actual value of one. A future capacity control should only appear after the runtime supports changing real worker concurrency.
+The timeline is observational. It never rolls the database backward and never invents events between captures. Worker capacity remains fixed at the configured value of one. A future capacity control should only appear after the runtime supports changing real Worker concurrency and persisting liveness.
+
+## Branch compatibility audit
+
+The `codex/issue-13-verification` work is already integrated into `main` through PR 38 and commit `57c1241`. At the time of this audit, the active `codex/issue-41-real-chat-cockpit` worktree had uncommitted changes in Interaction Agent, chat telemetry, Workflow runtime, and Workflow package-export files. The system map intentionally uses a new `/system` route, a new demo projection, and separate React Flow components. The only shared integration seam is the public `server.workflows` export list, where both branches add independent exports.
