@@ -330,7 +330,13 @@ async def test_terminal_resume_failure_records_deterministic_recovery(
         def __init__(self) -> None:
             self.messages: dict[str, str] = {}
 
-        def record_reply_once(self, delivery_id: str, message: str) -> bool:
+        def record_reply_once(
+            self,
+            delivery_id: str,
+            message: str,
+            *,
+            cause_id: str | None = None,
+        ) -> bool:
             if delivery_id in self.messages:
                 return False
             self.messages[delivery_id] = message

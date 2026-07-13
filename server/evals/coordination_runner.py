@@ -95,13 +95,13 @@ class _MemoryConversationState:
     def load_transcript(self) -> str:
         return "\n".join(f"<{kind}>{text}</{kind}>" for kind, text in self._entries)
 
-    def record_user_message(self, message: str) -> None:
+    def record_user_message(self, message: str, *, cause_id: str | None = None) -> None:
         self._entries.append(("user_message", message))
 
     def record_agent_message(self, message: str) -> None:
         self._entries.append(("agent_message", message))
 
-    def record_reply(self, message: str) -> None:
+    def record_reply(self, message: str, *, cause_id: str | None = None) -> None:
         self._entries.append(("poke_reply", message))
 
 

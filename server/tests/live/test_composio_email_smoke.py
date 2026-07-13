@@ -105,7 +105,13 @@ class _ConversationSink:
     def __init__(self) -> None:
         self.messages: list[str] = []
 
-    def record_reply_once(self, _delivery_id: str, message: str) -> bool:
+    def record_reply_once(
+        self,
+        _delivery_id: str,
+        message: str,
+        *,
+        cause_id: str | None = None,
+    ) -> bool:
         self.messages.append(message)
         return True
 

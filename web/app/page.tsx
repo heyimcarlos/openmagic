@@ -11,38 +11,16 @@ import {
   type SimulatedSenderId,
 } from '@/components/chat/SmsContactHeader';
 import type { ChatBubble } from '@/components/chat/types';
+import { workflowTelemetryDemoMessages } from '@/components/chat/workflow-telemetry/demo';
 import { messageForDisplay } from '@/lib/chatDisplay';
+import { parseChatHistory } from '@/lib/chatHistory';
+import { isWorkflowTelemetryDemoVariant } from '@/lib/workflowTelemetryDemo';
 
 const POLL_INTERVAL_MS = 1500;
 const RESPONSE_POLL_INTERVAL_MS = 1000;
 const RESPONSE_POLL_ATTEMPTS = 30;
 
 const wait = (milliseconds: number) => new Promise((resolve) => window.setTimeout(resolve, milliseconds));
-
-const formatEscapeCharacters = (text: string): string => {
-  return text
-    .replace(/\\n/g, '\n')
-    .replace(/\\t/g, '\t')
-    .replace(/\\r/g, '\r')
-    .replace(/\\\\/g, '\\');
-};
-
-const isRenderableMessage = (entry: any) =>
-  typeof entry?.role === 'string' &&
-  typeof entry?.content === 'string' &&
-  entry.content.trim().length > 0;
-
-const toBubbles = (payload: any): ChatBubble[] => {
-  if (!Array.isArray(payload?.messages)) return [];
-
-  return payload.messages
-    .filter(isRenderableMessage)
-    .map((message: any, index: number) => ({
-      id: `history-${index}`,
-      role: message.role,
-      text: formatEscapeCharacters(message.content),
-    }));
-};
 
 export default function Page() {
   const { settings, setSettings } = useSettings();
@@ -51,6 +29,7 @@ export default function Page() {
   const [messages, setMessages] = useState<ChatBubble[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [isWaitingForResponse, setIsWaitingForResponse] = useState(false);
+  const [showTelemetryDemo, setShowTelemetryDemo] = useState(false);
   const [senderId, setSenderId] = useState<SimulatedSenderId>('policyholder');
   const senderGeneration = useRef(0);
   const sender =
@@ -67,7 +46,7 @@ export default function Page() {
       if (!res.ok) return;
       const data = await res.json();
       if (senderGeneration.current === requestGeneration) {
-        setMessages(toBubbles(data));
+        setMessages(parseChatHistory(data));
       }
     } catch (err: any) {
       if (err?.name === 'AbortError') return;
@@ -78,6 +57,12 @@ export default function Page() {
   useEffect(() => {
     void loadHistory();
   }, [loadHistory]);
+
+  useEffect(() => {
+    if (process.env.NODE_ENV === 'production') return;
+    const candidate = new URLSearchParams(window.location.search).get('variant');
+    setShowTelemetryDemo(isWorkflowTelemetryDemoVariant(candidate));
+  }, []);
 
   // Detect and store browser timezone on first load
   useEffect(() => {
@@ -136,7 +121,7 @@ export default function Page() {
       const userMessage: ChatBubble = {
         id: `user-${Date.now()}`,
         role: 'user',
-        text: formatEscapeCharacters(messageForDisplay(trimmed)),
+        text: messageForDisplay(trimmed),
       };
       setMessages((previous) => [...previous, userMessage]);
 
@@ -174,7 +159,7 @@ export default function Page() {
           const response = await fetch(historyUrl, { cache: 'no-store' });
           if (!response.ok) continue;
 
-          const currentMessages = toBubbles(await response.json());
+          const currentMessages = parseChatHistory(await response.json());
           const assistantCount = currentMessages.filter((message) => message.role === 'assistant').length;
 
           if (
@@ -252,8 +237,8 @@ export default function Page() {
 
         <div className="flex-1 overflow-hidden">
           <ChatMessages
-            messages={messages}
-            isWaitingForResponse={isWaitingForResponse}
+            messages={showTelemetryDemo ? workflowTelemetryDemoMessages : messages}
+            isWaitingForResponse={showTelemetryDemo ? false : isWaitingForResponse}
           />
 
           <div className="border-t bg-background/80 p-3 backdrop-blur sm:p-4">

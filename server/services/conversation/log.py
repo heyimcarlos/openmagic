@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import re
 import threading
 from collections.abc import Iterator
+from dataclasses import dataclass
 from fcntl import LOCK_EX, LOCK_UN, flock
 from html import escape, unescape
 from pathlib import Path
@@ -40,6 +42,25 @@ def _decode_payload(payload: str) -> str:
     return unescape(payload).replace("\\n", "\n")
 
 
+def _encode_attribute(value: str) -> str:
+    """Keep one attribute on one transcript line while preserving its exact value."""
+
+    return (
+        escape(value, quote=True)
+        .replace("\r", "&#13;")
+        .replace("\n", "&#10;")
+        .replace("\t", "&#9;")
+    )
+
+
+def _bounded_message_id(base_id: str, occurrence: int) -> str:
+    candidate = base_id if occurrence == 0 else f"{base_id}:{occurrence + 1}"
+    if len(candidate) <= 255:
+        return candidate
+    digest = hashlib.sha256(candidate.encode()).hexdigest()
+    return f"message:{digest}"
+
+
 def _default_formatter(tag: str, timestamp: str, payload: str) -> str:
     encoded = _encode_payload(payload)
     return f'<{tag} timestamp="{timestamp}">{encoded}</{tag}>\n'
@@ -52,6 +73,20 @@ def _resolve_working_memory_log() -> WorkingMemoryLog:
 
 
 _ATTR_PATTERN = re.compile(r"(\w+)\s*=\s*\"([^\"]*)\"")
+
+
+@dataclass(frozen=True)
+class ConversationEntry:
+    tag: str
+    timestamp: str
+    payload: str
+    cause_id: str | None = None
+
+
+@dataclass(frozen=True)
+class CorrelatedChatMessage:
+    message: ChatMessage
+    cause_id: str | None
 
 
 class ConversationLog:
@@ -75,10 +110,16 @@ class ConversationLog:
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning("conversation log directory creation failed", extra={"error": str(exc)})
 
-    def _append(self, tag: str, payload: str) -> str:
+    def _append(self, tag: str, payload: str, *, cause_id: str | None = None) -> str:
         timestamp = now_in_user_timezone("%Y-%m-%d %H:%M:%S")
         assert isinstance(timestamp, str)
         entry = self._formatter(tag, timestamp, str(payload))
+        if cause_id is not None:
+            open_end = entry.find(">")
+            if open_end == -1:
+                raise ValueError("conversation formatter must produce an opening tag")
+            attribute = f' cause_id="{_encode_attribute(cause_id)}"'
+            entry = f"{entry[:open_end]}{attribute}{entry[open_end:]}"
         with self._lock:
             try:
                 with self._path.open("a", encoding="utf-8") as handle:
@@ -92,7 +133,7 @@ class ConversationLog:
         self._notify_summarization()
         return timestamp
 
-    def _parse_line(self, line: str) -> tuple[str, str, str] | None:
+    def _parse_line(self, line: str) -> ConversationEntry | None:
         stripped = line.strip()
         if not stripped.startswith("<") or "</" not in stripped:
             return None
@@ -115,10 +156,18 @@ class ConversationLog:
         attributes: dict[str, str] = {
             match.group(1): match.group(2) for match in _ATTR_PATTERN.finditer(attr_string)
         }
-        timestamp = attributes.get("timestamp", "")
-        return tag, timestamp, _decode_payload(payload)
+        timestamp = unescape(attributes.get("timestamp", ""))
+        encoded_cause_id = attributes.get("cause_id")
+        return ConversationEntry(
+            tag=tag,
+            timestamp=timestamp,
+            payload=_decode_payload(payload),
+            cause_id=unescape(encoded_cause_id) if encoded_cause_id is not None else None,
+        )
 
-    def iter_entries(self) -> Iterator[tuple[str, str, str]]:
+    def iter_correlated_entries(self) -> Iterator[ConversationEntry]:
+        """Read transcript entries while preserving optional durable Cause correlation."""
+
         with self._lock:
             try:
                 lines = self._path.read_text(encoding="utf-8").splitlines()
@@ -135,6 +184,10 @@ class ConversationLog:
             if item is not None:
                 yield item
 
+    def iter_entries(self) -> Iterator[tuple[str, str, str]]:
+        for entry in self.iter_correlated_entries():
+            yield entry.tag, entry.timestamp, entry.payload
+
     def load_transcript(self) -> str:
         parts: list[str] = []
         for tag, timestamp, payload in self.iter_entries():
@@ -145,26 +198,33 @@ class ConversationLog:
                 parts.append(f"<{tag}>{safe_payload}</{tag}>")
         return "\n".join(parts)
 
-    def record_user_message(self, content: str) -> None:
-        timestamp = self._append("user_message", content)
+    def record_user_message(self, content: str, *, cause_id: str | None = None) -> None:
+        timestamp = self._append("user_message", content, cause_id=cause_id)
         self._working_memory_log.append_entry("user_message", content, timestamp)
 
     def record_agent_message(self, content: str) -> None:
         timestamp = self._append("agent_message", content)
         self._working_memory_log.append_entry("agent_message", content, timestamp)
 
-    def record_reply(self, content: str) -> None:
-        timestamp = self._append("poke_reply", content)
+    def record_reply(self, content: str, *, cause_id: str | None = None) -> None:
+        timestamp = self._append("poke_reply", content, cause_id=cause_id)
         self._working_memory_log.append_entry("poke_reply", content, timestamp)
 
-    def record_reply_once(self, delivery_id: str, content: str) -> bool:
+    def record_reply_once(
+        self,
+        delivery_id: str,
+        content: str,
+        *,
+        cause_id: str | None = None,
+    ) -> bool:
         """Append one correlated reply at most once across process restarts."""
 
-        marker = f'delivery_id="{escape(delivery_id, quote=True)}"'
+        marker = f'delivery_id="{_encode_attribute(delivery_id)}"'
         timestamp = now_in_user_timezone("%Y-%m-%d %H:%M:%S")
         assert isinstance(timestamp, str)
+        cause = f' cause_id="{_encode_attribute(cause_id)}"' if cause_id is not None else ""
         entry = (
-            f'<poke_reply timestamp="{timestamp}" {marker}>'
+            f'<poke_reply timestamp="{timestamp}" {marker}{cause}>'
             f"{_encode_payload(content)}</poke_reply>\n"
         )
         with self._lock:
@@ -217,20 +277,39 @@ class ConversationLog:
             )
 
     def to_chat_messages(self) -> list[ChatMessage]:
-        messages: list[ChatMessage] = []
-        for tag, timestamp, payload in self.iter_entries():
-            normalized_timestamp = timestamp or None
-            if tag == "user_message":
-                messages.append(
-                    ChatMessage(role="user", content=payload, timestamp=normalized_timestamp)
-                )
-            elif tag == "poke_reply":
-                messages.append(
-                    ChatMessage(role="assistant", content=payload, timestamp=normalized_timestamp)
-                )
-            elif tag == "wait":
-                # Wait markers are orchestration metadata and must not surface to the user
+        return [entry.message for entry in self.to_correlated_chat_messages()]
+
+    def to_correlated_chat_messages(self) -> list[CorrelatedChatMessage]:
+        """Project visible chat messages with stable IDs and their trusted Cause IDs."""
+
+        messages: list[CorrelatedChatMessage] = []
+        id_occurrences: dict[str, int] = {}
+        for index, entry in enumerate(self.iter_correlated_entries()):
+            if entry.tag == "wait":
                 continue
+            if entry.tag not in {"user_message", "poke_reply"}:
+                continue
+            role = "user" if entry.tag == "user_message" else "assistant"
+            if entry.cause_id is None:
+                base_id = f"legacy:{index}"
+            elif role == "user":
+                base_id = entry.cause_id
+            else:
+                base_id = f"reply:{entry.cause_id}"
+            occurrence = id_occurrences.get(base_id, 0)
+            id_occurrences[base_id] = occurrence + 1
+            message_id = _bounded_message_id(base_id, occurrence)
+            messages.append(
+                CorrelatedChatMessage(
+                    message=ChatMessage(
+                        id=message_id,
+                        role=role,
+                        content=entry.payload,
+                        timestamp=entry.timestamp or None,
+                    ),
+                    cause_id=entry.cause_id,
+                )
+            )
         return messages
 
     def clear(self) -> None:
@@ -261,4 +340,9 @@ def get_conversation_log() -> ConversationLog:
     return _conversation_log
 
 
-__all__ = ["ConversationLog", "get_conversation_log"]
+__all__ = [
+    "ConversationEntry",
+    "ConversationLog",
+    "CorrelatedChatMessage",
+    "get_conversation_log",
+]

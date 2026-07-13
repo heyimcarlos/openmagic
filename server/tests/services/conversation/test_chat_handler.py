@@ -57,8 +57,8 @@ async def test_six_digit_sms_reply_queues_durable_resume_without_model_or_secret
     recorded_replies: list[str] = []
     session = SimpleNamespace(
         log=SimpleNamespace(
-            record_user_message=recorded_user_messages.append,
-            record_reply=recorded_replies.append,
+            record_user_message=lambda message, **_kwargs: recorded_user_messages.append(message),
+            record_reply=lambda message, **_kwargs: recorded_replies.append(message),
         ),
         working_memory=SimpleNamespace(render_transcript=lambda: ""),
     )

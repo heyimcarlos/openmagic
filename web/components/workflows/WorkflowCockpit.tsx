@@ -5,6 +5,7 @@ import { RotateCcwIcon } from 'lucide-react';
 
 import { AppViewNav } from '@/components/app/AppViewNav';
 import { Button } from '@/components/ui/button';
+import { CockpitTelemetryPanel } from '@/components/workflows/CockpitTelemetryPanel';
 import { CockpitConversation } from '@/components/workflows/CockpitConversation';
 import { WorkflowEventTrace } from '@/components/workflows/WorkflowEventTrace';
 import { WorkflowGraph } from '@/components/workflows/WorkflowGraph';
@@ -89,7 +90,12 @@ export function WorkflowCockpit() {
               setState((current) => ({ ...current, stage: 'reapproval' }))
             }
           />
-          <WorkflowGraph snapshot={snapshot} />
+          <div className="flex min-h-[42rem] flex-col">
+            <CockpitTelemetryPanel />
+            <div className="min-h-0 flex-1">
+              <WorkflowGraph snapshot={snapshot} />
+            </div>
+          </div>
           <WorkflowEventTrace events={snapshot.events} />
         </div>
       </div>

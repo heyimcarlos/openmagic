@@ -102,12 +102,16 @@ async def handle_chat_request(payload: ChatRequest) -> PlainTextResponse | JSONR
                     )
                 )
                 assert session is not None
-                session.log.record_user_message("[Verification code submitted]")
+                session.log.record_user_message(
+                    "[Verification code submitted]",
+                    cause_id=user_message.id,
+                )
                 if verified.status == "verified" and verified.challenge_id is not None:
                     return
                 if verified.status == "no_active_challenge":
                     session.log.record_reply(
-                        "There is no active verification request for this conversation."
+                        "There is no active verification request for this conversation.",
+                        cause_id=user_message.id,
                     )
                     return
                 failure_messages = {
@@ -120,7 +124,10 @@ async def handle_chat_request(payload: ChatRequest) -> PlainTextResponse | JSONR
                         "Verification is no longer available for that on-file email."
                     ),
                 }
-                session.log.record_reply(failure_messages[verified.status])
+                session.log.record_reply(
+                    failure_messages[verified.status],
+                    cause_id=user_message.id,
+                )
                 return
             safe_user_content = _VERIFICATION_CODE.sub(
                 "[six-digit value redacted]",

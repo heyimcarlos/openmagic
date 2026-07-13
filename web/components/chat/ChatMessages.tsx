@@ -2,6 +2,7 @@ import { LoaderCircleIcon } from 'lucide-react';
 
 import { Markdown } from './Markdown';
 import type { ChatBubble } from './types';
+import { WorkflowTelemetry } from './workflow-telemetry/WorkflowTelemetry';
 import { Bubble, BubbleContent } from '@/components/ui/bubble';
 import { Marker, MarkerContent, MarkerIcon } from '@/components/ui/marker';
 import { Message, MessageContent, MessageHeader } from '@/components/ui/message';
@@ -43,6 +44,7 @@ export function ChatMessages({ messages, isWaitingForResponse }: ChatMessagesPro
 function ChatMessage({ message }: { message: ChatBubble }) {
   const isUser = message.role === 'user';
   const isDraft = message.role === 'draft';
+  const telemetry = message.role === 'assistant' ? message.telemetry : undefined;
 
   return (
     <MessageScrollerItem messageId={message.id} scrollAnchor={isUser}>
@@ -51,7 +53,12 @@ function ChatMessage({ message }: { message: ChatBubble }) {
           {!isUser && <MessageHeader>{isDraft ? 'Draft' : 'OpenMagic'}</MessageHeader>}
           <Bubble variant={isUser ? 'default' : isDraft ? 'outline' : 'ghost'}>
             <BubbleContent className={isUser ? 'max-w-[min(34rem,85vw)] whitespace-pre-wrap' : 'w-full'}>
-              {isUser ? message.text : <Markdown>{message.text}</Markdown>}
+              {isUser ? message.text : (
+                <>
+                  <Markdown>{message.text}</Markdown>
+                  {telemetry && <WorkflowTelemetry telemetry={telemetry} />}
+                </>
+              )}
             </BubbleContent>
           </Bubble>
         </MessageContent>

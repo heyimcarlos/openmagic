@@ -1,8 +1,63 @@
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+AgentActivityStatus = Literal["succeeded", "running", "failed"]
+WorkflowJobStatus = Literal["waiting", "queued", "running", "succeeded", "failed", "cancelled"]
+WorkflowCheckpointStatus = Literal["waiting", "satisfied", "unavailable"]
+
+
+class ChatAgentActivity(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    id: str = Field(..., min_length=1, max_length=255)
+    label: str = Field(..., min_length=1, max_length=255)
+    status: AgentActivityStatus
+
+
+class ChatWorkflowJobStage(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    id: str = Field(..., min_length=1, max_length=255)
+    kind: Literal["job"]
+    label: str = Field(..., min_length=1, max_length=255)
+    status: WorkflowJobStatus
+
+
+class ChatWorkflowCheckpoint(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    id: str = Field(..., min_length=1, max_length=255)
+    kind: Literal["checkpoint"]
+    label: str = Field(..., min_length=1, max_length=255)
+    status: WorkflowCheckpointStatus
+
+
+ChatWorkflowStage: TypeAlias = Annotated[
+    ChatWorkflowJobStage | ChatWorkflowCheckpoint,
+    Field(discriminator="kind"),
+]
+
+
+class ChatWorkflowTelemetry(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    id: str = Field(..., min_length=1, max_length=255)
+    title: str = Field(..., min_length=1, max_length=255)
+    status_label: str = Field(..., min_length=1, max_length=255)
+    stages: list[ChatWorkflowStage] = Field(default_factory=list)
+
+
+class ChatTurnTelemetry(BaseModel):
+    """Sanitized operational facts attached to one assistant chat turn."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    activity_summary: str = Field(..., min_length=1, max_length=255)
+    activity: list[ChatAgentActivity] = Field(default_factory=list)
+    workflows: list[ChatWorkflowTelemetry] = Field(default_factory=list)
 
 
 class ChatMessage(BaseModel):
@@ -12,6 +67,7 @@ class ChatMessage(BaseModel):
     role: str = Field(..., min_length=1)
     content: str = Field(...)
     timestamp: str | None = Field(default=None)
+    telemetry: ChatTurnTelemetry | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -48,6 +104,10 @@ class ChatRequest(BaseModel):
 
 class ChatHistoryResponse(BaseModel):
     messages: list[ChatMessage] = Field(default_factory=list)
+
+
+class ChatLatestTelemetryResponse(BaseModel):
+    telemetry: ChatTurnTelemetry | None = None
 
 
 class ChatHistoryClearResponse(BaseModel):

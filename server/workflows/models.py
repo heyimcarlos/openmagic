@@ -231,6 +231,56 @@ class InteractionCauseRow(Base):
     )
 
 
+class InteractionActivityReceiptRow(Base):
+    """Sanitized lifecycle receipt for one visible Interaction Agent action."""
+
+    __tablename__ = "interaction_activity_receipts"
+    __table_args__ = (
+        sa.UniqueConstraint(
+            "cause_id",
+            "sequence",
+            name="uq_interaction_activity_receipts_cause_sequence",
+        ),
+        sa.CheckConstraint("sequence > 0", name="sequence_positive"),
+        sa.CheckConstraint(
+            "status IN ('running', 'succeeded', 'failed')",
+            name="status",
+        ),
+        sa.CheckConstraint(
+            "(status = 'running' AND finished_at IS NULL) "
+            "OR (status IN ('succeeded', 'failed') AND finished_at IS NOT NULL)",
+            name="terminal_shape",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    cause_id: Mapped[str] = mapped_column(
+        sa.Text,
+        sa.ForeignKey(
+            "interaction_causes.id",
+            name="fk_interaction_activity_receipts_cause",
+        ),
+        nullable=False,
+    )
+    sequence: Mapped[int] = mapped_column(sa.Integer, nullable=False)
+    action_key: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    status: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    workflow_id: Mapped[UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        sa.ForeignKey(
+            "workflows.id",
+            name="fk_interaction_activity_receipts_workflow",
+        ),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        sa.DateTime(timezone=True),
+        nullable=False,
+        server_default=sa.func.now(),
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True), nullable=True)
+
+
 class VerificationChallengeRow(Base):
     """One durable cross-channel proof bound to a protected operation scope."""
 

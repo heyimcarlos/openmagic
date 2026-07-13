@@ -74,7 +74,13 @@ class CorrelatedReplyLog:
         self.messages_by_delivery: dict[str, str] = {}
         self.calls = 0
 
-    def record_reply_once(self, delivery_id: str, message: str) -> bool:
+    def record_reply_once(
+        self,
+        delivery_id: str,
+        message: str,
+        *,
+        cause_id: str | None = None,
+    ) -> bool:
         self.calls += 1
         if delivery_id in self.messages_by_delivery:
             return False

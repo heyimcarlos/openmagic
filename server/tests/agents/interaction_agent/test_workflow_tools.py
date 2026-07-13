@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from types import SimpleNamespace
+from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
@@ -28,6 +29,9 @@ from server.tests.workflows.retrieval_fixtures import (
 )
 from server.workflows import (
     DeterministicVerificationEmailSender,
+    InteractionActivityAction,
+    InteractionActivityStatus,
+    InteractionActivityStore,
     ProtectedOperation,
     StaticWorkflowAuthority,
     StepUpVerification,
@@ -109,7 +113,7 @@ def test_workflow_tool_surface_omits_delegation_and_execution_configuration(
 def test_runtime_factory_defaults_to_workflow_mode_and_keeps_legacy_explicit(
     migrated_postgres_url: str,
 ):
-    common = {
+    common: dict[str, Any] = {
         "openrouter_api_key": "test-key",
         "database_url": migrated_postgres_url,
         "workflow_cursor_secret": "workflow-factory-test",
@@ -382,16 +386,25 @@ async def test_verified_resume_runs_exact_stored_packet_read_in_fresh_context(
         def load_transcript(self) -> str:
             return ""
 
-        def record_user_message(self, _message: str) -> None:
+        def record_user_message(self, message: str, *, cause_id: str | None = None) -> None:
+            del message, cause_id
             return None
 
-        def record_agent_message(self, _message: str) -> None:
+        def record_agent_message(self, message: str) -> None:
+            del message
             return None
 
-        def record_reply(self, message: str) -> None:
+        def record_reply(self, message: str, *, cause_id: str | None = None) -> None:
             self.replies.append(message)
 
-        def record_reply_once(self, _delivery_id: str, message: str) -> bool:
+        def record_reply_once(
+            self,
+            delivery_id: str,
+            message: str,
+            *,
+            cause_id: str | None = None,
+        ) -> bool:
+            del delivery_id, cause_id
             if message in self.replies:
                 return False
             self.replies.append(message)
@@ -468,16 +481,25 @@ async def test_verified_resume_explains_revalidation_failure_to_the_user():
         def load_transcript(self) -> str:
             return ""
 
-        def record_user_message(self, _message: str) -> None:
+        def record_user_message(self, message: str, *, cause_id: str | None = None) -> None:
+            del message, cause_id
             return None
 
-        def record_agent_message(self, _message: str) -> None:
+        def record_agent_message(self, message: str) -> None:
+            del message
             return None
 
-        def record_reply(self, message: str) -> None:
+        def record_reply(self, message: str, *, cause_id: str | None = None) -> None:
             self.replies.append(message)
 
-        def record_reply_once(self, _delivery_id: str, message: str) -> bool:
+        def record_reply_once(
+            self,
+            delivery_id: str,
+            message: str,
+            *,
+            cause_id: str | None = None,
+        ) -> bool:
+            del delivery_id, cause_id
             if message in self.replies:
                 return False
             self.replies.append(message)
@@ -656,6 +678,43 @@ async def test_unexpected_tool_errors_are_redacted_before_model_delivery():
     assert secret not in json.dumps(result.payload)
 
 
+@pytest.mark.parametrize("fail_on_start", [True, False])
+async def test_activity_receipt_failures_do_not_change_tool_results(fail_on_start: bool):
+    from server.agents.interaction_agent import runtime as runtime_module
+
+    class SuccessfulToolbox:
+        async def invoke(self, name, arguments, context):
+            return ToolResult(success=True, payload={"ok": True})
+
+    class FailingActivityStore:
+        async def start(self, **kwargs):
+            if fail_on_start:
+                raise RuntimeError("receipt start failed")
+            return SimpleNamespace(id=uuid4())
+
+        async def finish(self, *args, **kwargs):
+            raise RuntimeError("receipt finish failed")
+
+    runtime = object.__new__(InteractionAgentRuntime)
+    runtime.toolbox = SuccessfulToolbox()
+    runtime._activity_store = FailingActivityStore()
+
+    result = await runtime._execute_tool(
+        runtime_module._ToolCall(
+            identifier="call",
+            name="search_workflows",
+            arguments={},
+        ),
+        InteractionToolContext(
+            actor_party_id=BROKER_ID,
+            organization_party_id=ACME_ID,
+            cause_id="message-receipt-failure",
+        ),
+    )
+
+    assert result == ToolResult(success=True, payload={"ok": True})
+
+
 async def test_ambiguous_search_cannot_read_or_propose_the_first_candidate(
     workflow_toolbox: WorkflowInteractionToolbox,
     migrated_postgres_url: str,
@@ -729,6 +788,7 @@ async def test_ambiguous_search_cannot_read_or_propose_the_first_candidate(
 
 async def test_scripted_workflow_runtime_loads_one_packet_and_never_delegates(
     workflow_toolbox: WorkflowInteractionToolbox,
+    migrated_postgres_url: str,
     monkeypatch: pytest.MonkeyPatch,
 ):
     from server.agents.interaction_agent import runtime as runtime_module
@@ -740,13 +800,13 @@ async def test_scripted_workflow_runtime_loads_one_packet_and_never_delegates(
         def load_transcript(self) -> str:
             return ""
 
-        def record_user_message(self, message: str) -> None:
+        def record_user_message(self, message: str, *, cause_id: str | None = None) -> None:
             self.user_message = message
 
         def record_agent_message(self, message: str) -> None:
             self.agent_message = message
 
-        def record_reply(self, message: str) -> None:
+        def record_reply(self, message: str, *, cause_id: str | None = None) -> None:
             self.replies.append(message)
 
     class FakeWorkingMemory:
@@ -817,11 +877,15 @@ async def test_scripted_workflow_runtime_loads_one_packet_and_never_delegates(
         contexts.append(context)
         return context
 
+    activity_database = WorkflowDatabase(migrated_postgres_url)
+    activity_store = InteractionActivityStore(activity_database)
     runtime = InteractionAgentRuntime(
         toolbox=workflow_toolbox,
         tool_context_factory=context_factory,
         system_prompt_builder=build_workflow_system_prompt,
         message_builder=prepare_workflow_message,
+        interaction_cause_recorder=workflow_toolbox.record_interaction_cause,
+        activity_store=activity_store,
     )
 
     result = await runtime.execute(
@@ -839,6 +903,28 @@ async def test_scripted_workflow_runtime_loads_one_packet_and_never_delegates(
     assert len(calls) == 4
     assert all("send_message_to_agent" not in json.dumps(call["tools"]) for call in calls)
     assert "<active_agents>" not in calls[0]["messages"][0]["content"]
+    receipts = await activity_store.list_for_actor_causes(
+        actor_party_id=BROKER_ID,
+        cause_ids=["authenticated-message-1"],
+    )
+    assert [(receipt.action, receipt.status, receipt.workflow_id) for receipt in receipts] == [
+        (
+            InteractionActivityAction.SEARCH_WORKFLOWS,
+            InteractionActivityStatus.SUCCEEDED,
+            None,
+        ),
+        (
+            InteractionActivityAction.READ_WORKFLOW_PACKET,
+            InteractionActivityStatus.SUCCEEDED,
+            TARGET_ID,
+        ),
+        (
+            InteractionActivityAction.PROPOSE_RENEWAL_EMAIL,
+            InteractionActivityStatus.SUCCEEDED,
+            TARGET_ID,
+        ),
+    ]
+    await activity_database.dispose()
 
 
 @pytest.mark.parametrize(
@@ -867,10 +953,10 @@ async def test_ambiguous_or_missing_search_asks_without_loading_or_mutating(
         def load_transcript(self) -> str:
             return ""
 
-        def record_user_message(self, message: str) -> None:
+        def record_user_message(self, message: str, *, cause_id: str | None = None) -> None:
             pass
 
-        def record_reply(self, message: str) -> None:
+        def record_reply(self, message: str, *, cause_id: str | None = None) -> None:
             pass
 
     class FakeWorkingMemory:

@@ -1,18 +1,33 @@
 from .chat import (
+    ChatAgentActivity,
     ChatHistoryClearResponse,
     ChatHistoryResponse,
+    ChatLatestTelemetryResponse,
     ChatMessage,
     ChatRequest,
+    ChatTurnTelemetry,
+    ChatWorkflowCheckpoint,
+    ChatWorkflowJobStage,
+    ChatWorkflowStage,
+    ChatWorkflowTelemetry,
     SmsInteractionEnvelope,
+    WorkflowCheckpointStatus,
 )
 from .gmail import GmailConnectPayload, GmailDisconnectPayload, GmailStatusPayload
 from .meta import HealthResponse, RootResponse, SetTimezoneRequest, SetTimezoneResponse
 
 __all__ = [
+    "ChatAgentActivity",
     "ChatHistoryClearResponse",
     "ChatHistoryResponse",
+    "ChatLatestTelemetryResponse",
     "ChatMessage",
     "ChatRequest",
+    "ChatTurnTelemetry",
+    "ChatWorkflowCheckpoint",
+    "ChatWorkflowJobStage",
+    "ChatWorkflowStage",
+    "ChatWorkflowTelemetry",
     "GmailConnectPayload",
     "GmailDisconnectPayload",
     "GmailStatusPayload",
@@ -21,4 +36,5 @@ __all__ = [
     "SetTimezoneRequest",
     "SetTimezoneResponse",
     "SmsInteractionEnvelope",
+    "WorkflowCheckpointStatus",
 ]

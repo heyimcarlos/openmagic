@@ -8,6 +8,7 @@ from uuid import UUID
 
 from server.config import Settings, get_settings
 from server.workflows import (
+    InteractionActivityStore,
     StaticWorkflowAuthority,
     StepUpVerification,
     WorkflowControlPlane,
@@ -75,6 +76,7 @@ def create_interaction_runtime(
         system_prompt_builder=build_workflow_system_prompt,
         message_builder=prepare_workflow_message,
         interaction_cause_recorder=toolbox.record_interaction_cause,
+        activity_store=_interaction_activity_store(database_url),
         conversation_state=conversation_state,
         working_memory_state=working_memory_state,
         settings=settings,
@@ -104,6 +106,11 @@ def _workflow_toolbox(
             delivery_available,
         ),
     )
+
+
+@lru_cache(maxsize=4)
+def _interaction_activity_store(database_url: str) -> InteractionActivityStore:
+    return InteractionActivityStore(WorkflowDatabase(database_url))
 
 
 @lru_cache(maxsize=4)
