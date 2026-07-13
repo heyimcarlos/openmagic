@@ -12,6 +12,7 @@ from server.workflows import WorkflowDatabase, WorkflowInspectionContext, Workfl
 from server.workflows.demo_seed import (
     DEMO_BROKER_IDENTIFIER_ID,
     DEMO_WORKFLOW_ID,
+    DemoResetBlockedError,
     reset_v0_demo,
     seed_v0_demo,
 )
@@ -141,3 +142,49 @@ async def test_demo_reset_deletes_runtime_state_and_restores_only_the_seed(
     assert workflows == [(DEMO_WORKFLOW_ID, "2026 renewal outreach for John Smith")]
     assert cause_count == 0
     assert party_count == 3
+
+
+async def test_demo_reset_refuses_to_delete_current_execution_authority(
+    migrated_postgres_url: str,
+    clean_workflow_database,
+):
+    await seed_v0_demo(
+        migrated_postgres_url,
+        broker_party_id=BROKER_ID,
+        organization_party_id=ACME_ID,
+    )
+    job_id = uuid4()
+    engine = create_async_engine(migrated_postgres_url)
+    async with engine.begin() as connection:
+        await connection.execute(
+            sa.text(
+                "INSERT INTO workflow_jobs "
+                "(id, workflow_id, kind, status, attempts, max_attempts, input) "
+                "VALUES (:id, :workflow_id, 'renewal_email.draft.v1', 'running', 1, 3, "
+                '\'{"recipient_name": "John Smith", "renewal_period": "2026", '
+                '"renewal_details": "Details"}\'::jsonb)'
+            ),
+            {"id": job_id, "workflow_id": DEMO_WORKFLOW_ID},
+        )
+        await connection.execute(
+            sa.text(
+                "INSERT INTO workflow_job_runs "
+                "(id, workflow_id, job_id, status, worker_id, lease_expires_at, "
+                "application_build) VALUES "
+                "(:id, :workflow_id, :job_id, 'running', 'qa-worker', now() + interval "
+                "'5 minutes', 'qa-build')"
+            ),
+            {"id": uuid4(), "workflow_id": DEMO_WORKFLOW_ID, "job_id": job_id},
+        )
+
+    with pytest.raises(DemoResetBlockedError):
+        await reset_v0_demo(
+            migrated_postgres_url,
+            broker_party_id=BROKER_ID,
+            organization_party_id=ACME_ID,
+        )
+
+    async with engine.connect() as connection:
+        assert await connection.scalar(sa.text("SELECT count(*) FROM workflows")) == 1
+        assert await connection.scalar(sa.text("SELECT count(*) FROM workflow_job_runs")) == 1
+    await engine.dispose()

@@ -11,7 +11,7 @@ from server.agents.interaction_agent.workflow_notifications import ConversationA
 from server.models import ChatApprovalCommand, ChatApprovalRequest, ChatTurnTelemetry
 from server.routes import chat as chat_route
 from server.services.conversation.log import ConversationLog
-from server.workflows import ResolvedSmsParty
+from server.workflows import DemoResetBlockedError, ResolvedSmsParty
 
 
 class _WorkingMemory:
@@ -526,7 +526,7 @@ async def test_direct_approval_hides_stale_domain_details(monkeypatch):
     assert "Job" not in captured.value.detail
 
 
-async def test_clear_history_resets_durable_demo_state_and_all_sms_sessions(monkeypatch):
+async def test_demo_reset_resets_durable_state_and_all_sms_sessions(monkeypatch):
     broker_id = UUID("10000000-0000-0000-0000-000000000001")
     organization_id = UUID("20000000-0000-0000-0000-000000000001")
     reset_calls: list[dict[str, object]] = []
@@ -555,7 +555,7 @@ async def test_clear_history_resets_durable_demo_state_and_all_sms_sessions(monk
         lambda: cleared_sessions.append(True),
     )
 
-    response = await chat_route.clear_history(sender_phone="+14165550101")
+    response = await chat_route.reset_demo_state()
 
     assert response.ok is True
     assert reset_calls == [
@@ -568,3 +568,36 @@ async def test_clear_history_resets_durable_demo_state_and_all_sms_sessions(monk
         }
     ]
     assert cleared_sessions == [True]
+
+
+async def test_demo_reset_reports_running_work_without_deleting_transcripts(monkeypatch):
+    monkeypatch.setattr(
+        chat_route,
+        "get_settings",
+        lambda: SimpleNamespace(
+            interaction_mode="workflow",
+            database_url="postgresql+psycopg://demo",
+            workflow_broker_party_id="10000000-0000-0000-0000-000000000001",
+            workflow_organization_party_id="20000000-0000-0000-0000-000000000001",
+            demo_policyholder_email="john@example.com",
+            demo_broker_email="broker@acme.example",
+        ),
+    )
+
+    async def blocked_reset(*_args, **_kwargs):
+        raise DemoResetBlockedError("running work")
+
+    cleared_sessions: list[bool] = []
+    monkeypatch.setattr(chat_route, "reset_v0_demo", blocked_reset)
+    monkeypatch.setattr(
+        chat_route,
+        "clear_conversation_sessions",
+        lambda: cleared_sessions.append(True),
+    )
+
+    with pytest.raises(HTTPException) as captured:
+        await chat_route.reset_demo_state()
+
+    assert captured.value.status_code == 409
+    assert "running" in captured.value.detail
+    assert cleared_sessions == []

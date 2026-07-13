@@ -39,6 +39,7 @@ export default function Page() {
   const [senderId, setSenderId] = useState<SimulatedSenderId>('policyholder');
   const senderGeneration = useRef(0);
   const historySnapshot = useRef<string | undefined>(undefined);
+  const approvalCauseBySubmission = useRef(new Map<string, string>());
   const sender =
     SIMULATED_SMS_SENDERS.find((candidate) => candidate.id === senderId) ??
     SIMULATED_SMS_SENDERS[0];
@@ -46,20 +47,31 @@ export default function Page() {
   const openSettings = useCallback(() => setOpen(true), [setOpen]);
   const closeSettings = useCallback(() => setOpen(false), [setOpen]);
 
+  const readChangedHistory = useCallback(async (
+    response: Response,
+    requestGeneration: number,
+  ): Promise<ChatBubble[] | undefined> => {
+    if (!response.ok) return undefined;
+    const raw = await response.text();
+    if (senderGeneration.current !== requestGeneration || raw === historySnapshot.current) {
+      return undefined;
+    }
+    const currentMessages = parseChatHistory(JSON.parse(raw));
+    historySnapshot.current = raw;
+    return currentMessages;
+  }, []);
+
   const loadHistory = useCallback(async () => {
     const requestGeneration = senderGeneration.current;
     try {
       const res = await fetch(historyUrl, { cache: 'no-store' });
-      if (!res.ok) return;
-      const raw = await res.text();
-      if (senderGeneration.current !== requestGeneration || raw === historySnapshot.current) return;
-      historySnapshot.current = raw;
-      setMessages(parseChatHistory(JSON.parse(raw)));
+      const currentMessages = await readChangedHistory(res, requestGeneration);
+      if (currentMessages) setMessages(currentMessages);
     } catch (err: any) {
       if (err?.name === 'AbortError') return;
       console.error('Failed to load chat history', err);
     }
-  }, [historyUrl]);
+  }, [historyUrl, readChangedHistory]);
 
   useEffect(() => {
     void loadHistory();
@@ -173,13 +185,8 @@ export default function Page() {
             const telemetryPayload = await telemetryResponse.json();
             setPendingTelemetry(parseChatTurnTelemetry(telemetryPayload.telemetry));
           }
-          if (!response.ok) continue;
-
-          const raw = await response.text();
-          if (senderGeneration.current !== requestGeneration) return;
-          if (raw === historySnapshot.current) continue;
-          historySnapshot.current = raw;
-          const currentMessages = parseChatHistory(JSON.parse(raw));
+          const currentMessages = await readChangedHistory(response, requestGeneration);
+          if (!currentMessages) continue;
           const assistantCount = currentMessages.filter((message) => message.role === 'assistant').length;
 
           if (assistantCount > assistantCountBeforeSend) {
@@ -199,12 +206,13 @@ export default function Page() {
         await loadHistory();
       }
     },
-    [historyUrl, loadHistory, messages, sender.phone],
+    [historyUrl, loadHistory, messages, readChangedHistory, sender.phone],
   );
 
   const handleClearHistory = useCallback(async () => {
+    if (isWaitingForResponse) return;
     try {
-      const res = await fetch(historyUrl, { method: 'DELETE' });
+      const res = await fetch('/api/chat/demo/reset', { method: 'POST' });
       if (!res.ok) {
         const payload = await res.json().catch(() => ({}));
         throw new Error(
@@ -212,20 +220,24 @@ export default function Page() {
         );
       }
       historySnapshot.current = undefined;
+      approvalCauseBySubmission.current.clear();
+      senderGeneration.current += 1;
       setMessages([]);
       setPendingTelemetry(undefined);
+      setIsWaitingForResponse(false);
       setError(null);
     } catch (err) {
       console.error('Failed to clear chat history', err);
       setError(err instanceof Error ? err.message : 'Failed to reset the demo');
     }
-  }, [historyUrl, setMessages]);
+  }, [isWaitingForResponse]);
 
   const handleSenderChange = useCallback((id: SimulatedSenderId) => {
     senderGeneration.current += 1;
     setSenderId(id);
     setMessages([]);
     historySnapshot.current = undefined;
+    approvalCauseBySubmission.current.clear();
     setPendingTelemetry(undefined);
     setError(null);
     setIsWaitingForResponse(false);
@@ -257,24 +269,35 @@ export default function Page() {
     revision?: ApprovalEmail,
   ) => {
     setError(null);
+    const revisedEmail = revision ? {
+      to: parseAddresses(revision.to),
+      cc: parseAddresses(revision.cc),
+      bcc: parseAddresses(revision.bcc),
+      subject: revision.subject.trim(),
+      body: revision.body,
+    } : undefined;
+    const submissionKey = JSON.stringify({
+      senderPhone: sender.phone,
+      workflowId: approval.workflowId,
+      jobId: approval.jobId,
+      draftRevisionId: approval.draftRevisionId,
+      revisedEmail,
+    });
+    let causeId = approvalCauseBySubmission.current.get(submissionKey);
+    if (!causeId) {
+      causeId = `ui-approval:${crypto.randomUUID()}`;
+      approvalCauseBySubmission.current.set(submissionKey, causeId);
+    }
     const response = await fetch('/api/chat/approval', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         sender_phone: sender.phone,
-        cause_id: `ui-approval:${crypto.randomUUID()}`,
+        cause_id: causeId,
         workflow_id: approval.workflowId,
         job_id: approval.jobId,
         expected_draft_revision_id: approval.draftRevisionId,
-        ...(revision ? {
-          revised_email: {
-            to: parseAddresses(revision.to),
-            cc: parseAddresses(revision.cc),
-            bcc: parseAddresses(revision.bcc),
-            subject: revision.subject.trim(),
-            body: revision.body,
-          },
-        } : {}),
+        ...(revisedEmail ? { revised_email: revisedEmail } : {}),
       }),
     });
     const payload = await response.json().catch(() => ({}));
@@ -304,6 +327,7 @@ export default function Page() {
           onSenderChange={handleSenderChange}
           onOpenSettings={openSettings}
           onClearHistory={triggerClearHistory}
+          resetDisabled={isWaitingForResponse}
         />
 
         <div className="flex-1 overflow-hidden">

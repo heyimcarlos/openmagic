@@ -61,7 +61,7 @@ from .contracts import (
 )
 from .control_plane import WorkflowControlPlane
 from .database import WorkflowDatabase
-from .demo_seed import reset_v0_demo, seed_v0_demo
+from .demo_seed import DemoResetBlockedError, reset_v0_demo, seed_v0_demo
 from .email_adapter import (
     COMPOSIO_GMAIL_TOOLKIT_VERSION,
     ComposioGmailSendAdapter,
@@ -168,6 +168,7 @@ __all__ = [
     "CreateWorkflowCommand",
     "DeterministicEmailSendAdapter",
     "DeterministicVerificationEmailSender",
+    "DemoResetBlockedError",
     "DraftRenewalEmailOutput",
     "DuplicateEmailSendError",
     "EmailSendAdapter",

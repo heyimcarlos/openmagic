@@ -1,3 +1,5 @@
+import { useEffect, useState } from 'react';
+
 import {
   CheckIcon,
   ChevronDownIcon,
@@ -28,13 +30,32 @@ import type {
 interface WorkflowTelemetryProps {
   telemetry: ChatTurnTelemetry;
   className?: string;
+  defaultActivityOpen?: boolean;
 }
 
-export function WorkflowTelemetry({ telemetry, className }: WorkflowTelemetryProps) {
+export function WorkflowTelemetry({
+  telemetry,
+  className,
+  defaultActivityOpen = false,
+}: WorkflowTelemetryProps) {
+  const [openItems, setOpenItems] = useState<string[]>(
+    defaultActivityOpen && telemetry.activity.length > 0 ? ['turn-activity'] : [],
+  );
+
+  useEffect(() => {
+    setOpenItems((current) => {
+      const withoutActivity = current.filter((item) => item !== 'turn-activity');
+      return defaultActivityOpen && telemetry.activity.length > 0
+        ? ['turn-activity', ...withoutActivity]
+        : withoutActivity;
+    });
+  }, [defaultActivityOpen, telemetry.activity.length]);
+
   return (
     <Accordion
       multiple
-      defaultValue={telemetry.activity.length > 0 ? ['turn-activity'] : []}
+      value={openItems}
+      onValueChange={setOpenItems}
       className={cn('mt-3 gap-0.5', className)}
       aria-label="Agent activity and Workflow progress"
     >

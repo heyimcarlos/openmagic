@@ -22,6 +22,7 @@ from ..services.conversation import (
     get_conversation_session,
 )
 from ..workflows import (
+    DemoResetBlockedError,
     InteractionActivityStore,
     WorkflowDatabase,
     WorkflowInspectionContext,
@@ -310,8 +311,57 @@ def get_workflow_retrieval(settings: Settings) -> WorkflowRetrieval:
     return resolve(settings)
 
 
+@router.post("/demo/reset", response_model=ChatHistoryClearResponse)
+async def reset_demo_state() -> ChatHistoryClearResponse:
+    """Reset all disposable state owned by the local Workflow demonstration."""
+
+    settings = get_settings()
+    if settings.interaction_mode != "workflow":
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+    required = (
+        settings.database_url,
+        settings.workflow_broker_party_id,
+        settings.workflow_organization_party_id,
+    )
+    if not all(required):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Demo reset is unavailable",
+        )
+    assert settings.database_url is not None
+    assert settings.workflow_broker_party_id is not None
+    assert settings.workflow_organization_party_id is not None
+    try:
+        await reset_v0_demo(
+            settings.database_url,
+            broker_party_id=UUID(settings.workflow_broker_party_id),
+            organization_party_id=UUID(settings.workflow_organization_party_id),
+            policyholder_email=settings.demo_policyholder_email,
+            broker_email=settings.demo_broker_email,
+        )
+    except DemoResetBlockedError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "Demo reset is temporarily blocked while work is running or an external effect "
+                "is uncertain."
+            ),
+        ) from exc
+    except Exception as exc:
+        logger.warning(
+            "Local Workflow demo reset failed",
+            extra={"error_type": type(exc).__name__},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Demo reset is unavailable",
+        ) from exc
+    clear_conversation_sessions()
+    return ChatHistoryClearResponse()
+
+
 @router.delete("/history", response_model=ChatHistoryClearResponse)
-async def clear_history(
+def clear_history(
     sender_phone: str | None = Query(default=None, min_length=8, max_length=32),
 ) -> ChatHistoryClearResponse:
     from ..services import get_agent_roster, get_execution_agent_logs
@@ -322,39 +372,6 @@ async def clear_history(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="SMS sender phone is required",
         )
-    if settings.interaction_mode == "workflow":
-        required = (
-            settings.database_url,
-            settings.workflow_broker_party_id,
-            settings.workflow_organization_party_id,
-        )
-        if not all(required):
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Demo reset is unavailable",
-            )
-        assert settings.database_url is not None
-        assert settings.workflow_broker_party_id is not None
-        assert settings.workflow_organization_party_id is not None
-        try:
-            await reset_v0_demo(
-                settings.database_url,
-                broker_party_id=UUID(settings.workflow_broker_party_id),
-                organization_party_id=UUID(settings.workflow_organization_party_id),
-                policyholder_email=settings.demo_policyholder_email,
-                broker_email=settings.demo_broker_email,
-            )
-        except Exception as exc:
-            logger.warning(
-                "Local Workflow demo reset failed",
-                extra={"error_type": type(exc).__name__},
-            )
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Demo reset is unavailable",
-            ) from exc
-        clear_conversation_sessions()
-        return ChatHistoryClearResponse()
     log = (
         get_conversation_session(sms_interaction_id(sender_phone)).log
         if sender_phone

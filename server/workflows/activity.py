@@ -115,6 +115,7 @@ class InteractionActivityStore:
         status = InteractionActivityStatus(status)
         if status is InteractionActivityStatus.RUNNING:
             raise ValueError("a finished activity receipt requires a terminal status")
+        serialized_presentation = self._serialize_presentation(presentation)
         async with self._database.transaction() as session:
             row = await session.scalar(
                 sa.select(InteractionActivityReceiptRow)
@@ -124,14 +125,6 @@ class InteractionActivityStore:
             if row is None:
                 raise LookupError("Interaction activity receipt does not exist")
             if row.status != InteractionActivityStatus.RUNNING.value:
-                serialized_presentation = (
-                    {
-                        "summary": presentation.summary,
-                        "items": list(presentation.items),
-                    }
-                    if presentation is not None
-                    else None
-                )
                 if (
                     row.status == status.value
                     and row.workflow_id == workflow_id
@@ -141,14 +134,7 @@ class InteractionActivityStore:
                 raise RuntimeError("Interaction activity receipt already finished")
             row.status = status.value
             row.workflow_id = workflow_id
-            row.presentation = (
-                {
-                    "summary": presentation.summary,
-                    "items": list(presentation.items),
-                }
-                if presentation is not None
-                else None
-            )
+            row.presentation = serialized_presentation
             row.finished_at = datetime.now(UTC)
             await session.flush()
             return self._receipt(row)
@@ -182,6 +168,17 @@ class InteractionActivityStore:
                 )
             ).all()
         return tuple(self._receipt(row) for row in rows)
+
+    @staticmethod
+    def _serialize_presentation(
+        presentation: InteractionActivityPresentation | None,
+    ) -> dict[str, object] | None:
+        if presentation is None:
+            return None
+        return {
+            "summary": presentation.summary,
+            "items": list(presentation.items),
+        }
 
     @staticmethod
     def _receipt(row: InteractionActivityReceiptRow) -> InteractionActivityReceipt:

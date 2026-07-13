@@ -16,7 +16,7 @@ from .identity_models import (
     WorkflowParticipantRoleRow,
     WorkflowParticipantRow,
 )
-from .models import WorkflowEventRow, WorkflowRow
+from .models import WorkflowEventRow, WorkflowJobRunRow, WorkflowRow
 
 DEMO_POLICYHOLDER_ID = UUID("30000000-0000-0000-0000-000000000001")
 DEMO_WORKFLOW_ID = UUID("40000000-0000-0000-0000-000000000001")
@@ -29,6 +29,10 @@ DEMO_MEMBERSHIP_ID = UUID("52000000-0000-0000-0000-000000000001")
 DEMO_BROKER_ROLE_ID = UUID("53000000-0000-0000-0000-000000000001")
 DEMO_POLICYHOLDER_ROLE_ID = UUID("53000000-0000-0000-0000-000000000002")
 DEMO_CREATED_EVENT_ID = UUID("54000000-0000-0000-0000-000000000001")
+
+
+class DemoResetBlockedError(RuntimeError):
+    """Raised when local demo work cannot be deleted without losing effect evidence."""
 
 
 async def _add_if_missing(session: AsyncSession, row: object, identity: object) -> None:
@@ -63,15 +67,17 @@ async def seed_v0_demo(
 
     engine = create_async_engine(database_url)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
-    async with sessions.begin() as session:
-        await _seed_v0_demo_session(
-            session,
-            broker_party_id=broker_party_id,
-            organization_party_id=organization_party_id,
-            policyholder_email=policyholder_email,
-            broker_email=broker_email,
-        )
-    await engine.dispose()
+    try:
+        async with sessions.begin() as session:
+            await _seed_v0_demo_session(
+                session,
+                broker_party_id=broker_party_id,
+                organization_party_id=organization_party_id,
+                policyholder_email=policyholder_email,
+                broker_email=broker_email,
+            )
+    finally:
+        await engine.dispose()
     return DEMO_WORKFLOW_ID
 
 
@@ -87,16 +93,38 @@ async def reset_v0_demo(
 
     engine = create_async_engine(database_url)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
-    async with sessions.begin() as session:
-        await session.execute(sa.text("TRUNCATE workflows, interaction_causes CASCADE"))
-        await _seed_v0_demo_session(
-            session,
-            broker_party_id=broker_party_id,
-            organization_party_id=organization_party_id,
-            policyholder_email=policyholder_email,
-            broker_email=broker_email,
-        )
-    await engine.dispose()
+    try:
+        async with sessions.begin() as session:
+            await session.execute(sa.text("LOCK TABLE workflows IN SHARE ROW EXCLUSIVE MODE"))
+            await session.execute(sa.select(WorkflowRow.id).with_for_update())
+            running_run = await session.scalar(
+                sa.select(WorkflowJobRunRow.id)
+                .where(WorkflowJobRunRow.status == "running")
+                .limit(1)
+            )
+            active_dispatch = await session.scalar(
+                sa.select(WorkflowEventRow.id)
+                .join(WorkflowRow, WorkflowRow.id == WorkflowEventRow.workflow_id)
+                .where(
+                    WorkflowRow.status == "active",
+                    WorkflowEventRow.event_type == "external_effect_dispatch_started",
+                )
+                .limit(1)
+            )
+            if running_run is not None or active_dispatch is not None:
+                raise DemoResetBlockedError(
+                    "demo reset is blocked by running or uncertain external work"
+                )
+            await session.execute(sa.text("TRUNCATE workflows, interaction_causes CASCADE"))
+            await _seed_v0_demo_session(
+                session,
+                broker_party_id=broker_party_id,
+                organization_party_id=organization_party_id,
+                policyholder_email=policyholder_email,
+                broker_email=broker_email,
+            )
+    finally:
+        await engine.dispose()
     return DEMO_WORKFLOW_ID
 
 

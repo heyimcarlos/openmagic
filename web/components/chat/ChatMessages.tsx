@@ -36,6 +36,9 @@ export function ChatMessages({
   const lastUserMessageId = [...messages]
     .reverse()
     .find((message) => message.role === 'user')?.id;
+  const newestTelemetryMessageId = [...messages]
+    .reverse()
+    .find((message) => message.role === 'assistant' && message.telemetry)?.id;
 
   return (
     <MessageScrollerProvider defaultScrollPosition="end">
@@ -49,6 +52,7 @@ export function ChatMessages({
                 key={message.id}
                 message={message}
                 scrollAnchor={message.id === lastUserMessageId}
+                defaultActivityOpen={message.id === newestTelemetryMessageId}
                 onApprove={onApprove}
               />
             ))}
@@ -65,10 +69,12 @@ export function ChatMessages({
 function ChatMessage({
   message,
   scrollAnchor,
+  defaultActivityOpen,
   onApprove,
 }: {
   message: ChatBubble;
   scrollAnchor: boolean;
+  defaultActivityOpen: boolean;
   onApprove: (request: ApprovalRequest, revision?: ApprovalEmail) => Promise<void>;
 }) {
   const [isApproving, setIsApproving] = useState(false);
@@ -120,7 +126,12 @@ function ChatMessage({
                       statusMessage={isApproving ? 'Recording your approval...' : undefined}
                     />
                   )}
-                  {telemetry && <WorkflowTelemetry telemetry={telemetry} />}
+                  {telemetry && (
+                    <WorkflowTelemetry
+                      telemetry={telemetry}
+                      defaultActivityOpen={defaultActivityOpen}
+                    />
+                  )}
                 </>
               )}
             </BubbleContent>
@@ -141,7 +152,13 @@ function TypingIndicator({ telemetry }: { telemetry?: ChatTurnTelemetry }) {
           </MarkerIcon>
           <MarkerContent className="shimmer">Working on it...</MarkerContent>
         </Marker>
-        {telemetry && <WorkflowTelemetry telemetry={telemetry} className="mt-1" />}
+        {telemetry && (
+          <WorkflowTelemetry
+            telemetry={telemetry}
+            defaultActivityOpen
+            className="mt-1"
+          />
+        )}
       </div>
     </MessageScrollerItem>
   );

@@ -49,6 +49,7 @@ interface SmsContactHeaderProps {
   onSenderChange: (id: SimulatedSenderId) => void;
   onOpenSettings: () => void;
   onClearHistory: () => void;
+  resetDisabled?: boolean;
 }
 
 export function SmsContactHeader({
@@ -56,6 +57,7 @@ export function SmsContactHeader({
   onSenderChange,
   onOpenSettings,
   onClearHistory,
+  resetDisabled = false,
 }: SmsContactHeaderProps) {
   return (
     <header className="relative border-b px-4 pb-3 pt-2 sm:px-6">
@@ -71,6 +73,7 @@ export function SmsContactHeader({
             variant="ghost"
             size="icon-sm"
             onClick={onClearHistory}
+            disabled={resetDisabled}
             aria-label="Reset demo data"
             title="Reset demo data"
           >
