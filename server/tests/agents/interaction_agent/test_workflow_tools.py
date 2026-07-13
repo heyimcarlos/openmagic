@@ -724,6 +724,7 @@ async def test_verified_resume_explains_revalidation_failure_to_the_user():
     assert result.success is False
     assert result.error == "stale_approval_target"
     assert "Please start the request again" in result.response
+    assert "Workflow" not in result.response
     assert conversation.replies == [result.response]
 
 

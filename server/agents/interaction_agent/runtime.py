@@ -241,7 +241,7 @@ class InteractionAgentRuntime:
             if not result.success:
                 recovery = (
                     "Verification succeeded, but I can no longer complete that request because "
-                    "your access or the Workflow state changed. Please start the request again."
+                    "the email or your access changed. Please start the request again."
                 )
                 self.conversation_log.record_reply_once(
                     str(notification_id),
