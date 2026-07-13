@@ -18,8 +18,8 @@ import { Button } from '@/components/ui/button';
 import { BackpressureFlow } from '@/components/workflows/BackpressureFlow';
 import {
   BackpressureTimeline,
-  backpressureTimelineReducer,
 } from '@/components/workflows/BackpressureTimeline';
+import { backpressureTimelineReducer } from '@/lib/backpressureTimeline';
 import {
   buildBackpressureFlow,
   parseBackpressureSnapshot,
@@ -55,11 +55,17 @@ export function BackpressureSystem() {
 
   useEffect(() => {
     const controller = new AbortController();
-    void refresh(controller.signal);
-    const poll = window.setInterval(() => void refresh(controller.signal), 400);
+    let active = true;
+    let timer: number | undefined;
+    const poll = async () => {
+      await refresh(controller.signal);
+      if (active) timer = window.setTimeout(() => void poll(), 400);
+    };
+    void poll();
     return () => {
+      active = false;
       controller.abort();
-      window.clearInterval(poll);
+      if (timer !== undefined) window.clearTimeout(timer);
     };
   }, [refresh]);
 
@@ -157,6 +163,13 @@ export function BackpressureSystem() {
 
         {snapshot ? (
           <>
+            {snapshot.scope.truncated && (
+              <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-950">
+                Showing the latest {snapshot.scope.visibleWorkflows} of{' '}
+                {snapshot.scope.totalWorkflows} demo Workflows. Counts, tokens, and the pressure
+                chart are scoped to this bounded window.
+              </div>
+            )}
             <Metrics snapshot={snapshot} />
             <BackpressureTimeline
               timeline={timeline}
@@ -202,7 +215,7 @@ function Metrics({ snapshot }: { snapshot: BackpressureSnapshot }) {
   const { counts } = snapshot;
   const metrics = [
     {
-      label: 'Queue pressure',
+      label: snapshot.scope.truncated ? 'Visible queue pressure' : 'Queue pressure',
       value: `${counts.queued}:${snapshot.worker.configuredJobConcurrency}`,
       detail: `${counts.waiting} dependency-blocked, configured capacity only`,
       icon: GaugeIcon,

@@ -2,18 +2,20 @@
 
 from __future__ import annotations
 
-from functools import lru_cache
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from server.config import Settings, get_settings
-from server.services.backpressure_demo import BackpressureDemoService, BackpressureSnapshot
+from server.services import (
+    BackpressureDemoService,
+    BackpressureSnapshot,
+    get_backpressure_demo_service,
+)
 
 router = APIRouter(prefix="/demo/backpressure", tags=["demo"])
 SettingsDependency = Annotated[Settings, Depends(get_settings)]
-_services: set[BackpressureDemoService] = set()
 
 
 class EnqueueDemoJobsRequest(BaseModel):
@@ -40,7 +42,7 @@ def _service(settings: Settings) -> BackpressureDemoService:
             detail="The backpressure demo requires Workflow mode",
         )
     try:
-        return _cached_service(
+        return get_backpressure_demo_service(
             settings.database_url or "",
             settings.workflow_broker_party_id or "",
             settings.workflow_organization_party_id or "",
@@ -52,35 +54,6 @@ def _service(settings: Settings) -> BackpressureDemoService:
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=str(exc),
         ) from exc
-
-
-@lru_cache(maxsize=4)
-def _cached_service(
-    database_url: str,
-    broker_party_id: str,
-    organization_party_id: str,
-    broker_email: str,
-    policyholder_email: str,
-) -> BackpressureDemoService:
-    service = BackpressureDemoService(
-        Settings(
-            database_url=database_url,
-            workflow_broker_party_id=broker_party_id,
-            workflow_organization_party_id=organization_party_id,
-            demo_broker_email=broker_email,
-            demo_policyholder_email=policyholder_email,
-            interaction_mode="workflow",
-        )
-    )
-    _services.add(service)
-    return service
-
-
-async def dispose_backpressure_demo_services() -> None:
-    for service in tuple(_services):
-        await service.dispose()
-    _services.clear()
-    _cached_service.cache_clear()
 
 
 @router.get("", response_model=BackpressureSnapshot)
@@ -98,4 +71,4 @@ async def enqueue_demo_jobs(
     return await _service(settings).enqueue_jobs(payload.job_count)
 
 
-__all__ = ["dispose_backpressure_demo_services", "router"]
+__all__ = ["router"]

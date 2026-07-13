@@ -9,51 +9,8 @@ import {
 } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
+import type { BackpressureTimelineState } from '@/lib/backpressureTimeline';
 import type { BackpressureSnapshot } from '@/lib/backpressureDemo';
-
-const maxTimelineFrames = 450;
-
-export interface BackpressureTimelineState {
-  frames: ReadonlyArray<BackpressureSnapshot>;
-  cursor: number | null;
-}
-
-export type BackpressureTimelineAction =
-  | { type: 'capture'; snapshot: BackpressureSnapshot }
-  | { type: 'pause' }
-  | { type: 'previous' }
-  | { type: 'next' }
-  | { type: 'seek'; cursor: number }
-  | { type: 'live' };
-
-export function backpressureTimelineReducer(
-  state: BackpressureTimelineState,
-  action: BackpressureTimelineAction,
-): BackpressureTimelineState {
-  const lastIndex = state.frames.length - 1;
-  if (action.type === 'capture') {
-    const overflow = Math.max(0, state.frames.length + 1 - maxTimelineFrames);
-    const frames = [...state.frames, action.snapshot].slice(overflow);
-    const cursor = state.cursor === null ? null : Math.max(0, state.cursor - overflow);
-    return { frames, cursor };
-  }
-  if (action.type === 'live') return { ...state, cursor: null };
-  if (action.type === 'pause') {
-    return lastIndex >= 0 ? { ...state, cursor: lastIndex } : state;
-  }
-  if (action.type === 'previous') {
-    const cursor = state.cursor ?? lastIndex;
-    return cursor >= 0 ? { ...state, cursor: Math.max(0, cursor - 1) } : state;
-  }
-  if (action.type === 'next') {
-    return state.cursor === null
-      ? state
-      : { ...state, cursor: Math.min(lastIndex, state.cursor + 1) };
-  }
-  return lastIndex >= 0
-    ? { ...state, cursor: Math.max(0, Math.min(lastIndex, action.cursor)) }
-    : state;
-}
 
 export function BackpressureTimeline({
   timeline,

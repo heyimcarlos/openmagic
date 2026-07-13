@@ -68,6 +68,8 @@ class WorkflowOperationalEvent:
 class WorkflowOperationalSnapshot:
     captured_at: datetime
     workflow_count: int
+    total_workflow_count: int
+    workflow_limit: int
     jobs: tuple[WorkflowOperationalJob, ...]
     job_runs: tuple[WorkflowOperationalJobRun, ...]
     notifications: tuple[WorkflowOperationalNotification, ...]
@@ -98,6 +100,12 @@ class WorkflowOperationsProjection:
             .scalar_subquery()
         )
         async with self._database.read_transaction() as session:
+            total_workflow_count = await session.scalar(
+                sa.select(sa.func.count(sa.distinct(WorkflowEventRow.workflow_id))).where(
+                    WorkflowEventRow.event_type == "workflow_jobs_proposed",
+                    WorkflowEventRow.cause_id.startswith(cause_prefix),
+                )
+            )
             workflows = (
                 await session.scalars(
                     sa.select(WorkflowRow.id).where(WorkflowRow.id.in_(workflow_ids))
@@ -141,6 +149,8 @@ class WorkflowOperationsProjection:
         return WorkflowOperationalSnapshot(
             captured_at=datetime.now(UTC),
             workflow_count=len(workflows),
+            total_workflow_count=total_workflow_count or 0,
+            workflow_limit=workflow_limit,
             jobs=tuple(
                 WorkflowOperationalJob(
                     id=job.id,

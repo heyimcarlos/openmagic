@@ -39,6 +39,9 @@ async def test_job_burst_uses_atomic_workflow_commands_and_projects_queue_pressu
     snapshot = await service.enqueue_jobs(10)
 
     assert snapshot.counts.workflows == 5
+    assert snapshot.scope.visible_workflows == 5
+    assert snapshot.scope.total_workflows == 5
+    assert snapshot.scope.truncated is False
     assert snapshot.counts.jobs == 10
     assert snapshot.counts.queued == 5
     assert snapshot.counts.waiting == 5
@@ -132,6 +135,10 @@ async def test_snapshot_bounds_repeated_demo_history(
 
     assert snapshot.counts.workflows == 50
     assert snapshot.counts.jobs == 100
+    assert snapshot.scope.visible_workflows == 50
+    assert snapshot.scope.total_workflows == 60
+    assert snapshot.scope.workflow_limit == 50
+    assert snapshot.scope.truncated is True
     assert len(snapshot.jobs) == 100
     assert len(snapshot.activity) <= 80
 

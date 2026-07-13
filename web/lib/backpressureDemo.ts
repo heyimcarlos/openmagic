@@ -23,6 +23,13 @@ interface WorkerView {
   liveness: 'not_persisted';
 }
 
+interface BackpressureScope {
+  visibleWorkflows: number;
+  totalWorkflows: number;
+  workflowLimit: number;
+  truncated: boolean;
+}
+
 export interface BackpressureCounts {
   workflows: number;
   jobs: number;
@@ -90,6 +97,7 @@ export interface BackpressureActivity {
 export interface BackpressureSnapshot {
   capturedAt: string;
   worker: WorkerView;
+  scope: BackpressureScope;
   counts: BackpressureCounts;
   jobs: ReadonlyArray<BackpressureJob>;
   runs: ReadonlyArray<BackpressureRun>;
@@ -150,6 +158,18 @@ function parseWorker(value: unknown): WorkerView | undefined {
   return configuredJobConcurrency !== undefined &&
     configuredNotificationConcurrency !== undefined && claimPolicy && liveness
     ? { configuredJobConcurrency, configuredNotificationConcurrency, claimPolicy, liveness }
+    : undefined;
+}
+
+function parseScope(value: unknown): BackpressureScope | undefined {
+  if (!isRecord(value)) return undefined;
+  const visibleWorkflows = count(value.visible_workflows);
+  const totalWorkflows = count(value.total_workflows);
+  const workflowLimit = count(value.workflow_limit);
+  const truncated = typeof value.truncated === 'boolean' ? value.truncated : undefined;
+  return visibleWorkflows !== undefined && totalWorkflows !== undefined &&
+    workflowLimit !== undefined && truncated !== undefined
+    ? { visibleWorkflows, totalWorkflows, workflowLimit, truncated }
     : undefined;
 }
 
@@ -267,17 +287,19 @@ export function parseBackpressureSnapshot(value: unknown): BackpressureSnapshot 
     !Array.isArray(value.notifications) || !Array.isArray(value.activity)) return undefined;
   const capturedAt = date(value.captured_at);
   const worker = parseWorker(value.worker);
+  const scope = parseScope(value.scope);
   const counts = parseCounts(value.counts);
   const jobs = value.jobs.map(parseJob);
   const runs = value.runs.map(parseRun);
   const notifications = value.notifications.map(parseNotification);
   const activity = value.activity.map(parseActivity);
-  if (!capturedAt || !worker || !counts || jobs.some((item) => !item) ||
+  if (!capturedAt || !worker || !scope || !counts || jobs.some((item) => !item) ||
     runs.some((item) => !item) || notifications.some((item) => !item) ||
     activity.some((item) => !item)) return undefined;
   return {
     capturedAt,
     worker,
+    scope,
     counts,
     jobs: jobs as BackpressureJob[],
     runs: runs as BackpressureRun[],

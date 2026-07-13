@@ -10,8 +10,8 @@ from fastapi.responses import JSONResponse
 from .config import get_settings
 from .logging_config import configure_logging, logger
 from .routes import api_router
-from .routes.demo import dispose_backpressure_demo_services
 from .services import (
+    dispose_backpressure_demo_services,
     get_important_email_watcher,
     get_trigger_scheduler,
     get_workflow_runtime_service,

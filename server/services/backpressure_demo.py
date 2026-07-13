@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections import Counter
 from datetime import datetime, timedelta
+from functools import lru_cache
 from typing import Literal, cast
 from uuid import UUID, uuid4
 
@@ -66,6 +67,13 @@ class BackpressureCounts(DemoModel):
     oldest_queued_seconds: int
 
 
+class BackpressureScope(DemoModel):
+    visible_workflows: int
+    total_workflows: int
+    workflow_limit: int
+    truncated: bool
+
+
 class BackpressureJobView(DemoModel):
     id: UUID
     workflow_id: UUID
@@ -113,6 +121,7 @@ class BackpressureActivityView(DemoModel):
 class BackpressureSnapshot(DemoModel):
     captured_at: datetime
     worker: BackpressureWorkerView = Field(default_factory=BackpressureWorkerView)
+    scope: BackpressureScope
     counts: BackpressureCounts
     jobs: tuple[BackpressureJobView, ...]
     runs: tuple[BackpressureRunView, ...]
@@ -245,6 +254,12 @@ class BackpressureDemoService:
         )
         return BackpressureSnapshot(
             captured_at=now,
+            scope=BackpressureScope(
+                visible_workflows=projected.workflow_count,
+                total_workflows=projected.total_workflow_count,
+                workflow_limit=projected.workflow_limit,
+                truncated=projected.total_workflow_count > projected.workflow_count,
+            ),
             counts=BackpressureCounts(
                 workflows=projected.workflow_count,
                 jobs=len(jobs),
@@ -331,7 +346,45 @@ class BackpressureDemoService:
         return "Wait for exact approval, then send the frozen Draft Revision"
 
 
+_services: set[BackpressureDemoService] = set()
+
+
+@lru_cache(maxsize=4)
+def get_backpressure_demo_service(
+    database_url: str,
+    broker_party_id: str,
+    organization_party_id: str,
+    broker_email: str,
+    policyholder_email: str,
+) -> BackpressureDemoService:
+    """Return one cached demo service for a complete Workflow configuration."""
+
+    service = BackpressureDemoService(
+        Settings(
+            database_url=database_url,
+            workflow_broker_party_id=broker_party_id,
+            workflow_organization_party_id=organization_party_id,
+            demo_broker_email=broker_email,
+            demo_policyholder_email=policyholder_email,
+            interaction_mode="workflow",
+        )
+    )
+    _services.add(service)
+    return service
+
+
+async def dispose_backpressure_demo_services() -> None:
+    """Dispose every cached demo database engine during application shutdown."""
+
+    for service in tuple(_services):
+        await service.dispose()
+    _services.clear()
+    get_backpressure_demo_service.cache_clear()
+
+
 __all__ = [
     "BackpressureDemoService",
     "BackpressureSnapshot",
+    "dispose_backpressure_demo_services",
+    "get_backpressure_demo_service",
 ]

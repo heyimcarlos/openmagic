@@ -11,6 +11,12 @@ const payload = {
     claim_policy: 'one eligible Job per tick',
     liveness: 'not_persisted',
   },
+  scope: {
+    visible_workflows: 3,
+    total_workflows: 3,
+    workflow_limit: 50,
+    truncated: false,
+  },
   counts: {
     workflows: 3,
     jobs: 6,
@@ -132,6 +138,12 @@ const payload = {
 test('parses the sanitized live projection and derives each real pipeline stage', () => {
   const snapshot = parseBackpressureSnapshot(payload);
   assert.ok(snapshot);
+  assert.deepEqual(snapshot.scope, {
+    visibleWorkflows: 3,
+    totalWorkflows: 3,
+    workflowLimit: 50,
+    truncated: false,
+  });
 
   const flow = buildBackpressureFlow(snapshot);
 
