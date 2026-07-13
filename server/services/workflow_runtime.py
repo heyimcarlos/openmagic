@@ -19,6 +19,7 @@ from server.agents.interaction_agent.workflow_notifications import (
 )
 from server.config import Settings, get_settings
 from server.logging_config import logger
+from server.services.conversation import get_conversation_session
 from server.workflows import (
     COMPOSIO_GMAIL_TOOLKIT_VERSION,
     VERIFICATION_DELIVERY_ATTENTION_NOTIFICATION_KIND,
@@ -37,7 +38,9 @@ from server.workflows import (
     WorkflowRetrieval,
     WorkflowWorker,
     default_workflow_registry,
+    find_sms_party_by_id,
     resolve_verified_mailbox,
+    sms_interaction_id,
 )
 
 
@@ -73,6 +76,13 @@ class WorkflowRuntimeService:
             logger.warning("Workflow runtime disabled because Organization identity is incomplete")
             return
         database = WorkflowDatabase(self._settings.database_url)
+        broker_party_id = UUID(self._settings.workflow_broker_party_id)
+        broker = await find_sms_party_by_id(database, broker_party_id)
+        if broker is None:
+            logger.warning("Workflow runtime disabled because Broker SMS identity is incomplete")
+            await database.dispose()
+            return
+        conversation = get_conversation_session(sms_interaction_id(broker.phone)).log
         control_plane = WorkflowControlPlane(
             database=database,
             registry=default_workflow_registry(),
@@ -130,10 +140,12 @@ class WorkflowRuntimeService:
                 control_plane=control_plane,
                 retrieval=retrieval,
                 presenter=ConversationApprovalPresenter(
-                    UUID(self._settings.workflow_broker_party_id)
+                    broker_party_id,
+                    conversation=conversation,
                 ),
                 settings=self._settings,
                 organization_party_id=UUID(self._settings.workflow_organization_party_id),
+                conversation=conversation,
             ),
             worker_id=f"notification-worker:{uuid4()}",
             notification_kinds=("approval_required", "send_confirmed"),

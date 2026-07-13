@@ -258,6 +258,9 @@ class InteractionAgentRuntime:
                     response=recovery,
                     error=str(error_code),
                 )
+            # The exact stored operation consumed the challenge. Follow-on work uses the
+            # still-current verification session and must not replay a different fingerprint.
+            tool_context.verification_challenge_id = None
             original_request_reader = getattr(
                 self.conversation_log,
                 "user_message_for_cause",
