@@ -288,6 +288,7 @@ async def test_direct_approval_uses_ui_cause_and_current_verification_session(mo
     workflow_id = UUID("40000000-0000-0000-0000-000000000001")
     job_id = UUID("50000000-0000-0000-0000-000000000001")
     draft_id = UUID("50000000-0000-0000-0000-000000000002")
+    revised_job_id = UUID("50000000-0000-0000-0000-000000000003")
     recorded = []
     invoked = []
 
@@ -305,7 +306,10 @@ async def test_direct_approval_uses_ui_cause_and_current_verification_session(mo
             invoked.append((name, arguments, context))
             return SimpleNamespace(
                 success=True,
-                payload={"status": "queued", "job_id": str(job_id)},
+                payload={
+                    "status": "queued",
+                    "job_id": str(revised_job_id if name == "revise_and_approve_email" else job_id),
+                },
             )
 
     monkeypatch.setattr(
@@ -357,6 +361,31 @@ async def test_direct_approval_uses_ui_cause_and_current_verification_session(mo
     assert invoked[0][0] == "approve_job"
     assert invoked[0][1]["expected_draft_revision_id"] == str(draft_id)
     assert invoked[0][2] is context
+
+    revised = await chat_route.approve_exact_email(
+        ChatApprovalCommand(
+            sender_phone="+14165550101",
+            cause_id="ui-approval-revision-1",
+            workflow_id=workflow_id,
+            job_id=job_id,
+            expected_draft_revision_id=draft_id,
+            revised_email={
+                "to": ["john@example.com"],
+                "subject": "Updated renewal",
+                "body": "Dear John, the renewal email has been updated.",
+            },
+        )
+    )
+
+    assert revised.job_id == revised_job_id
+    assert invoked[1][0] == "revise_and_approve_email"
+    assert invoked[1][1]["email"] == {
+        "to": ["john@example.com"],
+        "cc": [],
+        "bcc": [],
+        "subject": "Updated renewal",
+        "body": "Dear John, the renewal email has been updated.",
+    }
 
 
 async def test_direct_approval_hides_stale_domain_details(monkeypatch):

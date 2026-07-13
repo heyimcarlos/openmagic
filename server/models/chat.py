@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Annotated, Any, Literal, TypeAlias
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, model_validator
 
 AgentActivityStatus = Literal["succeeded", "running", "failed"]
 WorkflowJobStatus = Literal["waiting", "queued", "running", "succeeded", "failed", "cancelled"]
@@ -164,6 +164,16 @@ class ChatLatestTelemetryResponse(BaseModel):
     telemetry: ChatTurnTelemetry | None = None
 
 
+class ChatRevisedEmail(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    to: tuple[EmailStr, ...] = Field(min_length=1)
+    cc: tuple[EmailStr, ...] = ()
+    bcc: tuple[EmailStr, ...] = ()
+    subject: str = Field(min_length=1, max_length=998)
+    body: str = Field(min_length=1, max_length=100_000)
+
+
 class ChatApprovalCommand(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -172,6 +182,7 @@ class ChatApprovalCommand(BaseModel):
     workflow_id: UUID
     job_id: UUID
     expected_draft_revision_id: UUID
+    revised_email: ChatRevisedEmail | None = None
 
 
 class ChatApprovalResponse(BaseModel):

@@ -11,10 +11,16 @@ from server.services.conversation import get_conversation_log
 from server.workflows import (
     ApproveWorkflowJobCommand,
     AuthorizeProtectedOperationCommand,
+    ProposeWorkflowArguments,
+    ProposeWorkflowCommand,
     ProposeWorkflowWorkArguments,
     ProposeWorkflowWorkCommand,
     ProtectedOperation,
     RecordInteractionCauseCommand,
+    ReviseAndApproveWorkflowEmailCommand,
+    RevisedEmailContent,
+    ReviseWorkflowWorkArguments,
+    ReviseWorkflowWorkCommand,
     StepUpVerification,
     WorkflowCommandContext,
     WorkflowControlPlane,
@@ -38,6 +44,13 @@ class _PacketArguments(_ToolArguments):
 class _ApprovalArguments(_ToolArguments):
     job_id: UUID
     expected_draft_revision_id: UUID
+
+
+class _ReviseAndApproveArguments(_ToolArguments):
+    workflow_id: UUID
+    job_id: UUID
+    expected_draft_revision_id: UUID
+    email: RevisedEmailContent
 
 
 class _MessageArguments(_ToolArguments):
@@ -68,12 +81,34 @@ WORKFLOW_TOOL_SCHEMAS: tuple[dict[str, Any], ...] = (
     {
         "type": "function",
         "function": {
+            "name": "propose_workflow",
+            "description": (
+                "Create one registered Workflow and its trusted initial Job graph from "
+                "an authorized source Workflow Packet."
+            ),
+            "parameters": ProposeWorkflowArguments.model_json_schema(),
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "propose_workflow_work",
             "description": (
                 "Propose one typed business operation for a selected Workflow. "
                 "The application owns its Job graph and execution policy."
             ),
             "parameters": ProposeWorkflowWorkArguments.model_json_schema(),
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "revise_workflow_work",
+            "description": (
+                "Replace safely cancelable work with one immutable registered revision. "
+                "The revision still requires explicit approval."
+            ),
+            "parameters": ReviseWorkflowWorkArguments.model_json_schema(),
         },
     },
     {
@@ -240,6 +275,54 @@ class WorkflowInteractionToolbox:
                     if verification is not None:
                         return verification
                 return await self._propose(request, context)
+            if name == "propose_workflow":
+                request = ProposeWorkflowArguments.model_validate(arguments)
+                packet = context.loaded_packet
+                resolved_workflow_id = context.trusted_workflow_id or context.resolved_workflow_id
+                has_selected_packet = (
+                    packet is not None
+                    and packet.workflow.workflow_id == request.source_workflow_id
+                    and resolved_workflow_id == request.source_workflow_id
+                )
+                is_verified_resume = (
+                    context.verification_challenge_id is not None
+                    and context.trusted_workflow_id == request.source_workflow_id
+                )
+                if not has_selected_packet and not is_verified_resume:
+                    return ToolResult(
+                        success=False,
+                        payload={"code": "workflow_packet_required"},
+                    )
+                verification = await self._gate_verification(
+                    context,
+                    workflow_id=request.source_workflow_id,
+                    purpose="sensitive_write",
+                    operation=ProtectedOperation(
+                        name="propose_workflow",
+                        arguments=request.model_dump(mode="json"),
+                    ),
+                )
+                if verification is not None:
+                    return verification
+                trace = await self._control_plane.propose_workflow(
+                    ProposeWorkflowCommand(
+                        context=WorkflowCommandContext(
+                            actor_party_id=context.actor_party_id,
+                            organization_party_id=context.organization_party_id,
+                            cause_type=context.cause_type,
+                            cause_id=context.cause_id,
+                        ),
+                        **request.model_dump(),
+                    )
+                )
+                return ToolResult(
+                    success=True,
+                    payload={
+                        "workflow_id": str(trace.workflow.id),
+                        "job_ids": [str(job.id) for job in trace.jobs],
+                        "status": trace.workflow.status,
+                    },
+                )
             if name == "approve_job":
                 request = _ApprovalArguments.model_validate(arguments)
                 packet = context.loaded_packet
@@ -305,6 +388,98 @@ class WorkflowInteractionToolbox:
                     success=True,
                     payload={
                         "approval_grant_id": str(grant.approval_grant_id),
+                        "job_id": str(grant.job_id),
+                        "status": "queued",
+                    },
+                )
+            if name == "revise_workflow_work":
+                request = ReviseWorkflowWorkArguments.model_validate(arguments)
+                packet = context.loaded_packet
+                resolved_workflow_id = context.trusted_workflow_id or context.resolved_workflow_id
+                has_selected_packet = (
+                    packet is not None
+                    and packet.workflow.workflow_id == request.workflow_id
+                    and resolved_workflow_id == request.workflow_id
+                )
+                is_verified_resume = (
+                    context.verification_challenge_id is not None
+                    and context.trusted_workflow_id == request.workflow_id
+                )
+                if not has_selected_packet and not is_verified_resume:
+                    return ToolResult(
+                        success=False,
+                        payload={"code": "workflow_packet_required"},
+                    )
+                verification = await self._gate_verification(
+                    context,
+                    workflow_id=request.workflow_id,
+                    purpose="sensitive_write",
+                    operation=ProtectedOperation(
+                        name="revise_workflow_work",
+                        arguments=request.model_dump(mode="json"),
+                    ),
+                )
+                if verification is not None:
+                    return verification
+                revision = await self._control_plane.revise_work(
+                    ReviseWorkflowWorkCommand(
+                        context=WorkflowCommandContext(
+                            actor_party_id=context.actor_party_id,
+                            organization_party_id=context.organization_party_id,
+                            cause_type=context.cause_type,
+                            cause_id=context.cause_id,
+                        ),
+                        workflow_id=request.workflow_id,
+                        operation=request.operation,
+                    )
+                )
+                return ToolResult(
+                    success=True,
+                    payload={
+                        "workflow_id": str(revision.workflow_id),
+                        "draft_revision_id": str(revision.draft_job_id),
+                        "job_id": str(revision.send_job_id),
+                        "status": "waiting_for_approval",
+                    },
+                )
+            if name == "revise_and_approve_email":
+                request = _ReviseAndApproveArguments.model_validate(arguments)
+                workflow_id = context.trusted_workflow_id or request.workflow_id
+                if workflow_id != request.workflow_id:
+                    return ToolResult(
+                        success=False,
+                        payload={"code": "workflow_packet_required"},
+                    )
+                verification = await self._gate_verification(
+                    context,
+                    workflow_id=request.workflow_id,
+                    purpose="sensitive_write",
+                    operation=ProtectedOperation(
+                        name="revise_and_approve_email",
+                        arguments=request.model_dump(mode="json"),
+                    ),
+                )
+                if verification is not None:
+                    return verification
+                grant = await self._control_plane.revise_and_approve_email(
+                    ReviseAndApproveWorkflowEmailCommand(
+                        context=WorkflowCommandContext(
+                            actor_party_id=context.actor_party_id,
+                            organization_party_id=context.organization_party_id,
+                            cause_type=context.cause_type,
+                            cause_id=context.cause_id,
+                        ),
+                        workflow_id=request.workflow_id,
+                        job_id=request.job_id,
+                        expected_draft_revision_id=request.expected_draft_revision_id,
+                        email=request.email,
+                    )
+                )
+                return ToolResult(
+                    success=True,
+                    payload={
+                        "approval_grant_id": str(grant.approval_grant_id),
+                        "draft_revision_id": str(grant.draft_job_id),
                         "job_id": str(grant.job_id),
                         "status": "queued",
                     },

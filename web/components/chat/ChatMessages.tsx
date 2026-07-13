@@ -5,6 +5,7 @@ import { Markdown } from './Markdown';
 import type { ChatBubble } from './types';
 import { WorkflowTelemetry } from './workflow-telemetry/WorkflowTelemetry';
 import { ApprovalRequestCard } from '@/components/workflows/ApprovalRequestCard';
+import type { ApprovalEmail } from '@/components/workflows/ApprovalRequestCard';
 import type { ApprovalRequest } from '@/lib/chatTelemetry';
 import { Bubble, BubbleContent } from '@/components/ui/bubble';
 import { Marker, MarkerContent, MarkerIcon } from '@/components/ui/marker';
@@ -21,15 +22,13 @@ import {
 interface ChatMessagesProps {
   messages: ReadonlyArray<ChatBubble>;
   isWaitingForResponse: boolean;
-  onApprove: (request: ApprovalRequest) => Promise<void>;
-  onRequestChanges: (request: ApprovalRequest) => void;
+  onApprove: (request: ApprovalRequest, revision?: ApprovalEmail) => Promise<void>;
 }
 
 export function ChatMessages({
   messages,
   isWaitingForResponse,
   onApprove,
-  onRequestChanges,
 }: ChatMessagesProps) {
   return (
     <MessageScrollerProvider autoScroll defaultScrollPosition="end">
@@ -43,7 +42,6 @@ export function ChatMessages({
                 key={message.id}
                 message={message}
                 onApprove={onApprove}
-                onRequestChanges={onRequestChanges}
               />
             ))}
 
@@ -59,22 +57,20 @@ export function ChatMessages({
 function ChatMessage({
   message,
   onApprove,
-  onRequestChanges,
 }: {
   message: ChatBubble;
-  onApprove: (request: ApprovalRequest) => Promise<void>;
-  onRequestChanges: (request: ApprovalRequest) => void;
+  onApprove: (request: ApprovalRequest, revision?: ApprovalEmail) => Promise<void>;
 }) {
   const [isApproving, setIsApproving] = useState(false);
   const isUser = message.role === 'user';
   const isDraft = message.role === 'draft';
   const telemetry = message.role === 'assistant' ? message.telemetry : undefined;
   const approval = telemetry?.approvalRequest;
-  const approve = async () => {
+  const approve = async (revision?: ApprovalEmail) => {
     if (!approval) return;
     setIsApproving(true);
     try {
-      await onApprove(approval);
+      await onApprove(approval, revision);
     } finally {
       setIsApproving(false);
     }
@@ -107,8 +103,7 @@ function ChatMessage({
                         subject: approval.subject,
                         body: approval.body,
                       }}
-                      onApprove={() => void approve()}
-                      onRequestChanges={() => onRequestChanges(approval)}
+                      onApprove={(revision) => void approve(revision)}
                       disabled={isApproving}
                       statusMessage={isApproving ? 'Recording your approval...' : undefined}
                     />

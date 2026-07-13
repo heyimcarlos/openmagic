@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from types import SimpleNamespace
 
 from server.services.conversation import WorkflowTelemetryProjector
 from server.tests.workflows.factories import BROKER_ID as PROTOCOL_BROKER_ID
@@ -28,6 +29,12 @@ from server.workflows import (
     default_workflow_registry,
 )
 from server.workflows.models import WorkflowEventRow
+
+
+def test_cancelled_send_has_no_available_approval_checkpoint():
+    job = SimpleNamespace(status="cancelled", waiting_reasons=(), approval=None)
+
+    assert WorkflowTelemetryProjector._approval_status(job) == "unavailable"
 
 
 async def test_projects_sanitized_activity_and_current_authorized_workflow_state(

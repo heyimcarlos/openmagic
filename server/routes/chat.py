@@ -216,16 +216,27 @@ async def approve_exact_email(payload: ChatApprovalCommand) -> ChatApprovalRespo
         toolbox = get_workflow_interaction_toolbox(settings)
         await toolbox.record_interaction_cause(
             context,
-            f"Approve exact email for Job {payload.job_id}",
+            (
+                f"Revise and approve email for Job {payload.job_id}"
+                if payload.revised_email is not None
+                else f"Approve exact email for Job {payload.job_id}"
+            ),
         )
-        result = await toolbox.invoke(
-            "approve_job",
-            {
+        if payload.revised_email is None:
+            tool_name = "approve_job"
+            arguments = {
                 "job_id": str(payload.job_id),
                 "expected_draft_revision_id": str(payload.expected_draft_revision_id),
-            },
-            context,
-        )
+            }
+        else:
+            tool_name = "revise_and_approve_email"
+            arguments = {
+                "workflow_id": str(payload.workflow_id),
+                "job_id": str(payload.job_id),
+                "expected_draft_revision_id": str(payload.expected_draft_revision_id),
+                "email": payload.revised_email.model_dump(mode="json"),
+            }
+        result = await toolbox.invoke(tool_name, arguments, context)
         code = result.payload.get("code") if isinstance(result.payload, dict) else None
         if not result.success and code in {"verification_required", "verification_in_progress"}:
             return ChatApprovalResponse(
@@ -244,7 +255,11 @@ async def approve_exact_email(payload: ChatApprovalCommand) -> ChatApprovalRespo
                     "the latest email."
                 ),
             )
-        return ChatApprovalResponse(status="approved", job_id=payload.job_id)
+        approved_job_id = result.payload.get("job_id")
+        return ChatApprovalResponse(
+            status="approved",
+            job_id=(UUID(approved_job_id) if isinstance(approved_job_id, str) else payload.job_id),
+        )
     except HTTPException:
         raise
     except Exception as exc:
