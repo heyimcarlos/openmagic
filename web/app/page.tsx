@@ -6,10 +6,13 @@ import { ChatHeader } from '@/components/chat/ChatHeader';
 import { ChatInput } from '@/components/chat/ChatInput';
 import { ChatMessages } from '@/components/chat/ChatMessages';
 import { ErrorBanner } from '@/components/chat/ErrorBanner';
-import { useAutoScroll } from '@/components/chat/useAutoScroll';
 import type { ChatBubble } from '@/components/chat/types';
 
 const POLL_INTERVAL_MS = 1500;
+const RESPONSE_POLL_INTERVAL_MS = 1000;
+const RESPONSE_POLL_ATTEMPTS = 30;
+
+const wait = (milliseconds: number) => new Promise((resolve) => window.setTimeout(resolve, milliseconds));
 
 const formatEscapeCharacters = (text: string): string => {
   return text
@@ -43,10 +46,6 @@ export default function Page() {
   const [messages, setMessages] = useState<ChatBubble[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [isWaitingForResponse, setIsWaitingForResponse] = useState(false);
-  const { scrollContainerRef, handleScroll } = useAutoScroll({
-    items: messages,
-    isWaiting: isWaitingForResponse,
-  });
   const openSettings = useCallback(() => setOpen(true), [setOpen]);
   const closeSettings = useCallback(() => setOpen(false), [setOpen]);
 
@@ -97,35 +96,34 @@ export default function Page() {
 
 
   useEffect(() => {
+    if (isWaitingForResponse) return;
+
     const intervalId = window.setInterval(() => {
       void loadHistory();
     }, POLL_INTERVAL_MS);
 
     return () => window.clearInterval(intervalId);
-  }, [loadHistory]);
+  }, [isWaitingForResponse, loadHistory]);
 
-  const canSubmit = input.trim().length > 0;
-  const inputPlaceholder = 'Type a message…';
+  const canSubmit = input.trim().length > 0 && !isWaitingForResponse;
+  const inputPlaceholder = isWaitingForResponse ? 'Waiting for OpenMagic...' : 'Message OpenMagic';
 
   const sendMessage = useCallback(
     async (text: string) => {
       const trimmed = text.trim();
       if (!trimmed) return;
 
+      const assistantCountBeforeSend = messages.filter((message) => message.role === 'assistant').length;
       setError(null);
       setIsWaitingForResponse(true);
 
-      // Optimistically add the user message immediately
       const sourceId = crypto.randomUUID();
       const userMessage: ChatBubble = {
         id: `user-${Date.now()}`,
         role: 'user',
         text: formatEscapeCharacters(trimmed),
       };
-      setMessages(prev => {
-        const newMessages = [...prev, userMessage];
-        return newMessages;
-      });
+      setMessages((previous) => [...previous, userMessage]);
 
       try {
         const res = await fetch('/api/chat', {
@@ -143,55 +141,38 @@ export default function Page() {
       } catch (err: any) {
         console.error('Failed to send message', err);
         setError(err?.message || 'Failed to send message');
-        // Remove the optimistic message on error
-        setMessages(prev => prev.filter(msg => msg.id !== userMessage.id));
+        setMessages((previous) => previous.filter((message) => message.id !== userMessage.id));
         setIsWaitingForResponse(false);
         throw err instanceof Error ? err : new Error('Failed to send message');
-      } finally {
-        // Poll until we get the assistant's response
-        let pollAttempts = 0;
-        const maxPollAttempts = 30; // Max 30 attempts (30 seconds)
-        
-        const pollForAssistantResponse = async () => {
-          pollAttempts++;
-          
-          try {
-            const res = await fetch('/api/chat/history', { cache: 'no-store' });
-            if (res.ok) {
-              const data = await res.json();
-              const currentMessages = toBubbles(data);
-              
-              // Check if the last message is from assistant and contains our user message
-              const lastMessage = currentMessages[currentMessages.length - 1];
-              const hasUserMessage = currentMessages.some(msg => msg.text === trimmed && msg.role === 'user');
-              const hasAssistantResponse = lastMessage?.role === 'assistant' && hasUserMessage;
-              
-              if (hasAssistantResponse) {
-                // We got the assistant response, update messages and stop loading
-                setMessages(currentMessages);
-                setIsWaitingForResponse(false);
-                return;
-              }
-            }
-          } catch (err) {
-            console.error('Error polling for response:', err);
-          }
-          
-          // Continue polling if we haven't exceeded max attempts
-          if (pollAttempts < maxPollAttempts) {
-            setTimeout(pollForAssistantResponse, 1000); // Poll every second
-          } else {
-            // Timeout - stop loading and update messages anyway
-            setIsWaitingForResponse(false);
-            await loadHistory();
-          }
-        };
-        
-        // Start polling after a brief delay
-        setTimeout(pollForAssistantResponse, 1000);
       }
+
+      for (let attempt = 0; attempt < RESPONSE_POLL_ATTEMPTS; attempt += 1) {
+        await wait(RESPONSE_POLL_INTERVAL_MS);
+
+        try {
+          const response = await fetch('/api/chat/history', { cache: 'no-store' });
+          if (!response.ok) continue;
+
+          const currentMessages = toBubbles(await response.json());
+          const assistantCount = currentMessages.filter((message) => message.role === 'assistant').length;
+          const submittedMessageIsPresent = currentMessages.some(
+            (message) => message.role === 'user' && message.text === trimmed,
+          );
+
+          if (submittedMessageIsPresent && assistantCount > assistantCountBeforeSend) {
+            setMessages(currentMessages);
+            setIsWaitingForResponse(false);
+            return;
+          }
+        } catch (err) {
+          console.error('Error polling for response:', err);
+        }
+      }
+
+      setIsWaitingForResponse(false);
+      await loadHistory();
     },
-    [loadHistory],
+    [loadHistory, messages],
   );
 
   const handleClearHistory = useCallback(async () => {
@@ -229,19 +210,17 @@ export default function Page() {
   const clearError = useCallback(() => setError(null), [setError]);
 
   return (
-    <main className="chat-bg min-h-screen p-4 sm:p-6">
-      <div className="chat-wrap flex flex-col">
+    <main className="min-h-screen bg-[radial-gradient(circle_at_top,_color-mix(in_oklch,var(--primary)_10%,transparent),_transparent_35%)] p-0 sm:p-6">
+      <div className="mx-auto flex min-h-screen w-full max-w-3xl flex-col bg-card sm:min-h-0 sm:overflow-hidden sm:rounded-2xl sm:border sm:shadow-xl sm:shadow-foreground/5">
         <ChatHeader onOpenSettings={openSettings} onClearHistory={triggerClearHistory} />
 
-        <div className="card flex-1 overflow-hidden">
+        <div className="flex-1 overflow-hidden">
           <ChatMessages
             messages={messages}
             isWaitingForResponse={isWaitingForResponse}
-            scrollContainerRef={scrollContainerRef}
-            onScroll={handleScroll}
           />
 
-          <div className="border-t border-gray-200 p-3">
+          <div className="border-t bg-background/80 p-3 backdrop-blur sm:p-4">
             {error && <ErrorBanner message={error} onDismiss={clearError} />}
 
             <ChatInput

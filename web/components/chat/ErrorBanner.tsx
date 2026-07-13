@@ -1,3 +1,7 @@
+import { AlertCircleIcon, XIcon } from 'lucide-react';
+
+import { Button } from '@/components/ui/button';
+
 interface ErrorBannerProps {
   message: string;
   onDismiss: () => void;
@@ -5,15 +9,15 @@ interface ErrorBannerProps {
 
 export function ErrorBanner({ message, onDismiss }: ErrorBannerProps) {
   return (
-    <div className="mb-2 rounded-md border border-red-200 bg-red-50 p-2 text-sm text-red-700">
-      <div className="flex items-center justify-between">
-        <span>Something went wrong.</span>
-        <button className="underline" onClick={onDismiss}>
-          Dismiss
-        </button>
+    <div role="alert" className="mb-3 flex items-start gap-3 rounded-xl border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">
+      <AlertCircleIcon className="mt-0.5 size-4 shrink-0" />
+      <div className="min-w-0 flex-1">
+        <p className="font-medium">Message not sent</p>
+        <p className="mt-1 break-words text-xs opacity-80">{message}</p>
       </div>
-      <pre className="mt-1 max-h-24 overflow-auto whitespace-pre-wrap text-xs text-red-600">{message}</pre>
+      <Button variant="ghost" size="icon-xs" onClick={onDismiss} aria-label="Dismiss error">
+        <XIcon />
+      </Button>
     </div>
   );
 }
-

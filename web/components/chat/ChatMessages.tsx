@@ -1,69 +1,90 @@
-import clsx from 'clsx';
-import { RefObject } from 'react';
+import { LoaderCircleIcon } from 'lucide-react';
 
+import { Markdown } from './Markdown';
 import type { ChatBubble } from './types';
+import { Bubble, BubbleContent } from '@/components/ui/bubble';
+import { Marker, MarkerContent, MarkerIcon } from '@/components/ui/marker';
+import { Message, MessageContent, MessageHeader } from '@/components/ui/message';
+import {
+  MessageScroller,
+  MessageScrollerButton,
+  MessageScrollerContent,
+  MessageScrollerItem,
+  MessageScrollerProvider,
+  MessageScrollerViewport,
+} from '@/components/ui/message-scroller';
 
 interface ChatMessagesProps {
   messages: ReadonlyArray<ChatBubble>;
   isWaitingForResponse: boolean;
-  scrollContainerRef: RefObject<HTMLDivElement | null>;
-  onScroll: () => void;
 }
 
-export function ChatMessages({ messages, isWaitingForResponse, scrollContainerRef, onScroll }: ChatMessagesProps) {
+export function ChatMessages({ messages, isWaitingForResponse }: ChatMessagesProps) {
   return (
-    <div ref={scrollContainerRef} onScroll={onScroll} className="flex h-[70vh] flex-col gap-2 overflow-y-auto p-4">
-      {messages.length === 0 && <EmptyState />}
+    <MessageScrollerProvider autoScroll defaultScrollPosition="end">
+      <MessageScroller className="h-[calc(100dvh-12rem)] min-h-[24rem] sm:h-[70vh]">
+        <MessageScrollerViewport>
+          <MessageScrollerContent aria-busy={isWaitingForResponse} className="gap-6 px-4 py-6 sm:px-7">
+            {messages.length === 0 && <EmptyState />}
 
-      {messages.map((message, index) => {
-        const isUser = message.role === 'user';
-        const isDraft = message.role === 'draft';
-        const next = messages[index + 1];
-        const tail = !next || next.role !== message.role;
+            {messages.map((message) => (
+              <ChatMessage key={message.id} message={message} />
+            ))}
 
-        return (
-          <div key={message.id} className={clsx('flex', isUser ? 'justify-end' : 'justify-start')}>
-            <div
-              className={clsx(
-                isUser ? 'bubble-out' : 'bubble-in',
-                tail ? (isUser ? 'bubble-tail-out' : 'bubble-tail-in') : '',
-                isDraft && 'whitespace-pre-wrap',
-              )}
-            >
-              <span className={isDraft ? 'block whitespace-pre-wrap' : 'whitespace-pre-wrap'}>{message.text}</span>
-            </div>
-          </div>
-        );
-      })}
+            {isWaitingForResponse && <TypingIndicator />}
+          </MessageScrollerContent>
+        </MessageScrollerViewport>
+        <MessageScrollerButton className="shadow-md" />
+      </MessageScroller>
+    </MessageScrollerProvider>
+  );
+}
 
-      {isWaitingForResponse && <TypingIndicator />}
-    </div>
+function ChatMessage({ message }: { message: ChatBubble }) {
+  const isUser = message.role === 'user';
+  const isDraft = message.role === 'draft';
+
+  return (
+    <MessageScrollerItem messageId={message.id} scrollAnchor={isUser}>
+      <Message align={isUser ? 'end' : 'start'}>
+        <MessageContent>
+          {!isUser && <MessageHeader>{isDraft ? 'Draft' : 'OpenMagic'}</MessageHeader>}
+          <Bubble variant={isUser ? 'default' : isDraft ? 'outline' : 'ghost'}>
+            <BubbleContent className={isUser ? 'max-w-[min(34rem,85vw)] whitespace-pre-wrap' : 'w-full'}>
+              {isUser ? message.text : <Markdown>{message.text}</Markdown>}
+            </BubbleContent>
+          </Bubble>
+        </MessageContent>
+      </Message>
+    </MessageScrollerItem>
   );
 }
 
 function TypingIndicator() {
   return (
-    <div className="flex justify-start">
-      <div className="bubble-in bubble-tail-in">
-        <div className="flex items-center space-x-1">
-          <div className="flex space-x-1">
-            <div className="h-2 w-2 animate-bounce rounded-full bg-gray-400 [animation-delay:-0.3s]"></div>
-            <div className="h-2 w-2 animate-bounce rounded-full bg-gray-400 [animation-delay:-0.15s]"></div>
-            <div className="h-2 w-2 animate-bounce rounded-full bg-gray-400"></div>
-          </div>
-        </div>
-      </div>
-    </div>
+    <MessageScrollerItem>
+      <Marker role="status" aria-label="OpenMagic is working" className="px-1">
+        <MarkerIcon>
+          <LoaderCircleIcon className="animate-spin" />
+        </MarkerIcon>
+        <MarkerContent className="shimmer">Working on it...</MarkerContent>
+      </Marker>
+    </MessageScrollerItem>
   );
 }
 
 function EmptyState() {
   return (
-    <div className="mx-auto my-12 max-w-sm text-center text-gray-500">
-      <h2 className="mb-2 text-xl font-semibold text-gray-700">Start a conversation</h2>
-      <p className="text-sm">
-        Your messages will appear here. Send something to get started.
-      </p>
-    </div>
+    <MessageScrollerItem className="flex min-h-[22rem] items-center justify-center">
+      <div className="mx-auto max-w-sm text-center">
+        <div className="mx-auto mb-4 flex size-12 items-center justify-center rounded-2xl bg-primary text-xl text-primary-foreground shadow-sm">
+          ✦
+        </div>
+        <h2 className="text-xl font-semibold tracking-tight">What can I help with?</h2>
+        <p className="mt-2 text-sm leading-6 text-muted-foreground">
+          Ask about your work, draft an email, or set a reminder.
+        </p>
+      </div>
+    </MessageScrollerItem>
   );
 }

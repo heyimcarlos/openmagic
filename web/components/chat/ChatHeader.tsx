@@ -1,3 +1,7 @@
+import { RotateCcwIcon, SettingsIcon } from 'lucide-react';
+
+import { Button } from '@/components/ui/button';
+
 interface ChatHeaderProps {
   onOpenSettings: () => void;
   onClearHistory: () => void;
@@ -5,23 +9,18 @@ interface ChatHeaderProps {
 
 export function ChatHeader({ onOpenSettings, onClearHistory }: ChatHeaderProps) {
   return (
-    <header className="mb-4 flex items-center justify-between">
-      <div className="flex items-center">
-        <h1 className="text-lg font-semibold">OpenPoke 🌴</h1>
+    <header className="flex items-center justify-between border-b px-4 py-3 sm:px-6">
+      <div>
+        <h1 className="font-semibold tracking-tight">OpenMagic</h1>
+        <p className="text-xs text-muted-foreground">Your personal assistant</p>
       </div>
-      <div className="flex items-center gap-2">
-        <button
-          className="rounded-md border border-gray-200 px-3 py-2 text-sm hover:bg-gray-50"
-          onClick={onOpenSettings}
-        >
-          Settings
-        </button>
-        <button
-          className="rounded-md border border-gray-200 px-3 py-2 text-sm hover:bg-gray-50"
-          onClick={onClearHistory}
-        >
-          Clear
-        </button>
+      <div className="flex items-center gap-1">
+        <Button variant="ghost" size="icon-sm" onClick={onClearHistory} aria-label="Clear conversation">
+          <RotateCcwIcon />
+        </Button>
+        <Button variant="ghost" size="icon-sm" onClick={onOpenSettings} aria-label="Open settings">
+          <SettingsIcon />
+        </Button>
       </div>
     </header>
   );
