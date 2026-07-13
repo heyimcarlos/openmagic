@@ -36,10 +36,6 @@ def create_interaction_runtime(
     if settings.interaction_mode == "legacy":
         return InteractionAgentRuntime(toolbox=LegacyInteractionToolbox(), settings=settings)
     database_url = _required(settings.database_url, "OPENMAGIC_DATABASE_URL")
-    cursor_secret = _required(
-        settings.workflow_cursor_secret,
-        "OPENMAGIC_WORKFLOW_CURSOR_SECRET",
-    )
     resolved_actor_party_id = actor_party_id or UUID(
         _required(settings.workflow_broker_party_id, "OPENMAGIC_WORKFLOW_BROKER_PARTY_ID")
     )
@@ -49,17 +45,7 @@ def create_interaction_runtime(
             "OPENMAGIC_WORKFLOW_ORGANIZATION_PARTY_ID",
         )
     )
-    verification_secret = _required(
-        settings.verification_code_secret,
-        "OPENMAGIC_VERIFICATION_CODE_SECRET",
-    )
-    delivery_available = bool(settings.composio_api_key and settings.workflow_composio_user_id)
-    toolbox = _workflow_toolbox(
-        database_url,
-        cursor_secret,
-        verification_secret,
-        delivery_available,
-    )
+    toolbox = get_workflow_interaction_toolbox(settings)
 
     def context_factory(cause_id: str) -> InteractionToolContext:
         return InteractionToolContext(
@@ -105,6 +91,47 @@ def _workflow_toolbox(
             verification_secret,
             delivery_available,
         ),
+    )
+
+
+def get_workflow_interaction_toolbox(
+    settings: Settings | None = None,
+) -> WorkflowInteractionToolbox:
+    """Resolve the trusted Workflow tool boundary for agent and direct UI commands."""
+
+    settings = settings or get_settings()
+    return _workflow_toolbox(
+        _required(settings.database_url, "OPENMAGIC_DATABASE_URL"),
+        _required(
+            settings.workflow_cursor_secret,
+            "OPENMAGIC_WORKFLOW_CURSOR_SECRET",
+        ),
+        _required(
+            settings.verification_code_secret,
+            "OPENMAGIC_VERIFICATION_CODE_SECRET",
+        ),
+        bool(settings.composio_api_key and settings.workflow_composio_user_id),
+    )
+
+
+def get_workflow_retrieval(settings: Settings | None = None) -> WorkflowRetrieval:
+    """Resolve the authorization-scoped packet reader used by trusted UI adapters."""
+
+    settings = settings or get_settings()
+    return _workflow_retrieval(
+        _required(settings.database_url, "OPENMAGIC_DATABASE_URL"),
+        _required(
+            settings.workflow_cursor_secret,
+            "OPENMAGIC_WORKFLOW_CURSOR_SECRET",
+        ),
+    )
+
+
+@lru_cache(maxsize=4)
+def _workflow_retrieval(database_url: str, cursor_secret: str) -> WorkflowRetrieval:
+    return WorkflowRetrieval(
+        database=WorkflowDatabase(database_url),
+        cursor_secret=cursor_secret.encode(),
     )
 
 

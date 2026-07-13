@@ -3,13 +3,13 @@ import { GitBranchIcon, WorkflowIcon } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { cn } from '@/lib/utils';
-import type { WorkflowCockpitSnapshot, WorkflowJobView } from '@/lib/workflowCockpit';
+import type { CockpitJob, WorkflowCockpitSnapshot } from '@/lib/chatTelemetry';
 
 interface WorkflowGraphProps {
-  snapshot: WorkflowCockpitSnapshot;
+  snapshot?: WorkflowCockpitSnapshot;
 }
 
-const statusPresentation: Record<WorkflowJobView['status'], { badge: string; dot: string }> = {
+const statusPresentation: Record<CockpitJob['status'], { badge: string; dot: string }> = {
   waiting: {
     badge: 'border-amber-200 bg-amber-50 text-amber-800',
     dot: 'bg-amber-500',
@@ -26,6 +26,14 @@ const statusPresentation: Record<WorkflowJobView['status'], { badge: string; dot
     badge: 'border-border bg-muted text-muted-foreground',
     dot: 'bg-muted-foreground/50',
   },
+  queued: {
+    badge: 'border-sky-200 bg-sky-50 text-sky-700',
+    dot: 'bg-sky-500',
+  },
+  failed: {
+    badge: 'border-red-200 bg-red-50 text-red-700',
+    dot: 'bg-red-500',
+  },
 };
 
 export function WorkflowGraph({ snapshot }: WorkflowGraphProps) {
@@ -41,7 +49,7 @@ export function WorkflowGraph({ snapshot }: WorkflowGraphProps) {
         </p>
       </div>
 
-      {snapshot.jobs.length === 0 ? (
+      {!snapshot || snapshot.jobs.length === 0 ? (
         <div className="grid min-h-72 place-items-center rounded-xl border border-dashed bg-background/70 p-8 text-center">
           <div>
             <WorkflowIcon className="mx-auto size-6 text-muted-foreground/40" />
@@ -57,22 +65,22 @@ export function WorkflowGraph({ snapshot }: WorkflowGraphProps) {
             <CardHeader className="grid-cols-[1fr_auto] gap-3 px-4 py-4">
               <div>
                 <p className="text-[0.625rem] font-semibold uppercase tracking-[0.12em] text-primary">
-                  renewal_outreach.v1
+                  {snapshot.workflow.kind}
                 </p>
-                <CardTitle className="mt-2 text-sm">2026 renewal for John Smith</CardTitle>
+                <CardTitle className="mt-2 text-sm">{snapshot.workflow.objective}</CardTitle>
                 <p className="mt-1 font-mono text-[0.625rem] text-muted-foreground">
-                  wf_7ea2 · Acme Brokerage
+                  {snapshot.workflow.id.slice(0, 8)} · {snapshot.workflow.organization}
                 </p>
               </div>
               <Badge
                 variant="outline"
                 className={cn(
-                  snapshot.workflowStatus === 'completed'
+                  snapshot.workflow.status === 'completed'
                     ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
                     : 'border-blue-200 bg-blue-50 text-blue-700',
                 )}
               >
-                {snapshot.workflowStatus}
+                {snapshot.workflow.status}
               </Badge>
             </CardHeader>
           </Card>
@@ -88,7 +96,7 @@ export function WorkflowGraph({ snapshot }: WorkflowGraphProps) {
   );
 }
 
-function JobCard({ job }: { job: WorkflowJobView }) {
+function JobCard({ job }: { job: CockpitJob }) {
   return (
     <Card className="relative gap-0 py-0">
       <span

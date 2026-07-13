@@ -343,7 +343,7 @@ class StepUpVerification:
                 event_type="verification_challenge_created",
                 actor_type="party",
                 actor_id=str(command.actor_party_id),
-                cause_type="message",
+                cause_type=command.cause_type,
                 cause_id=command.cause_id,
                 data={
                     "challenge_id": str(challenge_id),

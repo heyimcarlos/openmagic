@@ -22,6 +22,18 @@ from .runtime import Completion, InteractionAgentRuntime
 from .toolbox import InteractionToolContext, ToolResult
 
 
+class NotificationConversation(Protocol):
+    """Minimal append-only reply boundary used by Notification delivery."""
+
+    def record_reply_once(
+        self,
+        delivery_id: str,
+        content: str,
+        *,
+        cause_id: str | None = None,
+    ) -> bool: ...
+
+
 class ApprovalPresenter(Protocol):
     """Commit one exact approval request to the user-facing message boundary."""
 
@@ -36,8 +48,13 @@ class ApprovalPresenter(Protocol):
 class ConversationApprovalPresenter:
     """Render every effect-defining field without model paraphrasing."""
 
-    def __init__(self, expected_party_id: UUID) -> None:
+    def __init__(
+        self,
+        expected_party_id: UUID,
+        conversation: NotificationConversation | None = None,
+    ) -> None:
         self._expected_party_id = expected_party_id
+        self._conversation = conversation or get_conversation_log()
 
     async def present(
         self,
@@ -48,9 +65,10 @@ class ConversationApprovalPresenter:
         if destination_party_id != self._expected_party_id:
             raise NotificationLifecycleError("Notification targets a different Party")
         message = FreshWorkflowInteraction.render_approval_request(effect)
-        get_conversation_log().record_reply_once(
+        self._conversation.record_reply_once(
             str(notification_id),
             message,
+            cause_id=f"notification:{notification_id}",
         )
         return message
 
@@ -123,6 +141,7 @@ class _NotificationToolbox:
         notification_kind: str,
         worker_id: str,
         delivery_attempt: int,
+        conversation: NotificationConversation | None = None,
     ) -> None:
         self._retrieval = retrieval
         self._control_plane = control_plane
@@ -134,6 +153,7 @@ class _NotificationToolbox:
         self._notification_kind = notification_kind
         self._worker_id = worker_id
         self._delivery_attempt = delivery_attempt
+        self._conversation = conversation or get_conversation_log()
 
     @property
     def schemas(self) -> tuple[dict[str, Any], ...]:
@@ -202,7 +222,11 @@ class _NotificationToolbox:
             )
             if status.destination_party_id != self._destination_party_id:
                 return ToolResult(success=False, payload={"code": "destination_changed"})
-            get_conversation_log().record_reply_once(str(self._notification_id), status.message)
+            self._conversation.record_reply_once(
+                str(self._notification_id),
+                status.message,
+                cause_id=f"notification:{self._notification_id}",
+            )
             return ToolResult(
                 success=True,
                 payload={"status": "presented"},
@@ -237,6 +261,7 @@ class FreshWorkflowInteraction:
         delivery_attempt: int,
         settings: Settings,
         organization_party_id: UUID,
+        conversation: NotificationConversation | None = None,
         completion: Completion | None = None,
     ) -> None:
         self.runtime_instance_id = uuid4()
@@ -247,6 +272,7 @@ class FreshWorkflowInteraction:
         self._delivery_attempt = delivery_attempt
         self._settings = settings
         self._organization_party_id = organization_party_id
+        self._conversation = conversation
         self._completion = completion
         self._used = False
 
@@ -277,6 +303,7 @@ class FreshWorkflowInteraction:
             notification_kind=audience.kind,
             worker_id=self._worker_id,
             delivery_attempt=self._delivery_attempt,
+            conversation=self._conversation,
         )
         runtime = InteractionAgentRuntime(
             toolbox=toolbox,
@@ -340,6 +367,7 @@ class FreshWorkflowInteractionFactory:
         presenter: ApprovalPresenter,
         settings: Settings,
         organization_party_id: UUID,
+        conversation: NotificationConversation | None = None,
         completion: Completion | None = None,
     ) -> None:
         self._control_plane = control_plane
@@ -347,6 +375,7 @@ class FreshWorkflowInteractionFactory:
         self._presenter = presenter
         self._settings = settings
         self._organization_party_id = organization_party_id
+        self._conversation = conversation
         self._completion = completion
 
     @asynccontextmanager
@@ -359,6 +388,7 @@ class FreshWorkflowInteractionFactory:
             delivery_attempt=delivery_attempt,
             settings=self._settings,
             organization_party_id=self._organization_party_id,
+            conversation=self._conversation,
             completion=self._completion,
         )
         try:

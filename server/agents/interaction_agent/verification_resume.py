@@ -53,6 +53,7 @@ class VerificationResumeInteraction:
         result = await runtime.execute_verified_resume(
             notification_id=notification_id,
             operation_cause_id=delivery.request_cause_id,
+            operation_cause_type=delivery.request_cause_type,
             challenge_id=delivery.challenge_id,
             workflow_id=delivery.workflow_id,
             operation=delivery.operation,

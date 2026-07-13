@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from typing import Annotated, Any, Literal, TypeAlias
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 AgentActivityStatus = Literal["succeeded", "running", "failed"]
 WorkflowJobStatus = Literal["waiting", "queued", "running", "succeeded", "failed", "cancelled"]
 WorkflowCheckpointStatus = Literal["waiting", "satisfied", "unavailable"]
+WorkflowEventTone = Literal["progress", "success", "terminal"]
 
 
 class ChatAgentActivity(BaseModel):
@@ -50,6 +52,56 @@ class ChatWorkflowTelemetry(BaseModel):
     stages: list[ChatWorkflowStage] = Field(default_factory=list)
 
 
+class ChatApprovalRequest(BaseModel):
+    """One exact, currently approvable email projected for the browser UI."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    workflow_id: str = Field(..., min_length=1, max_length=255)
+    job_id: str = Field(..., min_length=1, max_length=255)
+    draft_revision_id: str = Field(..., min_length=1, max_length=255)
+    revision: int = Field(..., ge=1)
+    sender: str = Field(..., min_length=1, max_length=320)
+    to: list[str] = Field(min_length=1)
+    cc: list[str] = Field(default_factory=list)
+    bcc: list[str] = Field(default_factory=list)
+    subject: str = Field(..., min_length=1, max_length=998)
+    body: str = Field(..., min_length=1)
+
+
+class ChatCockpitWorkflow(BaseModel):
+    id: str
+    kind: str
+    objective: str
+    organization: str
+    status: Literal["active", "completed", "cancelled"]
+
+
+class ChatCockpitJob(BaseModel):
+    id: str
+    kind: str
+    title: str
+    detail: str
+    status: WorkflowJobStatus
+    depends_on: list[str] = Field(default_factory=list)
+
+
+class ChatCockpitEvent(BaseModel):
+    id: str
+    occurred_at: str
+    type: str
+    aggregate: str
+    detail: str
+    tone: WorkflowEventTone
+
+
+class ChatWorkflowCockpit(BaseModel):
+    workflow: ChatCockpitWorkflow
+    jobs: list[ChatCockpitJob] = Field(default_factory=list)
+    events: list[ChatCockpitEvent] = Field(default_factory=list)
+    has_earlier_events: bool = False
+
+
 class ChatTurnTelemetry(BaseModel):
     """Sanitized operational facts attached to one assistant chat turn."""
 
@@ -58,6 +110,8 @@ class ChatTurnTelemetry(BaseModel):
     activity_summary: str = Field(..., min_length=1, max_length=255)
     activity: list[ChatAgentActivity] = Field(default_factory=list)
     workflows: list[ChatWorkflowTelemetry] = Field(default_factory=list)
+    approval_request: ChatApprovalRequest | None = None
+    cockpit: ChatWorkflowCockpit | None = None
 
 
 class ChatMessage(BaseModel):
@@ -108,6 +162,22 @@ class ChatHistoryResponse(BaseModel):
 
 class ChatLatestTelemetryResponse(BaseModel):
     telemetry: ChatTurnTelemetry | None = None
+
+
+class ChatApprovalCommand(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    sender_phone: str = Field(min_length=8, max_length=32)
+    cause_id: str = Field(min_length=1, max_length=255)
+    workflow_id: UUID
+    job_id: UUID
+    expected_draft_revision_id: UUID
+
+
+class ChatApprovalResponse(BaseModel):
+    status: Literal["approved", "verification_required"]
+    job_id: UUID | None = None
+    masked_destination: str | None = None
 
 
 class ChatHistoryClearResponse(BaseModel):

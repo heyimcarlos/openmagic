@@ -3,7 +3,7 @@
 import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 from uuid import UUID, uuid4
 
 from ...config import Settings, get_settings
@@ -217,6 +217,7 @@ class InteractionAgentRuntime:
         *,
         notification_id: UUID,
         operation_cause_id: str,
+        operation_cause_type: Literal["message", "ui_action"] = "message",
         challenge_id: UUID,
         workflow_id: UUID,
         operation: ProtectedOperation,
@@ -225,6 +226,7 @@ class InteractionAgentRuntime:
 
         try:
             tool_context = self._tool_context_factory(operation_cause_id)
+            tool_context.cause_type = operation_cause_type
             tool_context.verification_challenge_id = challenge_id
             tool_context.trusted_workflow_id = workflow_id
             tool_context.delivery_id = str(notification_id)
@@ -239,7 +241,7 @@ class InteractionAgentRuntime:
             if not result.success:
                 recovery = (
                     "Verification succeeded, but I can no longer complete that request because "
-                    "your access or the Workflow state changed. Please start the request again."
+                    "the email or your access changed. Please start the request again."
                 )
                 self.conversation_log.record_reply_once(
                     str(notification_id),
@@ -256,13 +258,30 @@ class InteractionAgentRuntime:
                     response=recovery,
                     error=str(error_code),
                 )
+            # The exact stored operation consumed the challenge. Follow-on work uses the
+            # still-current verification session and must not replay a different fingerprint.
+            tool_context.verification_challenge_id = None
+            original_request_reader = getattr(
+                self.conversation_log,
+                "user_message_for_cause",
+                None,
+            )
+            original_request = (
+                original_request_reader(operation_cause_id)
+                if callable(original_request_reader)
+                else None
+            )
             resumed_message = self._safe_json_dump(
                 {
                     "verification": "succeeded",
                     "challenge_id": str(challenge_id),
                     "operation": operation.model_dump(mode="json"),
                     "result": result.payload,
-                    "instruction": "Answer the user's original request from this verified result.",
+                    "original_request": original_request,
+                    "instruction": (
+                        "Continue the original request from this verified result. "
+                        "If the user asked to prepare a renewal email, propose it now."
+                    ),
                 }
             )
             messages = self._message_builder(
@@ -270,21 +289,26 @@ class InteractionAgentRuntime:
                 "",
                 message_type="agent",
             )
-            response = await self._make_llm_call(
+            summary = await self._run_interaction_loop(
                 (
-                    "Present the verified operation result to the user clearly and concisely. "
-                    "Do not propose, approve, or perform additional work. Return only the "
-                    "user-facing response."
+                    "Continue one verified user request from a freshly loaded Workflow Packet. "
+                    "Use propose_renewal_email when the original request asks to prepare or draft "
+                    "the renewal email. You may then send one short user-facing update. Never "
+                    "approve or send the email. Do not mention Workflows, Jobs, Runs, packets, "
+                    "the Control Plane, or provider internals unless the user explicitly asks "
+                    "about the architecture."
                 ),
                 messages,
-                tool_schemas=(),
+                tool_context,
+                tool_schemas=self._schemas_named(
+                    "propose_renewal_email",
+                    "send_message_to_user",
+                    "wait",
+                ),
             )
-            assistant_message = self._extract_assistant_message(response)
-            if assistant_message.get("tool_calls"):
-                raise RuntimeError("Verified result presenter attempted a tool call")
-            final_response = (assistant_message.get("content") or "").strip()
+            final_response = self._finalize_response(summary)
             if not final_response:
-                raise RuntimeError("Verified result presenter returned no response")
+                raise RuntimeError("Verified continuation returned no response")
             self.conversation_log.record_reply_once(
                 str(notification_id),
                 final_response,
@@ -304,13 +328,22 @@ class InteractionAgentRuntime:
         system_prompt: str,
         messages: list[dict[str, Any]],
         tool_context: InteractionToolContext,
+        *,
+        tool_schemas: tuple[dict[str, Any], ...] | None = None,
     ) -> _LoopSummary:
         """Iteratively query the LLM until it issues a final response."""
 
         summary = _LoopSummary()
 
         for _iteration in range(self.MAX_TOOL_ITERATIONS):
-            response = await self._make_llm_call(system_prompt, messages)
+            if tool_schemas is None:
+                response = await self._make_llm_call(system_prompt, messages)
+            else:
+                response = await self._make_llm_call(
+                    system_prompt,
+                    messages,
+                    tool_schemas=tool_schemas,
+                )
             assistant_message = self._extract_assistant_message(response)
 
             assistant_content = (assistant_message.get("content") or "").strip()
@@ -357,6 +390,14 @@ class InteractionAgentRuntime:
             logger.warning("Interaction loop exited without assistant content")
 
         return summary
+
+    def _schemas_named(self, *names: str) -> tuple[dict[str, Any], ...]:
+        allowed = set(names)
+        return tuple(
+            schema
+            for schema in self.tool_schemas
+            if schema.get("function", {}).get("name") in allowed
+        )
 
     # Load conversation history, preferring summarized version if available
     def _load_conversation_transcript(self) -> str:

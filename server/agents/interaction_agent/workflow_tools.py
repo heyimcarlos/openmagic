@@ -136,7 +136,7 @@ class WorkflowInteractionToolbox:
                 context=WorkflowCommandContext(
                     actor_party_id=context.actor_party_id,
                     organization_party_id=context.organization_party_id,
-                    cause_type="message",
+                    cause_type=context.cause_type,
                     cause_id=context.cause_id,
                 ),
                 content=content,
@@ -297,7 +297,7 @@ class WorkflowInteractionToolbox:
                         context=WorkflowCommandContext(
                             actor_party_id=context.actor_party_id,
                             organization_party_id=context.organization_party_id,
-                            cause_type="message",
+                            cause_type=context.cause_type,
                             cause_id=context.cause_id,
                         ),
                         job_id=request.job_id,
@@ -381,6 +381,7 @@ class WorkflowInteractionToolbox:
                     workflow_id=workflow_id,
                     purpose=purpose,
                     cause_id=context.cause_id,
+                    cause_type=context.cause_type,
                     operation=operation,
                 )
             )
@@ -449,7 +450,7 @@ class WorkflowInteractionToolbox:
             context=WorkflowCommandContext(
                 actor_party_id=context.actor_party_id,
                 organization_party_id=addresses.organization_party_id,
-                cause_type="message",
+                cause_type=context.cause_type,
                 cause_id=context.cause_id,
             ),
             workflow_id=request.workflow_id,

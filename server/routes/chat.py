@@ -1,11 +1,15 @@
 from functools import lru_cache
+from typing import TYPE_CHECKING
+from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, status
 from fastapi.responses import JSONResponse, Response
 
-from ..config import get_settings
+from ..config import Settings, get_settings
 from ..logging_config import logger
 from ..models import (
+    ChatApprovalCommand,
+    ChatApprovalResponse,
     ChatHistoryClearResponse,
     ChatHistoryResponse,
     ChatLatestTelemetryResponse,
@@ -19,11 +23,15 @@ from ..services.conversation import (
 from ..workflows import (
     InteractionActivityStore,
     WorkflowDatabase,
+    WorkflowInspectionContext,
     WorkflowRetrieval,
     default_workflow_registry,
     find_sms_party,
     sms_interaction_id,
 )
+
+if TYPE_CHECKING:
+    from ..agents.interaction_agent import WorkflowInteractionToolbox
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 _LATEST_TELEMETRY_CAUSE_LIMIT = 20
@@ -159,6 +167,100 @@ async def latest_chat_telemetry(
     return ChatLatestTelemetryResponse(telemetry=telemetry)
 
 
+@router.post("/approval", response_model=ChatApprovalResponse)
+async def approve_exact_email(payload: ChatApprovalCommand) -> ChatApprovalResponse:
+    """Apply one direct approval UI action through the deterministic boundary."""
+
+    from ..agents.interaction_agent import InteractionToolContext
+
+    settings = get_settings()
+    if settings.interaction_mode != "workflow":
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+    required = (
+        settings.database_url,
+        settings.workflow_cursor_secret,
+        settings.workflow_organization_party_id,
+        settings.verification_code_secret,
+    )
+    if not all(required):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Exact approval is unavailable",
+        )
+    assert settings.database_url is not None
+    assert settings.workflow_cursor_secret is not None
+    assert settings.workflow_organization_party_id is not None
+    database, _projector = _workflow_telemetry_services(
+        settings.database_url,
+        settings.workflow_cursor_secret,
+    )
+    party = await find_sms_party(database, payload.sender_phone)
+    if party is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This chat is not authorized to approve that email.",
+        )
+    context = InteractionToolContext(
+        actor_party_id=party.party_id,
+        organization_party_id=UUID(settings.workflow_organization_party_id),
+        cause_id=payload.cause_id,
+        cause_type="ui_action",
+        interaction_id=sms_interaction_id(payload.sender_phone),
+        trusted_workflow_id=payload.workflow_id,
+    )
+    try:
+        context.loaded_packet = await get_workflow_retrieval(settings).read_workflow_packet(
+            WorkflowInspectionContext(actor_party_id=party.party_id),
+            payload.workflow_id,
+        )
+        toolbox = get_workflow_interaction_toolbox(settings)
+        await toolbox.record_interaction_cause(
+            context,
+            f"Approve exact email for Job {payload.job_id}",
+        )
+        result = await toolbox.invoke(
+            "approve_job",
+            {
+                "job_id": str(payload.job_id),
+                "expected_draft_revision_id": str(payload.expected_draft_revision_id),
+            },
+            context,
+        )
+        code = result.payload.get("code") if isinstance(result.payload, dict) else None
+        if not result.success and code in {"verification_required", "verification_in_progress"}:
+            return ChatApprovalResponse(
+                status="verification_required",
+                masked_destination=(
+                    result.payload.get("destination")
+                    if isinstance(result.payload.get("destination"), str)
+                    else None
+                ),
+            )
+        if not result.success:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "This approval is no longer available. Refresh the conversation and review "
+                    "the latest email."
+                ),
+            )
+        return ChatApprovalResponse(status="approved", job_id=payload.job_id)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning(
+            "Exact email approval rejected",
+            extra={"error_type": type(exc).__name__},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "This approval is no longer available. Refresh the conversation and review "
+                "the latest email."
+            ),
+        ) from exc
+
+
 @lru_cache(maxsize=4)
 def _workflow_telemetry_services(
     database_url: str,
@@ -171,6 +273,22 @@ def _workflow_telemetry_services(
         activity_store=activity_store,
         registry=default_workflow_registry(),
     )
+
+
+def get_workflow_interaction_toolbox(settings: Settings) -> "WorkflowInteractionToolbox":
+    """Load the public interaction boundary lazily to avoid application import cycles."""
+
+    from ..agents.interaction_agent import get_workflow_interaction_toolbox as resolve
+
+    return resolve(settings)
+
+
+def get_workflow_retrieval(settings: Settings) -> WorkflowRetrieval:
+    """Load the public packet reader lazily to avoid application import cycles."""
+
+    from ..agents.interaction_agent import get_workflow_retrieval as resolve
+
+    return resolve(settings)
 
 
 @router.delete("/history", response_model=ChatHistoryClearResponse)

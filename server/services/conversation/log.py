@@ -198,6 +198,14 @@ class ConversationLog:
                 parts.append(f"<{tag}>{safe_payload}</{tag}>")
         return "\n".join(parts)
 
+    def user_message_for_cause(self, cause_id: str) -> str | None:
+        """Return the exact user message that introduced one trusted Cause."""
+
+        for entry in self.iter_correlated_entries():
+            if entry.tag == "user_message" and entry.cause_id == cause_id:
+                return entry.payload
+        return None
+
     def record_user_message(self, content: str, *, cause_id: str | None = None) -> None:
         timestamp = self._append("user_message", content, cause_id=cause_id)
         self._working_memory_log.append_entry("user_message", content, timestamp)
