@@ -2,13 +2,14 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { ActivityIcon, MessageSquareIcon } from 'lucide-react';
+import { ActivityIcon, MessageSquareIcon, NetworkIcon } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 
 const views = [
   { href: '/', label: 'Chat', icon: MessageSquareIcon },
   { href: '/cockpit', label: 'Cockpit', icon: ActivityIcon },
+  { href: '/system', label: 'System', icon: NetworkIcon },
 ] as const;
 
 export function AppViewNav() {

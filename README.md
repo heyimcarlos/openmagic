@@ -86,6 +86,16 @@ OpenMagic is a simplified, open-source take on [Interaction Company’s](https:/
 
 The web app proxies API calls to the Python server using the values in `.env`, so keeping both processes running is required for end-to-end flows. Both development servers bind to localhost by default because the SMS identity surface is intentionally unauthenticated demo infrastructure.
 
+## Live Workflow system map
+
+Open [http://localhost:3000/system](http://localhost:3000/system) after starting both services. The system map reads real PostgreSQL state and shows the typed Control Plane command, durable Job backlog, worker claim, fresh Run and Execution Agent identities, Notification delivery, and fresh Interaction Agent turn.
+
+- **Create 1 Workflow** commits one renewal Workflow with a Draft Job and a dependent Send Job.
+- **Burst +10 Jobs** commits five complete Workflow graphs through the same atomic Control Plane boundary.
+- The runtime currently claims one eligible Job per tick. The visible queue-to-capacity ratio demonstrates durable backpressure, not concurrent worker scale.
+- Draft Jobs call the configured execution LLM. Send Jobs remain blocked on exact approval, so the load control never sends demo email automatically.
+- The observed-state timeline retains roughly three minutes of 400 ms database captures. Pause, scrub backward or forward, then return to the still-running live system without mutating durable state.
+
 ## Project Layout
 - `server/`: FastAPI application, agent runtimes, and durable Workflow services
 - `web/`: Next.js application
