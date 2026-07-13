@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, model_validator
 
 
 class WorkflowContract(BaseModel):
@@ -78,12 +78,89 @@ class ProposeWorkflowWorkCommand(WorkflowContract):
     operation: PrepareRenewalEmailOperation
 
 
+class RenewalOutreachInput(WorkflowContract):
+    """Typed business input for the V0 renewal Workflow Kind."""
+
+    renewal_period: str = Field(min_length=1, max_length=32)
+
+
+class ProposeWorkflowArguments(WorkflowContract):
+    """Create one registered V0 Workflow variant from an authorized source packet."""
+
+    source_workflow_id: UUID
+    corrects_workflow_id: UUID | None = None
+    workflow_kind: str = Field(min_length=1, max_length=255)
+    objective: str = Field(min_length=1, max_length=500)
+    input: RenewalOutreachInput
+    operation: PrepareRenewalEmailOperation
+
+
+class ProposeWorkflowCommand(WorkflowContract):
+    """Compile and atomically create one registered V0 Workflow variant."""
+
+    context: WorkflowCommandContext
+    source_workflow_id: UUID
+    corrects_workflow_id: UUID | None = None
+    workflow_kind: str = Field(min_length=1, max_length=255)
+    objective: str = Field(min_length=1, max_length=500)
+    input: RenewalOutreachInput
+    operation: PrepareRenewalEmailOperation
+
+
 class ApproveWorkflowJobCommand(WorkflowContract):
     """Authorize one exact presented External Effect through an implicit Party."""
 
     context: WorkflowCommandContext
     job_id: UUID
     expected_draft_revision_id: UUID
+
+
+class RevisedEmailContent(WorkflowContract):
+    """Complete editable portion of one exact email effect."""
+
+    to: tuple[EmailStr, ...] = Field(min_length=1)
+    cc: tuple[EmailStr, ...] = ()
+    bcc: tuple[EmailStr, ...] = ()
+    subject: str = Field(min_length=1, max_length=998)
+    body: str = Field(min_length=1, max_length=100_000)
+
+
+class ReviseWorkflowEmailCommand(WorkflowContract):
+    """Replace one safely cancelable email with a reviewable revision."""
+
+    context: WorkflowCommandContext
+    workflow_id: UUID
+    job_id: UUID
+    expected_draft_revision_id: UUID
+    email: RevisedEmailContent
+
+
+class ReviseAndApproveWorkflowEmailCommand(ReviseWorkflowEmailCommand):
+    """Replace safely cancelable email work and approve the exact revision."""
+
+
+class WorkflowEmailRevision(WorkflowContract):
+    workflow_id: UUID
+    draft_job_id: UUID
+    send_job_id: UUID
+
+
+class ReviseEmailOperation(WorkflowContract):
+    type: Literal["revise_email"]
+    job_id: UUID
+    expected_draft_revision_id: UUID
+    email: RevisedEmailContent
+
+
+class ReviseWorkflowWorkArguments(WorkflowContract):
+    workflow_id: UUID
+    operation: ReviseEmailOperation
+
+
+class ReviseWorkflowWorkCommand(WorkflowContract):
+    context: WorkflowCommandContext
+    workflow_id: UUID
+    operation: ReviseEmailOperation
 
 
 class RecordInteractionCauseCommand(WorkflowContract):
@@ -233,10 +310,20 @@ class _ApproveJobOperationArguments(WorkflowContract):
     expected_draft_revision_id: UUID
 
 
+class _ReviseAndApproveEmailOperationArguments(WorkflowContract):
+    workflow_id: UUID
+    job_id: UUID
+    expected_draft_revision_id: UUID
+    email: RevisedEmailContent
+
+
 _PROTECTED_OPERATION_SCHEMAS: dict[str, type[WorkflowContract]] = {
     "read_workflow_packet": _WorkflowPacketOperationArguments,
+    "propose_workflow": ProposeWorkflowArguments,
     "propose_workflow_work": ProposeWorkflowWorkArguments,
+    "revise_workflow_work": ReviseWorkflowWorkArguments,
     "approve_job": _ApproveJobOperationArguments,
+    "revise_and_approve_email": _ReviseAndApproveEmailOperationArguments,
 }
 
 

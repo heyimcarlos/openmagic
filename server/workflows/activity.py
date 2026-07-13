@@ -16,7 +16,9 @@ from .models import InteractionActivityReceiptRow, InteractionCauseRow
 class InteractionActivityAction(StrEnum):
     SEARCH_WORKFLOWS = "search_workflows"
     READ_WORKFLOW_PACKET = "read_workflow_packet"
+    PROPOSE_WORKFLOW = "propose_workflow"
     PROPOSE_WORKFLOW_WORK = "propose_workflow_work"
+    REVISE_WORKFLOW_WORK = "revise_workflow_work"
     APPROVE_JOB = "approve_job"
 
     @classmethod

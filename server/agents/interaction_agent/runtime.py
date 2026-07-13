@@ -78,6 +78,14 @@ class InteractionAgentRuntime:
     """Manages the interaction agent's request processing."""
 
     MAX_TOOL_ITERATIONS = 8
+    _TERMINAL_WRITE_TOOLS = frozenset(
+        {
+            "approve_job",
+            "propose_workflow",
+            "propose_workflow_work",
+            "revise_workflow_work",
+        }
+    )
 
     # Initialize interaction agent runtime with settings and service dependencies
     def __init__(
@@ -280,7 +288,8 @@ class InteractionAgentRuntime:
                     "original_request": original_request,
                     "instruction": (
                         "Continue the original request from this verified result. "
-                        "If the user asked to prepare a renewal email, propose it now."
+                        "Choose the registered Workflow command that matches the original "
+                        "business objective, then report only what its result confirms."
                     ),
                 }
             )
@@ -292,9 +301,12 @@ class InteractionAgentRuntime:
             summary = await self._run_interaction_loop(
                 (
                     "Continue one verified user request from a freshly loaded Workflow Packet. "
-                    "Use propose_workflow_work with the prepare_renewal_email operation when the "
-                    "original request asks to prepare or draft the renewal email. You may then "
-                    "send one short user-facing update. Never "
+                    "Use propose_workflow_work only when the request adds initial work to the "
+                    "selected empty active Workflow. Use propose_workflow when the user asks for "
+                    "a new business objective, period, or independent process. Use "
+                    "revise_workflow_work when the user asks to edit safely replaceable work. "
+                    "You may then send one short user-facing update. Never claim that work was "
+                    "created or changed when its tool result failed. Never "
                     "approve or send the email. Do not mention Workflows, Jobs, Runs, packets, "
                     "the Control Plane, or provider internals unless the user explicitly asks "
                     "about the architecture."
@@ -302,7 +314,9 @@ class InteractionAgentRuntime:
                 messages,
                 tool_context,
                 tool_schemas=self._schemas_named(
+                    "propose_workflow",
                     "propose_workflow_work",
+                    "revise_workflow_work",
                     "send_message_to_user",
                     "wait",
                 ),
@@ -335,15 +349,16 @@ class InteractionAgentRuntime:
         """Iteratively query the LLM until it issues a final response."""
 
         summary = _LoopSummary()
+        active_tool_schemas = tool_schemas
 
         for _iteration in range(self.MAX_TOOL_ITERATIONS):
-            if tool_schemas is None:
+            if active_tool_schemas is None:
                 response = await self._make_llm_call(system_prompt, messages)
             else:
                 response = await self._make_llm_call(
                     system_prompt,
                     messages,
-                    tool_schemas=tool_schemas,
+                    tool_schemas=active_tool_schemas,
                 )
             assistant_message = self._extract_assistant_message(response)
 
@@ -365,6 +380,9 @@ class InteractionAgentRuntime:
             if not parsed_tool_calls:
                 break
 
+            stop_after_tools = False
+            terminal_write_succeeded = False
+            batch_closed = False
             for tool_call in parsed_tool_calls:
                 summary.tool_names.append(tool_call.name)
 
@@ -373,7 +391,19 @@ class InteractionAgentRuntime:
                     if isinstance(agent_name, str) and agent_name:
                         summary.execution_agents.add(agent_name)
 
-                result = await self._execute_tool(tool_call, tool_context)
+                if batch_closed:
+                    result = ToolResult(
+                        success=False,
+                        payload={"code": "state_change_already_committed"},
+                    )
+                else:
+                    result = await self._execute_tool(tool_call, tool_context)
+                if result.success and tool_call.name in self._TERMINAL_WRITE_TOOLS:
+                    terminal_write_succeeded = True
+                    batch_closed = True
+                if result.success and tool_call.name in {"send_message_to_user", "wait"}:
+                    stop_after_tools = True
+                    batch_closed = True
 
                 if result.user_message:
                     summary.user_messages.append(result.user_message)
@@ -384,6 +414,10 @@ class InteractionAgentRuntime:
                     "content": self._format_tool_result(tool_call, result),
                 }
                 messages.append(tool_message)
+            if stop_after_tools:
+                break
+            if terminal_write_succeeded:
+                active_tool_schemas = self._schemas_named("send_message_to_user", "wait")
         else:
             raise RuntimeError("Reached tool iteration limit without final response")
 
@@ -614,6 +648,14 @@ class InteractionAgentRuntime:
                 if context.loaded_packet is not None
                 else None
             )
+        if action is InteractionActivityAction.PROPOSE_WORKFLOW:
+            workflow_id = (
+                result.payload.get("workflow_id") if isinstance(result.payload, dict) else None
+            )
+            try:
+                return UUID(workflow_id) if isinstance(workflow_id, str) else None
+            except ValueError:
+                return None
         if context.loaded_packet is not None:
             return context.loaded_packet.workflow.workflow_id
         return context.trusted_workflow_id or context.resolved_workflow_id

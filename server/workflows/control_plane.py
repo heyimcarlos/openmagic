@@ -28,13 +28,18 @@ from .contracts import (
     NotificationDeliveryPacket,
     NotificationPresentationContext,
     NotificationStatusContext,
+    ProposeWorkflowCommand,
     ProposeWorkflowJobsCommand,
     ProposeWorkflowWorkCommand,
     RecordInteractionCauseCommand,
     ReportNotificationFailureCommand,
     ReportRunResultCommand,
+    ReviseAndApproveWorkflowEmailCommand,
+    ReviseWorkflowEmailCommand,
+    ReviseWorkflowWorkCommand,
     RevokeWorkflowAuthorityCommand,
     WorkflowCommandContext,
+    WorkflowEmailRevision,
     WorkflowExecutionPacket,
     WorkflowJobProposal,
     WorkflowProposal,
@@ -47,6 +52,7 @@ from .contracts import (
 )
 from .database import WorkflowDatabase
 from .email_effects import EmailSendDispatchV1
+from .email_revision_protocol import WorkflowEmailRevisionProtocol
 from .errors import (
     InvalidWorkflowProposalError,
     WorkflowAuthorizationError,
@@ -82,6 +88,7 @@ from .registry import (
     ValidatedWorkflowProposal,
     WorkflowKindRegistry,
 )
+from .workflow_creation_protocol import WorkflowCreationProtocol
 
 
 class WorkflowControlPlane:
@@ -100,6 +107,13 @@ class WorkflowControlPlane:
         self._authority = authority
         self._causes = WorkflowInteractionCauseProtocol(database)
         self._proposals = WorkflowProposalProtocol(registry)
+        self._workflow_creation = WorkflowCreationProtocol(
+            database,
+            registry,
+            self._proposals,
+            self._causes,
+            self._has_current_broker_authority,
+        )
         self._execution = WorkflowExecutionProtocol(
             database=database,
             registry=registry,
@@ -107,6 +121,12 @@ class WorkflowControlPlane:
         )
         self._approval = WorkflowApprovalProtocol(
             database,
+            self._has_current_broker_authority,
+            self._causes,
+        )
+        self._email_revisions = WorkflowEmailRevisionProtocol(
+            database,
+            registry,
             self._has_current_broker_authority,
             self._causes,
         )
@@ -321,6 +341,9 @@ class WorkflowControlPlane:
             )
         )
 
+    async def propose_workflow(self, command: ProposeWorkflowCommand) -> WorkflowTrace:
+        return await self._workflow_creation.propose(command)
+
     def _require_party_proposable_jobs(
         self,
         jobs: tuple[WorkflowJobProposal, ...],
@@ -336,6 +359,23 @@ class WorkflowControlPlane:
 
     async def approve_job(self, command: ApproveWorkflowJobCommand) -> ApprovalGrant:
         return await self._approval.approve_job(command)
+
+    async def revise_and_approve_email(
+        self,
+        command: ReviseAndApproveWorkflowEmailCommand,
+    ) -> ApprovalGrant:
+        return await self._email_revisions.revise_and_approve(command)
+
+    async def revise_work(self, command: ReviseWorkflowWorkCommand) -> WorkflowEmailRevision:
+        return await self._email_revisions.revise(
+            ReviseWorkflowEmailCommand(
+                context=command.context,
+                workflow_id=command.workflow_id,
+                job_id=command.operation.job_id,
+                expected_draft_revision_id=command.operation.expected_draft_revision_id,
+                email=command.operation.email,
+            )
+        )
 
     async def record_interaction_cause(self, command: RecordInteractionCauseCommand) -> None:
         await self._causes.record(command)
