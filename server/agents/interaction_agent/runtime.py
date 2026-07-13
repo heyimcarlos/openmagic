@@ -3,7 +3,7 @@
 import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Protocol
 from uuid import UUID, uuid4
 
 from ...config import Settings, get_settings
@@ -12,6 +12,23 @@ from ...openrouter_client import request_chat_completion
 from ...services.conversation import get_conversation_log, get_working_memory_log
 from .agent import build_system_prompt, prepare_message_with_history
 from .toolbox import InteractionToolbox, InteractionToolContext, ToolResult
+
+
+class _ConversationState(Protocol):
+    def load_transcript(self) -> str: ...
+
+    def record_user_message(self, message: str) -> None: ...
+
+    def record_agent_message(self, message: str) -> None: ...
+
+    def record_reply(self, message: str) -> None: ...
+
+
+class _WorkingMemoryState(Protocol):
+    def render_transcript(self) -> str: ...
+
+
+Completion = Callable[..., Awaitable[dict[str, Any]]]
 
 
 @dataclass
@@ -58,20 +75,24 @@ class InteractionAgentRuntime:
         message_builder: Callable[..., list[dict[str, str]]] = prepare_message_with_history,
         interaction_cause_recorder: Callable[[InteractionToolContext, str], Awaitable[None]]
         | None = None,
+        completion: Completion | None = None,
+        conversation_state: _ConversationState | None = None,
+        working_memory_state: _WorkingMemoryState | None = None,
         settings: Settings | None = None,
     ) -> None:
         settings = settings or get_settings()
         self.api_key = settings.openrouter_api_key
         self.model = settings.interaction_agent_model
         self.settings = settings
-        self.conversation_log = get_conversation_log()
-        self.working_memory_log = get_working_memory_log()
+        self.conversation_log = conversation_state or get_conversation_log()
+        self.working_memory_log = working_memory_state or get_working_memory_log()
         self.toolbox = toolbox
         self.tool_schemas = list(self.toolbox.schemas)
         self._tool_context_factory = tool_context_factory or self._legacy_tool_context
         self._system_prompt_builder = system_prompt_builder
         self._message_builder = message_builder
         self._interaction_cause_recorder = interaction_cause_recorder
+        self._completion = completion
 
         if not self.api_key:
             raise ValueError(
@@ -255,7 +276,8 @@ class InteractionAgentRuntime:
             "Interaction agent calling LLM",
             extra={"model": self.model, "tools": len(self.tool_schemas)},
         )
-        return await request_chat_completion(
+        completion = self._completion or request_chat_completion
+        return await completion(
             model=self.model,
             messages=messages,
             system=system_prompt,
