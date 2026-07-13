@@ -1,50 +1,264 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-brand-50: #f0f7ff;
+  --color-brand-100: #e1effe;
+  --color-brand-200: #c3dffe;
+  --color-brand-300: #a5cffe;
+  --color-brand-400: #87bffe;
+  --color-brand-500: #69affd;
+  --color-brand-600: #4b9ffd;
+  --color-brand-700: #2d8ffd;
+  --color-brand-800: #0f7ffd;
+  --color-brand-900: #0a66cc;
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
 
 :root {
   color-scheme: light;
+  --radius: 0.75rem;
+  --background: oklch(0.985 0.004 250);
+  --foreground: oklch(0.2 0.025 258);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.2 0.025 258);
+  --primary: oklch(0.61 0.19 255);
+  --primary-foreground: oklch(0.99 0 0);
+  --secondary: oklch(0.955 0.01 250);
+  --secondary-foreground: oklch(0.27 0.03 258);
+  --muted: oklch(0.96 0.008 250);
+  --muted-foreground: oklch(0.51 0.025 258);
+  --accent: oklch(0.94 0.018 250);
+  --accent-foreground: oklch(0.27 0.03 258);
+  --destructive: oklch(0.58 0.22 27);
+  --border: oklch(0.9 0.012 250);
+  --input: oklch(0.9 0.012 250);
+  --ring: oklch(0.61 0.19 255);
 }
 
-/* Custom styles */
-.btn {
-  @apply inline-flex items-center justify-center rounded-md border border-transparent bg-brand-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-brand-700 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed;
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+  }
 }
 
-.input {
-  @apply w-full rounded-full border border-gray-300 bg-white px-4 py-2.5 text-sm shadow-sm placeholder:text-gray-400 focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-500 disabled:opacity-60;
+@layer components {
+  .btn {
+    @apply inline-flex items-center justify-center rounded-md border border-transparent bg-brand-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-brand-700 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50;
+  }
+
+  .input {
+    @apply w-full rounded-full border border-gray-300 bg-white px-4 py-2.5 text-sm shadow-sm placeholder:text-gray-400 focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-500 disabled:opacity-60;
+  }
+
+  .card {
+    @apply rounded-xl border border-gray-200 bg-white shadow-sm;
+  }
+
+  .chip {
+    @apply inline-flex items-center rounded-full bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-700;
+  }
+
+  .chat-markdown {
+    @apply min-w-0 text-[0.9375rem] leading-7 text-foreground;
+  }
+
+  .chat-markdown > *:first-child {
+    margin-top: 0;
+  }
+
+  .chat-markdown > *:last-child {
+    margin-bottom: 0;
+  }
+
+  .chat-markdown p {
+    @apply my-3;
+  }
+
+  .chat-markdown h1 {
+    @apply mb-3 mt-6 text-2xl font-semibold tracking-tight;
+  }
+
+  .chat-markdown h2 {
+    @apply mb-3 mt-6 text-xl font-semibold tracking-tight;
+  }
+
+  .chat-markdown h3 {
+    @apply mb-2 mt-5 text-lg font-semibold;
+  }
+
+  .chat-markdown ul {
+    @apply my-3 list-disc space-y-1 pl-6;
+  }
+
+  .chat-markdown ol {
+    @apply my-3 list-decimal space-y-1 pl-6;
+  }
+
+  .chat-markdown blockquote {
+    @apply my-4 border-l-4 border-primary/30 pl-4 italic text-muted-foreground;
+  }
+
+  .chat-markdown a {
+    @apply font-medium text-primary underline decoration-primary/30 underline-offset-4 hover:decoration-primary;
+  }
+
+  .chat-markdown :not(pre) > code {
+    @apply rounded-md bg-muted px-1.5 py-0.5 font-mono text-[0.85em];
+  }
+
+  .chat-markdown pre {
+    @apply my-4 max-w-full overflow-x-auto rounded-xl border bg-foreground p-4 text-background;
+  }
+
+  .chat-markdown pre code {
+    @apply bg-transparent p-0 font-mono text-[0.8125rem] leading-6;
+  }
+
+  .chat-markdown table {
+    @apply my-4 w-full border-collapse overflow-hidden text-sm;
+  }
+
+  .chat-markdown th {
+    @apply border bg-muted px-3 py-2 text-left font-semibold;
+  }
+
+  .chat-markdown td {
+    @apply border px-3 py-2 align-top;
+  }
+
+  .chat-markdown hr {
+    @apply my-6 border-border;
+  }
 }
 
-.card {
-  @apply rounded-xl border border-gray-200 bg-white shadow-sm;
+@keyframes chat-shimmer {
+  from { background-position: 100% 0; }
+  to { background-position: -100% 0; }
 }
 
-.chip {
-  @apply inline-flex items-center rounded-full bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-700;
+@property --scroll-fade-b {
+  syntax: "<length-percentage>";
+  inherits: false;
+  initial-value: 0px;
 }
 
-/* iMessage-style chat enhancements */
-.chat-wrap {
-  @apply mx-auto w-full max-w-2xl;
+@property --scroll-fade-s {
+  syntax: "<length-percentage>";
+  inherits: false;
+  initial-value: 0px;
 }
 
-.chat-bg {
-  @apply bg-[#F5F5F7];
-  background-image: radial-gradient(circle at 10% 10%, #ffffff 0%, #f5f5f7 60%);
+@property --scroll-fade-e {
+  syntax: "<length-percentage>";
+  inherits: false;
+  initial-value: 0px;
 }
 
-.bubble-out {
-  @apply inline-block max-w-[80%] rounded-2xl bg-brand-600 px-4 py-2.5 text-sm text-white shadow-sm;
+@keyframes scroll-fade-reveal-b {
+  from { --scroll-fade-b: var(--_scroll-fade-size-b); }
+  to { --scroll-fade-b: 0px; }
 }
 
-.bubble-in {
-  @apply inline-block max-w-[80%] rounded-2xl bg-gray-100 px-4 py-2.5 text-sm text-gray-900 shadow-sm border border-gray-200;
+@keyframes scroll-fade-reveal-s {
+  from { --scroll-fade-s: 0px; }
+  to { --scroll-fade-s: var(--_scroll-fade-size-s); }
 }
 
-.bubble-tail-out {
-  @apply rounded-br-md;
+@keyframes scroll-fade-reveal-e {
+  from { --scroll-fade-e: var(--_scroll-fade-size-e); }
+  to { --scroll-fade-e: 0px; }
 }
 
-.bubble-tail-in {
-  @apply rounded-bl-md;
+@utility scroll-fade-b {
+  --_scroll-fade-size-b: var(--scroll-fade-b-size, var(--scroll-fade-size, min(12%, calc(var(--spacing) * 10))));
+  --scroll-fade-mask: linear-gradient(to bottom, #000 0, #000 calc(100% - var(--scroll-fade-b, 0px)), transparent 100%);
+  -webkit-mask-image: var(--scroll-fade-mask);
+  mask-image: var(--scroll-fade-mask);
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+
+  @supports (animation-timeline: scroll()) {
+    animation: scroll-fade-reveal-b 1ms ease-in-out;
+    animation-timeline: scroll(self y);
+    animation-range: calc(100% - var(--scroll-fade-reveal, calc(var(--spacing) * 24))) 100%;
+    animation-fill-mode: both;
+  }
+
+  @supports not (animation-timeline: scroll()) {
+    --scroll-fade-b: var(--_scroll-fade-size-b);
+  }
+}
+
+@utility scroll-fade-x {
+  --_scroll-fade-size-s: var(--scroll-fade-s-size, var(--scroll-fade-size, min(12%, calc(var(--spacing) * 10))));
+  --_scroll-fade-size-e: var(--scroll-fade-e-size, var(--scroll-fade-size, min(12%, calc(var(--spacing) * 10))));
+  --scroll-fade-inline: linear-gradient(to right, transparent 0, #000 var(--scroll-fade-s, 0px), #000 calc(100% - var(--scroll-fade-e, 0px)), transparent 100%);
+  -webkit-mask-image: var(--scroll-fade-inline);
+  mask-image: var(--scroll-fade-inline);
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+
+  @supports (animation-timeline: scroll()) {
+    animation: scroll-fade-reveal-s 1ms ease-in-out, scroll-fade-reveal-e 1ms ease-in-out;
+    animation-timeline: scroll(self x), scroll(self x);
+    animation-range: 0 var(--scroll-fade-reveal, calc(var(--spacing) * 24)), calc(100% - var(--scroll-fade-reveal, calc(var(--spacing) * 24))) 100%;
+    animation-fill-mode: both;
+  }
+
+  @supports not (animation-timeline: scroll()) {
+    --scroll-fade-s: var(--_scroll-fade-size-s);
+    --scroll-fade-e: var(--_scroll-fade-size-e);
+  }
+}
+
+.shimmer {
+  color: transparent;
+  background: linear-gradient(90deg, var(--muted-foreground) 35%, var(--foreground) 50%, var(--muted-foreground) 65%);
+  background-size: 200% 100%;
+  background-clip: text;
+  animation: chat-shimmer 1.5s linear infinite;
+}
+
+.scrollbar-thin {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in oklch, var(--muted-foreground) 35%, transparent) transparent;
+}
+
+.scrollbar-none {
+  scrollbar-width: none;
+}
+
+.scrollbar-none::-webkit-scrollbar {
+  display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .shimmer {
+    animation: none;
+    background: none;
+    color: var(--muted-foreground);
+  }
 }
