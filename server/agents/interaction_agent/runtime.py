@@ -10,6 +10,7 @@ from ...config import Settings, get_settings
 from ...logging_config import logger
 from ...openrouter_client import request_chat_completion
 from ...services.conversation import get_conversation_log, get_working_memory_log
+from ...workflows import ProtectedOperation
 from .agent import build_system_prompt, prepare_message_with_history
 from .toolbox import InteractionToolbox, InteractionToolContext, ToolResult
 
@@ -192,6 +193,74 @@ class InteractionAgentRuntime:
         except Exception as exc:
             logger.error(
                 "Fresh Notification Interaction Agent failed",
+                extra={"error_type": type(exc).__name__},
+            )
+            return InteractionResult(success=False, response="", error=type(exc).__name__)
+
+    async def execute_verified_resume(
+        self,
+        *,
+        user_message: str,
+        operation_cause_id: str,
+        challenge_id: UUID,
+        workflow_id: UUID,
+        operation: ProtectedOperation,
+    ) -> InteractionResult:
+        """Run the exact stored operation, then let a fresh turn present its result."""
+
+        try:
+            transcript_before = self._load_conversation_transcript()
+            tool_context = self._tool_context_factory(operation_cause_id)
+            tool_context.verification_challenge_id = challenge_id
+            tool_context.trusted_workflow_id = workflow_id
+            self.conversation_log.record_user_message(user_message)
+            result = await self.toolbox.invoke(
+                operation.name,
+                operation.arguments,
+                tool_context,
+            )
+            if not result.success:
+                recovery = (
+                    "Verification succeeded, but I can no longer complete that request because "
+                    "your access or the Workflow state changed. Please start the request again."
+                )
+                self.conversation_log.record_reply(recovery)
+                error_code = (
+                    result.payload.get("code")
+                    if isinstance(result.payload, dict)
+                    else "protected_operation_rejected"
+                )
+                return InteractionResult(
+                    success=False,
+                    response=recovery,
+                    error=str(error_code),
+                )
+            resumed_message = self._safe_json_dump(
+                {
+                    "verification": "succeeded",
+                    "challenge_id": str(challenge_id),
+                    "operation": operation.model_dump(mode="json"),
+                    "result": result.payload,
+                    "instruction": "Answer the user's original request from this verified result.",
+                }
+            )
+            messages = self._message_builder(
+                resumed_message,
+                transcript_before,
+                message_type="agent",
+            )
+            summary = await self._run_interaction_loop(
+                self._system_prompt_builder(),
+                messages,
+                tool_context,
+            )
+            final_response = self._finalize_response(summary)
+            if final_response and not summary.user_messages:
+                self.conversation_log.record_reply(final_response)
+            return InteractionResult(success=True, response=final_response)
+        except Exception as exc:
+            logger.error(
+                "Verified operation resumption failed",
                 extra={"error_type": type(exc).__name__},
             )
             return InteractionResult(success=False, response="", error=type(exc).__name__)

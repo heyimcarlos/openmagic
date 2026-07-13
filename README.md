@@ -37,6 +37,11 @@ OpenMagic is a simplified, open-source take on [Interaction Company’s](https:/
    - Create an API key
    - Set up Gmail integration and get your auth config ID
    - Replace `your_composio_api_key_here` and `your_gmail_auth_config_id_here` in `.env`
+
+   **Workflow verification demo**
+   - Replace the Workflow cursor, interaction, browser, and verification secrets in `.env`
+   - Set `OPENMAGIC_DEMO_POLICYHOLDER_EMAIL` to an inbox you can read
+   - Set `OPENMAGIC_WORKFLOW_COMPOSIO_USER_ID` to the connected Composio user that sends the code
 4. **Start PostgreSQL.** For a disposable local database:
    ```bash
    docker run --name openmagic-postgres \
@@ -57,9 +62,12 @@ OpenMagic is a simplified, open-source take on [Interaction Company’s](https:/
    ```
    This explicit local seed creates the Broker, Organization Membership,
    Policyholder, active renewal Workflow, and verified identifiers referenced
-   by `.env.example`. Migrations never infer current authority from historical
-   Workflow Events. A production environment must provision these records from
-   its trusted identity source instead of using the demo seed.
+   by `.env.example`. The Policyholder can request private Workflow information
+   from the SMS simulator, receive a six-digit code by email, and reply with the
+   code to resume the exact protected operation. Migrations never infer current
+   authority from historical Workflow Events. A production environment must
+   provision these records from its trusted identity source instead of using
+   the demo seed.
 7. **Install frontend dependencies:**
    ```bash
    npm install --prefix web

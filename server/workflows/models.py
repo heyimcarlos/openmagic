@@ -231,6 +231,93 @@ class InteractionCauseRow(Base):
     )
 
 
+class VerificationChallengeRow(Base):
+    """One durable cross-channel proof bound to a protected operation scope."""
+
+    __tablename__ = "verification_challenges"
+    __table_args__ = (
+        sa.CheckConstraint(
+            "status IN ('pending', 'verified', 'superseded', 'expired', 'failed')",
+            name="status",
+        ),
+        sa.CheckConstraint(
+            "purpose IN ('sensitive_read', 'sensitive_write')",
+            name="purpose",
+        ),
+        sa.CheckConstraint("failed_attempts >= 0", name="failed_attempts_nonnegative"),
+        sa.CheckConstraint("max_attempts > 0", name="max_attempts_positive"),
+        sa.CheckConstraint("failed_attempts <= max_attempts", name="attempt_budget"),
+        sa.CheckConstraint(
+            "(status = 'verified' AND verified_at IS NOT NULL "
+            "AND verified_cause_id IS NOT NULL AND authorization_expires_at IS NOT NULL) "
+            "OR (status <> 'verified' AND verified_at IS NULL "
+            "AND verified_cause_id IS NULL AND authorization_expires_at IS NULL)",
+            name="verification_shape",
+        ),
+        sa.Index(
+            "uq_verification_challenges_pending_interaction",
+            "actor_party_id",
+            "interaction_id",
+            unique=True,
+            postgresql_where=sa.text("status = 'pending'"),
+        ),
+        sa.Index(
+            "ix_verification_challenges_authorization",
+            "actor_party_id",
+            "interaction_id",
+            "workflow_id",
+            "purpose",
+            "authorization_expires_at",
+            postgresql_where=sa.text("status = 'verified'"),
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    actor_party_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        sa.ForeignKey("parties.id", name="fk_verification_challenges_actor_party"),
+        nullable=False,
+    )
+    interaction_id: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    workflow_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        sa.ForeignKey("workflows.id", name="fk_verification_challenges_workflow"),
+        nullable=False,
+    )
+    purpose: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    operation_name: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    operation_arguments: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    operation_fingerprint: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    request_cause_id: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    destination_identifier_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        sa.ForeignKey(
+            "party_identifiers.id",
+            name="fk_verification_challenges_destination_identifier",
+        ),
+        nullable=False,
+    )
+    created_event_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        sa.ForeignKey("workflow_events.id", name="fk_verification_challenges_created_event"),
+        nullable=False,
+    )
+    status: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(sa.DateTime(timezone=True), nullable=False)
+    failed_attempts: Mapped[int] = mapped_column(sa.Integer, nullable=False, server_default="0")
+    max_attempts: Mapped[int] = mapped_column(sa.Integer, nullable=False, server_default="5")
+    verified_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True), nullable=True)
+    verified_cause_id: Mapped[str | None] = mapped_column(sa.Text, nullable=True)
+    authorization_expires_at: Mapped[datetime | None] = mapped_column(
+        sa.DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        sa.DateTime(timezone=True),
+        nullable=False,
+        server_default=sa.func.now(),
+    )
+
+
 class WorkflowEventRow(Base):
     __tablename__ = "workflow_events"
     __table_args__ = (

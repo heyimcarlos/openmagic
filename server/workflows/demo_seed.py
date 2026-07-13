@@ -23,6 +23,8 @@ DEMO_WORKFLOW_ID = UUID("40000000-0000-0000-0000-000000000001")
 DEMO_BROKER_IDENTIFIER_ID = UUID("51000000-0000-0000-0000-000000000001")
 DEMO_ORGANIZATION_IDENTIFIER_ID = UUID("51000000-0000-0000-0000-000000000002")
 DEMO_POLICYHOLDER_IDENTIFIER_ID = UUID("51000000-0000-0000-0000-000000000003")
+DEMO_BROKER_PHONE_IDENTIFIER_ID = UUID("51000000-0000-0000-0000-000000000004")
+DEMO_POLICYHOLDER_PHONE_IDENTIFIER_ID = UUID("51000000-0000-0000-0000-000000000005")
 DEMO_MEMBERSHIP_ID = UUID("52000000-0000-0000-0000-000000000001")
 DEMO_BROKER_ROLE_ID = UUID("53000000-0000-0000-0000-000000000001")
 DEMO_POLICYHOLDER_ROLE_ID = UUID("53000000-0000-0000-0000-000000000002")
@@ -54,6 +56,7 @@ async def seed_v0_demo(
     *,
     broker_party_id: UUID,
     organization_party_id: UUID,
+    policyholder_email: str = "john@example.com",
 ) -> UUID:
     """Provision explicit trusted demo identity and one unplanned renewal Workflow."""
 
@@ -99,7 +102,21 @@ async def seed_v0_demo(
                 id=DEMO_POLICYHOLDER_IDENTIFIER_ID,
                 party_id=DEMO_POLICYHOLDER_ID,
                 kind="email",
-                value="john@example.com",
+                value=policyholder_email,
+                verified_at=now,
+            ),
+            PartyIdentifierRow(
+                id=DEMO_BROKER_PHONE_IDENTIFIER_ID,
+                party_id=broker_party_id,
+                kind="phone",
+                value="+14165550101",
+                verified_at=now,
+            ),
+            PartyIdentifierRow(
+                id=DEMO_POLICYHOLDER_PHONE_IDENTIFIER_ID,
+                party_id=DEMO_POLICYHOLDER_ID,
+                kind="phone",
+                value="+14165550142",
                 verified_at=now,
             ),
             OrganizationMembershipRow(

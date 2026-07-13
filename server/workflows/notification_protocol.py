@@ -52,13 +52,16 @@ class WorkflowNotificationProtocol:
         now = self._clock()
         async with self._database.transaction() as session:
             await self._recover_expired(session, now)
+            filters = [
+                NotificationRow.status == "queued",
+                NotificationRow.available_at <= now,
+                NotificationRow.attempts < NotificationRow.max_attempts,
+            ]
+            if command.kinds:
+                filters.append(NotificationRow.kind.in_(command.kinds))
             notification = await session.scalar(
                 sa.select(NotificationRow)
-                .where(
-                    NotificationRow.status == "queued",
-                    NotificationRow.available_at <= now,
-                    NotificationRow.attempts < NotificationRow.max_attempts,
-                )
+                .where(*filters)
                 .order_by(
                     NotificationRow.available_at,
                     NotificationRow.created_at,
@@ -537,6 +540,7 @@ class WorkflowNotificationProtocol:
             notification_id=notification.id,
             workflow_event_id=notification.workflow_event_id,
             workflow_id=notification.workflow_id,
+            kind=notification.kind,
             delivery_attempt=notification.attempts,
         )
 

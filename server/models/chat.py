@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -24,6 +24,15 @@ class ChatMessage(BaseModel):
         return {"role": self.role.strip(), "content": self.content}
 
 
+class SmsInteractionEnvelope(BaseModel):
+    """Trusted proxy envelope for one simulated inbound SMS interaction."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    channel: Literal["sms"]
+    sender_phone: str = Field(min_length=8, max_length=32)
+
+
 class ChatRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="ignore")
 
@@ -31,6 +40,7 @@ class ChatRequest(BaseModel):
     model: str | None = None
     system: str | None = None
     stream: bool = True
+    interaction: SmsInteractionEnvelope | None = None
 
     def openrouter_messages(self) -> list[dict[str, str]]:
         return [msg.as_openrouter() for msg in self.messages if msg.content.strip()]

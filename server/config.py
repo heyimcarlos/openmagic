@@ -86,6 +86,12 @@ class Settings(BaseModel):
     workflow_interaction_token: str | None = Field(
         default=os.getenv("OPENMAGIC_WORKFLOW_INTERACTION_TOKEN")
     )
+    verification_code_secret: str | None = Field(
+        default=os.getenv("OPENMAGIC_VERIFICATION_CODE_SECRET")
+    )
+    demo_policyholder_email: str = Field(
+        default=os.getenv("OPENMAGIC_DEMO_POLICYHOLDER_EMAIL", "john@example.com")
+    )
     interaction_mode: Literal["workflow", "legacy"] = Field(default_factory=_interaction_mode)
 
     # HTTP behaviour

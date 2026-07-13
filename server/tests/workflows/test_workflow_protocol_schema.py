@@ -28,6 +28,7 @@ PROTOCOL_TABLES = {
     "workflow_job_runs",
     "workflow_events",
     "notifications",
+    "verification_challenges",
 }
 
 EXPECTED_INDEXES = {
@@ -54,6 +55,10 @@ EXPECTED_INDEXES = {
         "uq_workflow_events_workflow_proposed",
     },
     "notifications": {"ix_notifications_claim", "ix_notifications_lease"},
+    "verification_challenges": {
+        "ix_verification_challenges_authorization",
+        "uq_verification_challenges_pending_interaction",
+    },
 }
 
 

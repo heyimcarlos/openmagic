@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -12,8 +12,11 @@ from server.workflows import (
     DRAFT_RENEWAL_EMAIL_KIND,
     GMAIL_SEND_EMAIL_KIND,
     ApproveWorkflowJobCommand,
+    AuthorizeProtectedOperationCommand,
     ProposeWorkflowJobsCommand,
+    ProtectedOperation,
     RecordInteractionCauseCommand,
+    StepUpVerification,
     WorkflowCommandContext,
     WorkflowControlPlane,
     WorkflowError,
@@ -111,9 +114,11 @@ class WorkflowInteractionToolbox:
         *,
         retrieval: WorkflowRetrieval,
         control_plane: WorkflowControlPlane,
+        verification: StepUpVerification | None = None,
     ) -> None:
         self._retrieval = retrieval
         self._control_plane = control_plane
+        self._verification = verification
 
     @property
     def schemas(self) -> tuple[dict[str, Any], ...]:
@@ -154,6 +159,27 @@ class WorkflowInteractionToolbox:
                 context.resolved_workflow_id = (
                     page.results[0].workflow_id if page.total_matches == 1 else None
                 )
+                if self._verification is not None:
+                    if page.total_matches == 0:
+                        return ToolResult(
+                            success=True,
+                            payload={"resolution": "not_found"},
+                        )
+                    if page.total_matches > 1:
+                        return ToolResult(
+                            success=True,
+                            payload={
+                                "resolution": "ambiguous",
+                                "refine_with": ["organization", "renewal_period"],
+                            },
+                        )
+                    return ToolResult(
+                        success=True,
+                        payload={
+                            "resolution": "resolved",
+                            "workflow_id": str(page.results[0].workflow_id),
+                        },
+                    )
                 return ToolResult(success=True, payload=page.model_dump(mode="json"))
             if name == "read_workflow_packet":
                 request = _PacketArguments.model_validate(arguments)
@@ -171,6 +197,17 @@ class WorkflowInteractionToolbox:
                         success=False,
                         payload={"code": "workflow_packet_already_selected"},
                     )
+                verification = await self._gate_verification(
+                    context,
+                    workflow_id=request.workflow_id,
+                    purpose="sensitive_read",
+                    operation=ProtectedOperation(
+                        name="read_workflow_packet",
+                        arguments={"workflow_id": str(request.workflow_id)},
+                    ),
+                )
+                if verification is not None:
+                    return verification
                 packet = await self._retrieval.read_workflow_packet(
                     WorkflowInspectionContext(actor_party_id=context.actor_party_id),
                     request.workflow_id,
@@ -179,15 +216,80 @@ class WorkflowInteractionToolbox:
                 return ToolResult(success=True, payload=packet.model_dump(mode="json"))
             if name == "propose_renewal_email":
                 request = _ProposalArguments.model_validate(arguments)
+                if context.loaded_packet is None:
+                    if (
+                        context.verification_challenge_id is None
+                        or context.trusted_workflow_id != request.workflow_id
+                    ):
+                        return ToolResult(
+                            success=False,
+                            payload={"code": "workflow_packet_required"},
+                        )
+                    verification = await self._gate_verification(
+                        context,
+                        workflow_id=request.workflow_id,
+                        purpose="sensitive_write",
+                        operation=ProtectedOperation(
+                            name="propose_renewal_email",
+                            arguments={"workflow_id": str(request.workflow_id)},
+                        ),
+                    )
+                    if verification is not None:
+                        return verification
+                    context.loaded_packet = await self._retrieval.read_workflow_packet(
+                        WorkflowInspectionContext(actor_party_id=context.actor_party_id),
+                        request.workflow_id,
+                    )
+                else:
+                    resolved_workflow_id = (
+                        context.trusted_workflow_id or context.resolved_workflow_id
+                    )
+                    if (
+                        context.loaded_packet.workflow.workflow_id != request.workflow_id
+                        or request.workflow_id != resolved_workflow_id
+                    ):
+                        return ToolResult(
+                            success=False,
+                            payload={"code": "workflow_packet_required"},
+                        )
+                    verification = await self._gate_verification(
+                        context,
+                        workflow_id=request.workflow_id,
+                        purpose="sensitive_write",
+                        operation=ProtectedOperation(
+                            name="propose_renewal_email",
+                            arguments={"workflow_id": str(request.workflow_id)},
+                        ),
+                    )
+                    if verification is not None:
+                        return verification
                 return await self._propose(request, context)
             if name == "approve_job":
                 request = _ApprovalArguments.model_validate(arguments)
                 packet = context.loaded_packet
                 if packet is None:
-                    return ToolResult(
-                        success=False,
-                        payload={"code": "workflow_packet_required"},
+                    workflow_id = context.trusted_workflow_id
+                    if context.verification_challenge_id is None or workflow_id is None:
+                        return ToolResult(
+                            success=False,
+                            payload={"code": "workflow_packet_required"},
+                        )
+                    verification = await self._gate_verification(
+                        context,
+                        workflow_id=workflow_id,
+                        purpose="sensitive_write",
+                        operation=ProtectedOperation(
+                            name="approve_job",
+                            arguments=request.model_dump(mode="json"),
+                        ),
                     )
+                    if verification is not None:
+                        return verification
+                    packet = await self._retrieval.read_workflow_packet(
+                        WorkflowInspectionContext(actor_party_id=context.actor_party_id),
+                        workflow_id,
+                    )
+                    context.loaded_packet = packet
                 job = next(
                     (
                         item
@@ -200,6 +302,17 @@ class WorkflowInteractionToolbox:
                 )
                 if job is None:
                     return ToolResult(success=False, payload={"code": "stale_approval_target"})
+                verification = await self._gate_verification(
+                    context,
+                    workflow_id=packet.workflow.workflow_id,
+                    purpose="sensitive_write",
+                    operation=ProtectedOperation(
+                        name="approve_job",
+                        arguments=request.model_dump(mode="json"),
+                    ),
+                )
+                if verification is not None:
+                    return verification
                 grant = await self._control_plane.approve_job(
                     ApproveWorkflowJobCommand(
                         context=WorkflowCommandContext(
@@ -222,7 +335,8 @@ class WorkflowInteractionToolbox:
                 )
             if name == "send_message_to_user":
                 request = _MessageArguments.model_validate(arguments)
-                get_conversation_log().record_reply(request.message)
+                conversation = context.conversation or get_conversation_log()
+                conversation.record_reply(request.message)
                 return ToolResult(
                     success=True,
                     payload={"status": "delivered"},
@@ -231,7 +345,8 @@ class WorkflowInteractionToolbox:
                 )
             if name == "wait":
                 request = _WaitArguments.model_validate(arguments)
-                get_conversation_log().record_wait(request.reason)
+                conversation = context.conversation or get_conversation_log()
+                conversation.record_wait(request.reason)
                 return ToolResult(
                     success=True,
                     payload={"status": "waiting"},
@@ -248,6 +363,53 @@ class WorkflowInteractionToolbox:
                 success=False,
                 payload={"code": type(exc).__name__, "message": str(exc)},
             )
+
+    async def _gate_verification(
+        self,
+        context: InteractionToolContext,
+        *,
+        workflow_id: UUID,
+        purpose: Literal["sensitive_read", "sensitive_write"],
+        operation: ProtectedOperation,
+    ) -> ToolResult | None:
+        if self._verification is None:
+            return None
+        if context.interaction_id is None:
+            return ToolResult(
+                success=False,
+                payload={"code": "verification_context_required"},
+            )
+        decision = await self._verification.authorize_or_challenge(
+            AuthorizeProtectedOperationCommand(
+                actor_party_id=context.actor_party_id,
+                interaction_id=context.interaction_id,
+                workflow_id=workflow_id,
+                purpose=purpose,
+                cause_id=context.cause_id,
+                operation=operation,
+            )
+        )
+        if decision.status == "verification_unavailable":
+            return ToolResult(
+                success=False,
+                payload={"code": "verification_unavailable"},
+            )
+        if decision.status == "verification_required":
+            return ToolResult(
+                success=False,
+                payload={
+                    "code": "verification_required",
+                    "challenge_id": str(decision.challenge_id),
+                    "purpose": purpose,
+                    "delivery_method": "email_code",
+                    "delivery_status": "queued",
+                    "destination": decision.masked_destination,
+                    "expires_at": (
+                        decision.expires_at.isoformat() if decision.expires_at is not None else None
+                    ),
+                },
+            )
+        return None
 
     async def _propose(
         self,

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from contextlib import AbstractAsyncContextManager
 from datetime import timedelta
 from typing import Protocol
@@ -172,17 +172,24 @@ class NotificationWorker:
         interactions: NotificationInteractionFactory,
         worker_id: str,
         lease_duration: timedelta = timedelta(minutes=5),
+        notification_kinds: tuple[str, ...] = (),
+        on_delivery_failure: (
+            Callable[[NotificationDeliveryPacket], Awaitable[None]] | None
+        ) = None,
     ) -> None:
         self._control_plane = control_plane
         self._interactions = interactions
         self._worker_id = worker_id
         self._lease_duration = lease_duration
+        self._notification_kinds = notification_kinds
+        self._on_delivery_failure = on_delivery_failure
 
     async def run_once(self) -> NotificationDeliveryPacket | None:
         packet = await self._control_plane.claim_notification(
             ClaimNotificationCommand(
                 worker_id=self._worker_id,
                 lease_duration=self._lease_duration,
+                kinds=self._notification_kinds,
             )
         )
         if packet is None:
@@ -198,7 +205,7 @@ class NotificationWorker:
                     packet.workflow_id,
                 )
         except Exception:
-            await self._control_plane.report_notification_failure(
+            failed = await self._control_plane.report_notification_failure(
                 ReportNotificationFailureCommand(
                     notification_id=packet.notification_id,
                     worker_id=self._worker_id,
@@ -206,6 +213,8 @@ class NotificationWorker:
                     error_code="interaction_delivery_failed",
                 )
             )
+            if self._on_delivery_failure is not None:
+                await self._on_delivery_failure(failed)
             raise
         return await self._control_plane.acknowledge_notification(
             AcknowledgeNotificationCommand(

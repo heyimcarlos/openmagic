@@ -14,13 +14,19 @@ from server.agents.interaction_agent.workflow_notifications import (
 )
 from server.config import Settings, get_settings
 from server.logging_config import logger
+from server.services.conversation import get_conversation_session
 from server.workflows import (
     COMPOSIO_GMAIL_TOOLKIT_VERSION,
+    VERIFICATION_EMAIL_NOTIFICATION_KIND,
     ComposioGmailSendAdapter,
     ComposioMailboxBinding,
+    ComposioVerificationEmailSender,
     EmailSendAdapter,
     NotificationWorker,
     StaticWorkflowAuthority,
+    StepUpVerification,
+    VerificationDeliveryFailureHandler,
+    VerificationEmailInteractionFactory,
     WorkflowControlPlane,
     WorkflowDatabase,
     WorkflowRetrieval,
@@ -41,6 +47,7 @@ class WorkflowRuntimeService:
         self._database: WorkflowDatabase | None = None
         self._job_worker: WorkflowWorker | None = None
         self._notification_worker: NotificationWorker | None = None
+        self._verification_worker: NotificationWorker | None = None
 
     async def start(self) -> None:
         if self._settings.interaction_mode != "workflow":
@@ -91,7 +98,45 @@ class WorkflowRuntimeService:
                 organization_party_id=UUID(self._settings.workflow_organization_party_id),
             ),
             worker_id=f"notification-worker:{uuid4()}",
+            notification_kinds=("approval_required", "send_confirmed"),
         )
+        if (
+            self._settings.verification_code_secret
+            and self._settings.composio_api_key
+            and self._settings.workflow_composio_user_id
+        ):
+            from composio import Composio
+
+            verification = StepUpVerification(
+                database=database,
+                code_secret=self._settings.verification_code_secret.encode(),
+            )
+            client = Composio(
+                api_key=self._settings.composio_api_key,
+                toolkit_versions={"gmail": COMPOSIO_GMAIL_TOOLKIT_VERSION},
+            )
+            self._verification_worker = NotificationWorker(
+                control_plane=control_plane,
+                interactions=VerificationEmailInteractionFactory(
+                    verification=verification,
+                    sender=ComposioVerificationEmailSender(
+                        client=client,
+                        composio_user_id=self._settings.workflow_composio_user_id,
+                    ),
+                ),
+                worker_id=f"verification-email-worker:{uuid4()}",
+                notification_kinds=(VERIFICATION_EMAIL_NOTIFICATION_KIND,),
+                on_delivery_failure=VerificationDeliveryFailureHandler(
+                    verification=verification,
+                    notify=lambda interaction_id, message: get_conversation_session(
+                        interaction_id
+                    ).log.record_reply(message),
+                ),
+            )
+        else:
+            logger.warning(
+                "Verification email worker disabled because verification or Composio is incomplete"
+            )
         self._running = True
         self._task = asyncio.create_task(self._run(), name="workflow-runtime")
         logger.info("Workflow runtime started", extra={"interval": self._poll_interval})
@@ -138,6 +183,7 @@ class WorkflowRuntimeService:
         self._database = None
         self._job_worker = None
         self._notification_worker = None
+        self._verification_worker = None
 
     async def _run(self) -> None:
         while self._running:
@@ -157,6 +203,8 @@ class WorkflowRuntimeService:
             return
         await self._job_worker.run_once()
         await self._notification_worker.run_once()
+        if self._verification_worker is not None:
+            await self._verification_worker.run_once()
 
 
 @lru_cache(maxsize=1)

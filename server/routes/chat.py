@@ -1,12 +1,14 @@
 import secrets
 from typing import Annotated
 
-from fastapi import APIRouter, Header, HTTPException, status
+from fastapi import APIRouter, Header, HTTPException, Query, status
 from fastapi.responses import JSONResponse, Response
 
 from ..config import Settings, get_settings
 from ..models import ChatHistoryClearResponse, ChatHistoryResponse, ChatRequest
 from ..services import get_conversation_log, get_trigger_service, handle_chat_request
+from ..services.conversation import get_conversation_session
+from ..workflows import sms_interaction_id
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
@@ -45,18 +47,40 @@ def _require_workflow_interaction(
 
 @router.get("/history", response_model=ChatHistoryResponse)
 # Retrieve the conversation history from the log
-def chat_history() -> ChatHistoryResponse:
-    log = get_conversation_log()
+def chat_history(
+    sender_phone: str | None = Query(default=None, min_length=8, max_length=32),
+    authorization: Annotated[str | None, Header()] = None,
+) -> ChatHistoryResponse:
+    settings = get_settings()
+    _require_workflow_interaction(settings, authorization)
+    if settings.interaction_mode == "workflow" and sender_phone is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="SMS sender phone is required",
+        )
+    log = get_conversation_session(sms_interaction_id(sender_phone)).log if sender_phone else get_conversation_log()
     return ChatHistoryResponse(messages=log.to_chat_messages())
 
 
 @router.delete("/history", response_model=ChatHistoryClearResponse)
-def clear_history() -> ChatHistoryClearResponse:
+def clear_history(
+    sender_phone: str | None = Query(default=None, min_length=8, max_length=32),
+    authorization: Annotated[str | None, Header()] = None,
+) -> ChatHistoryClearResponse:
     from ..services import get_agent_roster, get_execution_agent_logs
 
-    # Clear conversation log
-    log = get_conversation_log()
+    settings = get_settings()
+    _require_workflow_interaction(settings, authorization)
+    if settings.interaction_mode == "workflow" and sender_phone is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="SMS sender phone is required",
+        )
+    log = get_conversation_session(sms_interaction_id(sender_phone)).log if sender_phone else get_conversation_log()
     log.clear()
+
+    if sender_phone is not None:
+        return ChatHistoryClearResponse()
 
     # Clear execution agent logs
     execution_logs = get_execution_agent_logs()

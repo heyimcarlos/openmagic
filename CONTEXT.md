@@ -24,6 +24,18 @@ _Avoid_: Anonymous user, guest Party
 A non-destructive relationship from a Provisional Party to the established Party it was later verified to represent. Historical references remain on the Provisional Party, while future identity resolution uses the established Party.
 _Avoid_: Party merge, rewritten Actor
 
+**Interaction**:
+A channel-scoped sequence of messages with stable continuity, such as one simulated SMS conversation. Its sender identifier may resolve a Party, but the Interaction itself grants no Workflow authority and provides no step-up proof.
+_Avoid_: Account session, global login, authorization role
+
+**Verification Challenge**:
+A durable, single-use request for a Party to prove current control of an on-file identifier through a second channel. It binds one Party, Interaction, Workflow, purpose, and exact waiting protected operation, expires after 15 minutes, and queues delivery through a replaceable adapter.
+_Avoid_: Verification tool, global Party verification, Workflow authority grant
+
+**Verification Authorization**:
+The short-lived assurance established when a Verification Challenge succeeds. It may authorize protected operations only for the same Party, Interaction, Workflow, and purpose for 15 minutes. The protected operation still revalidates current Workflow authority when it resumes.
+_Avoid_: Login session, reusable approval, role assignment
+
 **Workflow**:
 A durable business objective that may span many messages, waits, Workflow Jobs, and Workflow Job Runs. Its lifecycle records whether that objective is active, completed, or cancelled independently of any individual Job or Run. Completed and cancelled are terminal. Cancellation succeeds atomically only while every unfinished Job and Run remains safely cancelable; it cancels that work and revokes its execution authority, while completed work remains permanent history. If any External Effect has crossed its dispatch boundary or remains uncertain, cancellation is too late and changes nothing.
 _Avoid_: Agent, conversation, run

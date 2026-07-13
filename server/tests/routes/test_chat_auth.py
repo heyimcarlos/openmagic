@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import pytest
 from fastapi import HTTPException
+from pydantic import ValidationError
 
 from server.config import Settings
-from server.models import ChatMessage
+from server.models import ChatMessage, ChatRequest
 from server.routes.chat import _require_workflow_interaction
 
 
@@ -35,3 +36,31 @@ def test_inbound_message_keeps_its_stable_source_id():
     )
 
     assert message.id == "message-source-123"
+
+
+def test_sms_envelope_accepts_phone_identity_and_rejects_authorization_role():
+    request = ChatRequest.model_validate(
+        {
+            "messages": [{"id": "sms-message-1", "role": "user", "content": "Hello"}],
+            "interaction": {
+                "channel": "sms",
+                "sender_phone": "+1 (416) 555-0142",
+            },
+        }
+    )
+
+    assert request.interaction is not None
+    assert request.interaction.sender_phone == "+1 (416) 555-0142"
+    assert request.interaction.channel == "sms"
+
+    with pytest.raises(ValidationError):
+        ChatRequest.model_validate(
+            {
+                "messages": [{"id": "sms-message-2", "role": "user", "content": "Hello"}],
+                "interaction": {
+                    "channel": "sms",
+                    "sender_phone": "+1 (416) 555-0142",
+                    "authorization_role": "Broker",
+                },
+            }
+        )

@@ -2,10 +2,14 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import SettingsModal, { useSettings } from '@/components/SettingsModal';
-import { ChatHeader } from '@/components/chat/ChatHeader';
 import { ChatInput } from '@/components/chat/ChatInput';
 import { ChatMessages } from '@/components/chat/ChatMessages';
 import { ErrorBanner } from '@/components/chat/ErrorBanner';
+import {
+  SIMULATED_SMS_SENDERS,
+  SmsContactHeader,
+  type SimulatedSenderId,
+} from '@/components/chat/SmsContactHeader';
 import type { ChatBubble } from '@/components/chat/types';
 
 const POLL_INTERVAL_MS = 1500;
@@ -46,12 +50,17 @@ export default function Page() {
   const [messages, setMessages] = useState<ChatBubble[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [isWaitingForResponse, setIsWaitingForResponse] = useState(false);
+  const [senderId, setSenderId] = useState<SimulatedSenderId>('policyholder');
+  const sender =
+    SIMULATED_SMS_SENDERS.find((candidate) => candidate.id === senderId) ??
+    SIMULATED_SMS_SENDERS[0];
+  const historyUrl = `/api/chat/history?sender_phone=${encodeURIComponent(sender.phone)}`;
   const openSettings = useCallback(() => setOpen(true), [setOpen]);
   const closeSettings = useCallback(() => setOpen(false), [setOpen]);
 
   const loadHistory = useCallback(async () => {
     try {
-      const res = await fetch('/api/chat/history', { cache: 'no-store' });
+      const res = await fetch(historyUrl, { cache: 'no-store' });
       if (!res.ok) return;
       const data = await res.json();
       setMessages(toBubbles(data));
@@ -59,7 +68,7 @@ export default function Page() {
       if (err?.name === 'AbortError') return;
       console.error('Failed to load chat history', err);
     }
-  }, []);
+  }, [historyUrl]);
 
   useEffect(() => {
     void loadHistory();
@@ -131,6 +140,10 @@ export default function Page() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             messages: [{ id: sourceId, role: 'user', content: trimmed }],
+            interaction: {
+              channel: 'sms',
+              sender_phone: sender.phone,
+            },
           }),
         });
 
@@ -150,7 +163,7 @@ export default function Page() {
         await wait(RESPONSE_POLL_INTERVAL_MS);
 
         try {
-          const response = await fetch('/api/chat/history', { cache: 'no-store' });
+          const response = await fetch(historyUrl, { cache: 'no-store' });
           if (!response.ok) continue;
 
           const currentMessages = toBubbles(await response.json());
@@ -172,12 +185,12 @@ export default function Page() {
       setIsWaitingForResponse(false);
       await loadHistory();
     },
-    [loadHistory, messages],
+    [historyUrl, loadHistory, messages, sender],
   );
 
   const handleClearHistory = useCallback(async () => {
     try {
-      const res = await fetch('/api/chat/history', { method: 'DELETE' });
+      const res = await fetch(historyUrl, { method: 'DELETE' });
       if (!res.ok) {
         console.error('Failed to clear chat history', res.statusText);
         return;
@@ -186,7 +199,14 @@ export default function Page() {
     } catch (err) {
       console.error('Failed to clear chat history', err);
     }
-  }, [setMessages]);
+  }, [historyUrl, setMessages]);
+
+  const handleSenderChange = useCallback((id: SimulatedSenderId) => {
+    setSenderId(id);
+    setMessages([]);
+    setError(null);
+    setIsWaitingForResponse(false);
+  }, []);
 
   const triggerClearHistory = useCallback(() => {
     void handleClearHistory();
@@ -212,7 +232,12 @@ export default function Page() {
   return (
     <main className="min-h-screen bg-[radial-gradient(circle_at_top,_color-mix(in_oklch,var(--primary)_10%,transparent),_transparent_35%)] p-0 sm:p-6">
       <div className="mx-auto flex min-h-screen w-full max-w-3xl flex-col bg-card sm:min-h-0 sm:overflow-hidden sm:rounded-2xl sm:border sm:shadow-xl sm:shadow-foreground/5">
-        <ChatHeader onOpenSettings={openSettings} onClearHistory={triggerClearHistory} />
+        <SmsContactHeader
+          sender={sender}
+          onSenderChange={handleSenderChange}
+          onOpenSettings={openSettings}
+          onClearHistory={triggerClearHistory}
+        />
 
         <div className="flex-1 overflow-hidden">
           <ChatMessages

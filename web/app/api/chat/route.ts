@@ -28,7 +28,7 @@ export async function POST(req: Request) {
     return new Response('Invalid JSON', { status: 400 });
   }
 
-  const { messages } = body || {};
+  const { interaction, messages } = body || {};
   if (!Array.isArray(messages) || messages.length === 0) {
     return new Response('Missing messages', { status: 400 });
   }
@@ -41,6 +41,7 @@ export async function POST(req: Request) {
     system: '',
     messages: uiToOpenAIContent(messages),
     stream: false,
+    interaction,
   };
 
   try {

@@ -186,6 +186,7 @@ class ClaimNotificationCommand(WorkflowContract):
 
     worker_id: str = Field(min_length=1, max_length=255)
     lease_duration: timedelta = Field(gt=timedelta(0), le=timedelta(minutes=30))
+    kinds: tuple[str, ...] = ()
 
 
 class NotificationDeliveryPacket(WorkflowContract):
@@ -194,7 +195,73 @@ class NotificationDeliveryPacket(WorkflowContract):
     notification_id: UUID
     workflow_event_id: UUID
     workflow_id: UUID
+    kind: str
     delivery_attempt: int
+
+
+class ProtectedOperation(WorkflowContract):
+    """Exact typed operation waiting behind a deterministic verification gate."""
+
+    name: str = Field(pattern=r"^[a-z][a-z0-9_]{0,63}$")
+    arguments: dict[str, Any]
+
+
+class AuthorizeProtectedOperationCommand(WorkflowContract):
+    """Ask the application gate to authorize or challenge one protected operation."""
+
+    actor_party_id: UUID
+    interaction_id: str = Field(min_length=1, max_length=255)
+    workflow_id: UUID
+    purpose: Literal["sensitive_read", "sensitive_write"]
+    cause_id: str = Field(min_length=1, max_length=255)
+    operation: ProtectedOperation
+
+
+class VerificationDecision(WorkflowContract):
+    """Deterministic authorization decision returned to a protected operation."""
+
+    status: Literal["authorized", "verification_required", "verification_unavailable"]
+    challenge_id: UUID | None = None
+    masked_destination: str | None = None
+    expires_at: datetime | None = None
+    authorization_expires_at: datetime | None = None
+
+
+class SubmitVerificationCodeCommand(WorkflowContract):
+    """Submit one six-digit proof through the originating interaction."""
+
+    actor_party_id: UUID
+    interaction_id: str = Field(min_length=1, max_length=255)
+    cause_id: str = Field(min_length=1, max_length=255)
+    code: str = Field(pattern=r"^\d{6}$")
+
+
+class VerificationCodeResult(WorkflowContract):
+    """Result of consuming a verification code, including resumable typed intent."""
+
+    status: Literal[
+        "verified",
+        "invalid_code",
+        "attempts_exhausted",
+        "expired",
+        "no_active_challenge",
+        "verification_unavailable",
+    ]
+    challenge_id: UUID | None = None
+    workflow_id: UUID | None = None
+    purpose: Literal["sensitive_read", "sensitive_write"] | None = None
+    request_cause_id: str | None = None
+    operation: ProtectedOperation | None = None
+    authorization_expires_at: datetime | None = None
+
+
+class VerificationEmailDelivery(WorkflowContract):
+    """Trusted email delivery material, never returned to the model or browser."""
+
+    challenge_id: UUID
+    destination: str
+    code: str = Field(pattern=r"^\d{6}$")
+    expires_at: datetime
 
 
 class AcknowledgeNotificationCommand(WorkflowContract):

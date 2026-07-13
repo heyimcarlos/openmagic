@@ -28,6 +28,7 @@ async def _seed() -> None:
                 "OPENMAGIC_WORKFLOW_ORGANIZATION_PARTY_ID",
             )
         ),
+        policyholder_email=settings.demo_policyholder_email,
     )
     print(f"Seeded V0 Workflow {workflow_id}")
 
