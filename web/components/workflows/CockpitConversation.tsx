@@ -8,7 +8,7 @@ import type { CockpitStage } from '@/lib/workflowCockpit';
 
 interface CockpitConversationProps {
   stage: CockpitStage;
-  revision: 1 | 2;
+  revision: number;
   email: ApprovalEmail;
   onStart: () => void;
   onApprove: () => void;
@@ -35,7 +35,7 @@ export function CockpitConversation({
         </div>
         <div>
           <h2 className="text-sm font-semibold">Ava</h2>
-          <p className="text-[0.6875rem] text-muted-foreground">AI customer broker · online</p>
+          <p className="text-[0.6875rem] text-muted-foreground">Interaction Agent · online</p>
         </div>
       </header>
 

@@ -17,7 +17,7 @@ export function WorkflowEventTrace({ events }: WorkflowEventTraceProps) {
           Event trace
         </CardTitle>
         <p className="text-[0.625rem] font-medium uppercase tracking-[0.16em] text-slate-600">
-          Append-only evidence
+          Meaningful transition history
         </p>
       </CardHeader>
       <CardContent className="px-4 pb-6 sm:px-5">

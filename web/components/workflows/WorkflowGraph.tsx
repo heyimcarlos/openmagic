@@ -9,11 +9,23 @@ interface WorkflowGraphProps {
   snapshot: WorkflowCockpitSnapshot;
 }
 
-const statusStyles: Record<WorkflowJobView['status'], string> = {
-  waiting: 'border-amber-200 bg-amber-50 text-amber-800',
-  running: 'border-blue-200 bg-blue-50 text-blue-700',
-  succeeded: 'border-emerald-200 bg-emerald-50 text-emerald-700',
-  cancelled: 'border-border bg-muted text-muted-foreground',
+const statusPresentation: Record<WorkflowJobView['status'], { badge: string; dot: string }> = {
+  waiting: {
+    badge: 'border-amber-200 bg-amber-50 text-amber-800',
+    dot: 'bg-amber-500',
+  },
+  running: {
+    badge: 'border-blue-200 bg-blue-50 text-blue-700',
+    dot: 'bg-blue-500',
+  },
+  succeeded: {
+    badge: 'border-emerald-200 bg-emerald-50 text-emerald-700',
+    dot: 'bg-emerald-500',
+  },
+  cancelled: {
+    badge: 'border-border bg-muted text-muted-foreground',
+    dot: 'bg-muted-foreground/50',
+  },
 };
 
 export function WorkflowGraph({ snapshot }: WorkflowGraphProps) {
@@ -25,7 +37,7 @@ export function WorkflowGraph({ snapshot }: WorkflowGraphProps) {
           Durable graph
         </h2>
         <p className="mt-1 text-[0.625rem] font-medium uppercase tracking-[0.14em] text-muted-foreground">
-          Current PostgreSQL state
+          Workflow state projection
         </p>
       </div>
 
@@ -82,13 +94,7 @@ function JobCard({ job }: { job: WorkflowJobView }) {
       <span
         className={cn(
           'absolute -left-[1.65rem] top-5 size-2.5 rounded-full ring-4 ring-[#fcfaf6]',
-          job.status === 'succeeded'
-            ? 'bg-emerald-500'
-            : job.status === 'running'
-              ? 'bg-blue-500'
-              : job.status === 'waiting'
-                ? 'bg-amber-500'
-                : 'bg-muted-foreground/50',
+          statusPresentation[job.status].dot,
         )}
       />
       <CardContent className="flex items-start justify-between gap-3 px-4 py-4">
@@ -96,7 +102,10 @@ function JobCard({ job }: { job: WorkflowJobView }) {
           <h3 className="text-xs font-semibold">{job.title}</h3>
           <p className="mt-1 text-[0.625rem] text-muted-foreground">{job.detail}</p>
         </div>
-        <Badge variant="outline" className={cn('text-[0.625rem]', statusStyles[job.status])}>
+        <Badge
+          variant="outline"
+          className={cn('text-[0.625rem]', statusPresentation[job.status].badge)}
+        >
           {job.status}
         </Badge>
       </CardContent>

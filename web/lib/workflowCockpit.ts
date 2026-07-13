@@ -5,7 +5,7 @@ export type WorkflowEventTone = 'progress' | 'success' | 'terminal';
 
 export interface CockpitState {
   stage: CockpitStage;
-  revision: 1 | 2;
+  revision: number;
 }
 
 export interface WorkflowJobView {
@@ -36,89 +36,127 @@ const initialEvents: ReadonlyArray<WorkflowEventView> = [
   event('draft-ready', '24:11.804', 'draft_ready', 'Draft Job', 'Output frozen', 'success'),
 ];
 
-const completedEvents: ReadonlyArray<WorkflowEventView> = [
-  event('approval-granted', '24:14.221', 'approval_granted', 'Send Job', 'Exact effect fingerprint', 'success'),
-  event(
-    'dispatch-started',
-    '24:14.390',
-    'external_effect_dispatch_started',
-    'Send Run',
-    'Approval consumed',
-    'success',
-  ),
-  event('send-succeeded', '24:15.102', 'email_send_succeeded', 'Send Job', 'Provider receipt published', 'success'),
-  event('workflow-completed', '24:15.118', 'workflow_completed', 'Workflow', 'Business objective satisfied', 'terminal'),
-  event('notification-queued', '24:15.143', 'notification_queued', 'Notification', 'Attempt 0 of 3', 'terminal'),
-  event('notification-delivered', '24:16.007', 'notification_delivered', 'Notification', 'Attempt 1 of 3', 'terminal'),
-  event(
-    'interaction-reply-recorded',
-    '24:16.021',
-    'interaction_reply_recorded',
-    'Interaction',
-    'Correlation recorded once',
-    'terminal',
-  ),
-];
-
 export function buildCockpitSnapshot(state: CockpitState): WorkflowCockpitSnapshot {
   if (state.stage === 'ready') {
     return { workflowStatus: 'active', jobs: [], events: [] };
   }
 
-  const revisionEvents = state.revision === 2 ? buildRevisionEvents(state.stage) : [];
+  const revisionEvents = buildRevisionEvents(state);
   return {
     workflowStatus: state.stage === 'sent' ? 'completed' : 'active',
     jobs: buildJobs(state),
     events: [
       ...initialEvents,
       ...revisionEvents,
-      ...(state.stage === 'sent' ? completedEvents : []),
+      ...(state.stage === 'sent' ? buildCompletedEvents(state.revision) : []),
     ],
   };
 }
 
 function buildJobs(state: CockpitState): ReadonlyArray<WorkflowJobView> {
-  const sendStatus = state.stage === 'sent' ? 'succeeded' : 'waiting';
-  const initialJobs: WorkflowJobView[] = [
+  const jobs: WorkflowJobView[] = [
     job('draft-email', 'Draft renewal email', 'revision 1, fresh runtime', 'succeeded'),
   ];
 
-  if (state.revision === 1) {
-    return [
-      ...initialJobs,
-      job('send-email', 'Send approved email', 'revision 1, deterministic Composio', sendStatus),
-    ];
+  for (let revision = 1; revision <= state.revision; revision += 1) {
+    const current = revision === state.revision;
+    jobs.push(
+      job(
+        `send-email-${revision}`,
+        revision === 1 ? 'Send approved email' : revisionTitle('Send approved revision', revision),
+        current
+          ? `revision ${revision}, deterministic Composio`
+          : `revision ${revision}, safely replaced`,
+        current ? (state.stage === 'sent' ? 'succeeded' : 'waiting') : 'cancelled',
+      ),
+    );
+
+    const nextRevision = revision + 1;
+    if (nextRevision <= state.revision) {
+      const nextIsCurrent = nextRevision === state.revision;
+      jobs.push(
+        job(
+          `draft-email-${nextRevision}`,
+          revisionTitle('Draft renewal revision', nextRevision),
+          `revision ${nextRevision}, fresh runtime`,
+          nextIsCurrent && state.stage === 'editing' ? 'running' : 'succeeded',
+        ),
+      );
+    }
   }
 
+  return jobs;
+}
+
+function buildRevisionEvents(state: CockpitState): ReadonlyArray<WorkflowEventView> {
+  const events: WorkflowEventView[] = [];
+  for (let revision = 2; revision <= state.revision; revision += 1) {
+    const startMinute = 12 + (revision - 2) * 2;
+    events.push(
+      event(
+        `send-${revision - 1}-replaced`,
+        time(startMinute, '022'),
+        'job_replaced',
+        'Send Job',
+        `Revision ${revision - 1} safely cancelled`,
+      ),
+      event(
+        `draft-${revision}-run-started`,
+        time(startMinute, '094'),
+        'run_started',
+        'Draft Job',
+        `Fresh runtime ${revision === 2 ? 'c2a4' : `r${revision}d1`}`,
+      ),
+    );
+    if (revision < state.revision || state.stage !== 'editing') {
+      events.push(
+        event(
+          `draft-${revision}-ready`,
+          time(startMinute + 1, '318'),
+          'draft_ready',
+          'Draft Job',
+          `Revision ${revision} output frozen`,
+          'success',
+        ),
+      );
+    }
+  }
+  return events;
+}
+
+function buildCompletedEvents(revision: number): ReadonlyArray<WorkflowEventView> {
+  const startMinute = revision <= 2 ? 14 : 14 + (revision - 2) * 2;
   return [
-    ...initialJobs,
-    job('send-email', 'Send approved email', 'revision 1, safely replaced', 'cancelled'),
-    job(
-      'draft-email-revision',
-      'Draft renewal revision',
-      'revision 2, fresh runtime',
-      state.stage === 'editing' ? 'running' : 'succeeded',
+    event('approval-granted', time(startMinute, '221'), 'approval_granted', 'Send Job', 'Exact effect fingerprint', 'success'),
+    event(
+      'dispatch-started',
+      time(startMinute, '390'),
+      'external_effect_dispatch_started',
+      'Send Run',
+      'Approval consumed',
+      'success',
     ),
-    job(
-      'send-email-revision',
-      'Send approved revision',
-      'revision 2, deterministic Composio',
-      state.stage === 'sent' ? 'succeeded' : 'waiting',
+    event('send-succeeded', time(startMinute + 1, '102'), 'email_send_succeeded', 'Send Job', 'Provider receipt published', 'success'),
+    event('workflow-completed', time(startMinute + 1, '118'), 'workflow_completed', 'Workflow', 'Business objective satisfied', 'terminal'),
+    event('notification-queued', time(startMinute + 1, '143'), 'notification_queued', 'Notification', 'Attempt 0 of 3', 'terminal'),
+    event('notification-delivered', time(startMinute + 2, '007'), 'notification_delivered', 'Notification', 'Attempt 1 of 3', 'terminal'),
+    event(
+      'user-visible-acknowledgement-recorded',
+      time(startMinute + 2, '021'),
+      'user_visible_acknowledgement_recorded',
+      'Interaction Agent',
+      'User-facing reply recorded once',
+      'terminal',
     ),
   ];
 }
 
-function buildRevisionEvents(stage: CockpitStage): ReadonlyArray<WorkflowEventView> {
-  const events = [
-    event('send-replaced', '24:12.022', 'job_replaced', 'Send Job', 'Revision 1 safely cancelled'),
-    event('revision-run-started', '24:12.094', 'run_started', 'Draft Job', 'Fresh runtime c2a4'),
-  ];
-  if (stage !== 'editing') {
-    events.push(
-      event('revision-ready', '24:13.318', 'draft_ready', 'Draft Job', 'Revision 2 output frozen', 'success'),
-    );
-  }
-  return events;
+function revisionTitle(base: string, revision: number): string {
+  return revision === 2 ? base : `${base} ${revision}`;
+}
+
+function time(minute: number, fraction: string): string {
+  return `24:${String(minute).padStart(2, '0')}.${fraction}`;
 }
 
 function job(

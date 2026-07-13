@@ -15,25 +15,32 @@ const originalBody =
 const revisedBody =
   "Hi John,\n\nYour 2026 renewal is coming up. I'd like to review the options with you next Tuesday.\n\nBest,\nCarlos";
 
+type WorkflowCockpitState =
+  | { stage: 'ready'; revision: 1; body: string }
+  | { stage: Exclude<CockpitStage, 'ready'>; revision: number; body: string };
+
 export function WorkflowCockpit() {
-  const [stage, setStage] = useState<CockpitStage>('ready');
-  const [revision, setRevision] = useState<1 | 2>(1);
-  const [body, setBody] = useState(originalBody);
+  const [state, setState] = useState<WorkflowCockpitState>({
+    stage: 'ready',
+    revision: 1,
+    body: originalBody,
+  });
+  const { stage, revision, body } = state;
   const snapshot = useMemo(
     () => buildCockpitSnapshot({ stage, revision }),
     [revision, stage],
   );
 
   const reset = () => {
-    setStage('ready');
-    setRevision(1);
-    setBody(originalBody);
+    setState({ stage: 'ready', revision: 1, body: originalBody });
   };
 
   const requestChanges = () => {
-    setRevision(2);
-    setBody(revisedBody);
-    setStage('editing');
+    setState((current) => ({
+      stage: 'editing',
+      revision: current.revision + 1,
+      body: current.revision === 1 ? revisedBody : current.body,
+    }));
   };
 
   return (
@@ -72,11 +79,15 @@ export function WorkflowCockpit() {
               subject: 'Your 2026 policy renewal',
               body,
             }}
-            onStart={() => setStage('approval')}
-            onApprove={() => setStage('sent')}
+            onStart={() => setState({ stage: 'approval', revision: 1, body: originalBody })}
+            onApprove={() => setState((current) => ({ ...current, stage: 'sent' }))}
             onRequestChanges={requestChanges}
-            onChangeBody={setBody}
-            onSubmitRevision={() => setStage('reapproval')}
+            onChangeBody={(nextBody) =>
+              setState((current) => ({ ...current, body: nextBody }))
+            }
+            onSubmitRevision={() =>
+              setState((current) => ({ ...current, stage: 'reapproval' }))
+            }
           />
           <WorkflowGraph snapshot={snapshot} />
           <WorkflowEventTrace events={snapshot.events} />

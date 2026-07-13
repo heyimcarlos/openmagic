@@ -22,7 +22,30 @@ test('completed renewal keeps Job, Notification, and acknowledgement evidence di
       'workflow_completed',
       'notification_queued',
       'notification_delivered',
-      'interaction_reply_recorded',
+      'user_visible_acknowledgement_recorded',
+    ],
+  );
+});
+
+test('requesting another change appends a new revision without erasing prior events', () => {
+  const revisionTwo = buildCockpitSnapshot({
+    stage: 'reapproval',
+    revision: 2,
+  });
+  const revisionThree = buildCockpitSnapshot({
+    stage: 'editing',
+    revision: 3,
+  });
+
+  assert.deepEqual(
+    revisionThree.events.slice(0, revisionTwo.events.length),
+    revisionTwo.events,
+  );
+  assert.deepEqual(
+    revisionThree.jobs.slice(-2).map(({ title, status }) => [title, status]),
+    [
+      ['Draft renewal revision 3', 'running'],
+      ['Send approved revision 3', 'waiting'],
     ],
   );
 });
