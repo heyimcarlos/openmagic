@@ -29,6 +29,13 @@ DEMO_MEMBERSHIP_ID = UUID("52000000-0000-0000-0000-000000000001")
 DEMO_BROKER_ROLE_ID = UUID("53000000-0000-0000-0000-000000000001")
 DEMO_POLICYHOLDER_ROLE_ID = UUID("53000000-0000-0000-0000-000000000002")
 DEMO_CREATED_EVENT_ID = UUID("54000000-0000-0000-0000-000000000001")
+DEMO_IDENTIFIER_IDS = (
+    DEMO_BROKER_IDENTIFIER_ID,
+    DEMO_ORGANIZATION_IDENTIFIER_ID,
+    DEMO_POLICYHOLDER_IDENTIFIER_ID,
+    DEMO_BROKER_PHONE_IDENTIFIER_ID,
+    DEMO_POLICYHOLDER_PHONE_IDENTIFIER_ID,
+)
 
 
 class DemoResetBlockedError(RuntimeError):
@@ -116,6 +123,14 @@ async def reset_v0_demo(
                     "demo reset is blocked by running or uncertain external work"
                 )
             await session.execute(sa.text("TRUNCATE workflows, interaction_causes CASCADE"))
+            await session.execute(
+                sa.delete(OrganizationMembershipRow).where(
+                    OrganizationMembershipRow.id == DEMO_MEMBERSHIP_ID
+                )
+            )
+            await session.execute(
+                sa.delete(PartyIdentifierRow).where(PartyIdentifierRow.id.in_(DEMO_IDENTIFIER_IDS))
+            )
             await _seed_v0_demo_session(
                 session,
                 broker_party_id=broker_party_id,
