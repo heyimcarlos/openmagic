@@ -9,8 +9,8 @@ import {
 } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
-import type { BackpressureTimelineState } from '@/lib/backpressureTimeline';
-import type { BackpressureSnapshot } from '@/lib/backpressureDemo';
+import type { BackpressureTimelineState } from '@/lib/backpressureLabTimeline';
+import type { BackpressureSnapshot } from '@/lib/backpressureLab';
 
 export function BackpressureTimeline({
   timeline,
@@ -34,60 +34,59 @@ export function BackpressureTimeline({
   const chartOffset = timeline.frames.length - chartFrames.length;
   const selectedChartIndex = Math.max(0, selectedIndex - chartOffset);
   return (
-    <section className="grid gap-4 rounded-2xl border bg-card p-4 shadow-sm lg:grid-cols-[auto_minmax(20rem,1fr)] lg:items-center">
-      <div className="min-w-64">
-        <div className="flex items-center gap-2 text-[0.65rem] font-semibold uppercase tracking-[0.14em] text-primary">
-          <Clock3Icon className="size-3.5" />
-          Observed-state timeline
+    <footer className="grid shrink-0 gap-3 border-t bg-card/95 px-3 py-2 backdrop-blur md:grid-cols-[17rem_minmax(0,1fr)] md:items-center">
+      <div className="min-w-0">
+        <div className="flex items-center gap-2">
+          <Clock3Icon className="size-3.5 text-primary" />
+          <span className="text-[0.65rem] font-medium uppercase tracking-[0.12em]">Observed history</span>
+          <span className="ml-auto flex items-center gap-1.5 font-mono text-[0.58rem] text-muted-foreground">
+            <span className={`size-1.5 rounded-full ${live ? 'animate-pulse bg-emerald-500 motion-reduce:animate-none' : 'bg-amber-500'}`} />
+            {live ? 'LIVE' : `${selectedIndex + 1}/${timeline.frames.length}`}
+          </span>
         </div>
-        <div className="mt-3 flex flex-wrap items-center gap-2">
+        <div className="mt-2 flex items-center gap-1.5">
           <Button
-            size="sm"
-            variant="outline"
+            size="icon"
+            variant="ghost"
+            className="size-7"
             onClick={onPrevious}
             disabled={selectedIndex <= 0}
+            aria-label="Previous captured frame"
           >
             <ArrowLeftIcon />
-            Back
           </Button>
           {live ? (
-            <Button size="sm" variant="outline" onClick={onPause}>
+            <Button size="icon" variant="outline" className="size-8" onClick={onPause} aria-label="Pause live history">
               <PauseIcon />
-              Pause
             </Button>
           ) : (
-            <Button size="sm" onClick={onLive}>
+            <Button size="icon" className="size-8" onClick={onLive} aria-label="Return to live history">
               <PlayIcon />
-              Return live
             </Button>
           )}
           <Button
-            size="sm"
-            variant="outline"
+            size="icon"
+            variant="ghost"
+            className="size-7"
             onClick={onNext}
             disabled={live || selectedIndex >= lastIndex}
+            aria-label="Next captured frame"
           >
-            Next
             <ArrowRightIcon />
           </Button>
-        </div>
-        <div className="mt-3 flex items-center gap-3">
           <input
             aria-label="Captured system frame"
-            className="h-1.5 min-w-0 flex-1 cursor-pointer accent-sky-600"
+            className="ml-1 h-1.5 min-w-0 flex-1 cursor-pointer accent-blue-600"
             type="range"
             min={0}
             max={Math.max(0, lastIndex)}
             value={Math.max(0, selectedIndex)}
             onChange={(event) => onSeek(Number(event.target.value))}
           />
-          <span className="shrink-0 font-mono text-[0.62rem] text-muted-foreground">
-            {live ? 'LIVE' : `${selectedIndex + 1}/${timeline.frames.length}`}
-          </span>
         </div>
       </div>
       <BackpressureTrace frames={chartFrames} selectedIndex={selectedChartIndex} />
-    </section>
+    </footer>
   );
 }
 
@@ -99,7 +98,7 @@ function BackpressureTrace({
   selectedIndex: number;
 }) {
   const width = 720;
-  const height = 96;
+  const height = 58;
   const maxValue = Math.max(
     1,
     ...frames.flatMap((frame) => [
@@ -118,32 +117,27 @@ function BackpressureTrace({
     : (Math.min(selectedIndex, frames.length - 1) / (frames.length - 1)) * width;
   return (
     <div className="min-w-0">
-      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-        <p className="text-[0.65rem] font-semibold uppercase tracking-[0.13em] text-muted-foreground">
-          Pressure profile
-        </p>
-        <div className="flex gap-3 text-[0.6rem] text-muted-foreground">
-          <span className="before:mr-1 before:inline-block before:size-2 before:rounded-full before:bg-amber-500">Eligible</span>
-          <span className="before:mr-1 before:inline-block before:size-2 before:rounded-full before:bg-sky-500">Job Runs</span>
-          <span className="before:mr-1 before:inline-block before:size-2 before:rounded-full before:bg-violet-500">Notifications</span>
-        </div>
+      <div className="mb-1 flex items-center justify-end gap-3 text-[0.58rem] text-muted-foreground">
+        <span className="before:mr-1 before:inline-block before:size-1.5 before:rounded-full before:bg-amber-500">Eligible</span>
+        <span className="before:mr-1 before:inline-block before:size-1.5 before:rounded-full before:bg-sky-500">Runs</span>
+        <span className="before:mr-1 before:inline-block before:size-1.5 before:rounded-full before:bg-violet-500">Notifications</span>
       </div>
       <svg
-        aria-label="Queue, Workflow Job Run, and Notification counts across captured frames"
-        className="h-24 w-full overflow-visible rounded-lg border bg-blue-50/60"
+        aria-label="Eligible Jobs, active Runs, and Notifications across captured frames"
+        className="h-[58px] w-full overflow-visible"
         role="img"
         viewBox={`0 0 ${width} ${height}`}
       >
-        <line x1="0" y1={height - 4} x2={width} y2={height - 4} stroke="#cbd5e1" />
-        <polyline fill="none" stroke="#f59e0b" strokeWidth="3" points={points((frame) => frame.counts.queued)} />
-        <polyline fill="none" stroke="#0ea5e9" strokeWidth="3" points={points((frame) => frame.counts.runsRunning)} />
+        <line x1="0" y1={height - 4} x2={width} y2={height - 4} stroke="var(--border)" />
+        <polyline fill="none" stroke="#f59e0b" strokeWidth="2.5" points={points((frame) => frame.counts.queued)} />
+        <polyline fill="none" stroke="#0ea5e9" strokeWidth="2.5" points={points((frame) => frame.counts.runsRunning)} />
         <polyline
           fill="none"
           stroke="#8b5cf6"
-          strokeWidth="3"
+          strokeWidth="2.5"
           points={points((frame) => frame.counts.notificationsQueued + frame.counts.notificationsDelivering)}
         />
-        <line x1={cursorX} y1="0" x2={cursorX} y2={height} stroke="#334155" strokeDasharray="3 4" />
+        <line x1={cursorX} y1="0" x2={cursorX} y2={height} stroke="var(--foreground)" strokeDasharray="3 4" />
       </svg>
     </div>
   );

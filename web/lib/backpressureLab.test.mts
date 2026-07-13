@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { buildBackpressureFlow, parseBackpressureSnapshot } from './backpressureDemo.ts';
+import { buildBackpressureLabScene, parseBackpressureSnapshot } from './backpressureLab.ts';
 
 const payload = {
   captured_at: '2026-07-13T14:00:05Z',
@@ -55,6 +55,7 @@ const payload = {
       status: 'queued',
       attempts: 0,
       max_attempts: 2,
+      revision: 1,
       created_at: '2026-07-13T14:00:00Z',
     },
     {
@@ -66,6 +67,7 @@ const payload = {
       status: 'running',
       attempts: 1,
       max_attempts: 2,
+      revision: 1,
       created_at: '2026-07-13T14:00:01Z',
     },
   ],
@@ -89,6 +91,7 @@ const payload = {
       attempts: 0,
       claimed_by: null,
       delivered_by: null,
+      interaction_runtime_instance_id: null,
       created_at: '2026-07-13T14:00:04Z',
       delivered_at: null,
     },
@@ -100,8 +103,23 @@ const payload = {
       attempts: 1,
       claimed_by: null,
       delivered_by: 'notification-worker:12345678',
+      interaction_runtime_instance_id: 'interaction-runtime-fresh-1',
       created_at: '2026-07-13T13:59:57Z',
       delivered_at: '2026-07-13T14:00:03Z',
+    },
+  ],
+  approval_requests: [
+    {
+      workflow_id: 'workflow-3',
+      job_id: 'send-job-3',
+      draft_revision_id: 'draft-job-3',
+      revision: 1,
+      sender: 'broker@acme.example',
+      to: ['john@example.com'],
+      cc: [],
+      bcc: [],
+      subject: '2026 renewal',
+      body: 'Hello John',
     },
   ],
   activity: [
@@ -112,6 +130,7 @@ const payload = {
       workflow_id: 'workflow-1',
       job_id: null,
       run_id: null,
+      boundary: 'create_workflow',
       occurred_at: '2026-07-13T14:00:05Z',
     },
     {
@@ -121,6 +140,7 @@ const payload = {
       workflow_id: 'workflow-2',
       job_id: null,
       run_id: null,
+      boundary: null,
       occurred_at: '2026-07-13T14:00:04Z',
     },
     {
@@ -130,6 +150,7 @@ const payload = {
       workflow_id: 'workflow-2',
       job_id: 'job-running',
       run_id: 'run-1',
+      boundary: null,
       occurred_at: '2026-07-13T14:00:04Z',
     },
     {
@@ -139,12 +160,13 @@ const payload = {
       workflow_id: 'workflow-3',
       job_id: null,
       run_id: null,
+      boundary: null,
       occurred_at: '2026-07-13T14:00:03Z',
     },
   ],
 };
 
-test('parses the sanitized live projection and derives each real pipeline stage', () => {
+test('parses the live projection and derives explicit Job-to-Worker assignments', () => {
   const snapshot = parseBackpressureSnapshot(payload);
   assert.ok(snapshot);
   assert.deepEqual(snapshot.scope, {
@@ -154,29 +176,35 @@ test('parses the sanitized live projection and derives each real pipeline stage'
     truncated: false,
   });
 
-  const flow = buildBackpressureFlow(snapshot);
+  const scene = buildBackpressureLabScene(snapshot);
 
+  assert.equal(scene.jobs[0]?.id, 'job-running');
+  assert.equal(scene.jobs[0]?.assignedWorkerId, 'workflow-worker:12345678');
+  assert.equal(scene.jobs[0]?.runId, 'run-1');
+  assert.equal(scene.jobs[0]?.runtimeInstanceId, 'runtime-fresh-1');
+  assert.deepEqual(scene.workers[0], {
+    id: 'workflow-worker:12345678',
+    label: 'W1',
+    local: true,
+    status: 'active',
+    jobId: 'job-running',
+    runId: 'run-1',
+    runtimeInstanceId: 'runtime-fresh-1',
+  });
+  assert.equal(scene.runs[0]?.taskSummary, 'Draft the 2026 renewal for Demo Policyholder 2');
+  assert.equal(scene.jobs[0]?.revision, 1);
   assert.deepEqual(
-    flow.map((stage) => [stage.id, stage.count, stage.active]),
-    [
-      ['tooling', 3, true],
-      ['queue', 2, true],
-      ['worker', 1, true],
-      ['runs', 1, true],
-      ['execution', 1, true],
-      ['notifications', 1, true],
-      ['interaction', 1, true],
-    ],
+    scene.notifications.map((item) => item.id),
+    ['notification-queued', 'notification-delivered'],
   );
-  assert.equal(flow[2]?.tokens[0]?.id, 'workflow-worker:12345678');
-  assert.equal(flow[2]?.tokens[0]?.status, 'active');
-  assert.equal(flow[2]?.transitionMs, 1200);
-  assert.equal(flow[3]?.tokens[0]?.id, 'run-1');
-  assert.equal(flow[4]?.tokens[0]?.id, 'runtime-fresh-1');
-  assert.equal(flow[4]?.tokens[0]?.detail, 'Draft the 2026 renewal for Demo Policyholder 2');
-  assert.equal(flow[6]?.tokens[0]?.id, 'notification-delivered');
-  assert.equal(flow[6]?.tokens[0]?.detail, 'worker 12345678');
-  assert.deepEqual(flow.map((stage) => stage.signal), [true, true, true, true, true, true, true]);
+  assert.equal(scene.interactions[0]?.id, 'notification-delivered');
+  assert.equal(
+    scene.interactions[0]?.interactionRuntimeInstanceId,
+    'interaction-runtime-fresh-1',
+  );
+  assert.equal(snapshot.approvalRequests[0]?.jobId, 'send-job-3');
+  assert.equal(scene.latestActivity?.type, 'workflow_jobs_proposed');
+  assert.equal(scene.latestBoundary, 'create_workflow');
 });
 
 test('rejects malformed operational projections instead of animating invented state', () => {
@@ -188,4 +216,49 @@ test('rejects malformed operational projections instead of animating invented st
     }),
     undefined,
   );
+});
+
+test('keeps active delivery visible and reports hidden global pressure', () => {
+  const queuedNotifications = Array.from({ length: 6 }, (_, index) => ({
+    id: `notification-queued-${index}`,
+    workflow_id: `workflow-${index}`,
+    kind: 'work_completed',
+    status: 'queued',
+    attempts: 0,
+    claimed_by: null,
+    delivered_by: null,
+    interaction_runtime_instance_id: null,
+    created_at: `2026-07-13T14:00:0${index}Z`,
+    delivered_at: null,
+  }));
+  const delivering = {
+    id: 'notification-delivering',
+    workflow_id: 'workflow-active',
+    kind: 'work_completed',
+    status: 'delivering',
+    attempts: 1,
+    claimed_by: 'notification-worker:active',
+    delivered_by: null,
+    interaction_runtime_instance_id: null,
+    created_at: '2026-07-13T13:59:00Z',
+    delivered_at: null,
+  };
+  const snapshot = parseBackpressureSnapshot({
+    ...payload,
+    counts: {
+      ...payload.counts,
+      queued: 50,
+      waiting: 50,
+      running: 1,
+      notifications_queued: 6,
+      notifications_delivering: 1,
+    },
+    notifications: [...queuedNotifications, delivering],
+  });
+  assert.ok(snapshot);
+
+  const scene = buildBackpressureLabScene(snapshot);
+
+  assert.equal(scene.notifications[0]?.id, 'notification-delivering');
+  assert.equal(scene.hiddenJobCount, 99);
 });

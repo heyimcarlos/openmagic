@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from server.config import Settings, get_settings
 from server.services import (
@@ -24,6 +24,20 @@ class EnqueueDemoWorkflowsRequest(BaseModel):
 
     workflow_count: int = Field(ge=1, le=50)
     scenario: Literal["mixed", "renewal", "claim", "policy"] = "mixed"
+
+
+class EnqueueDemoJobsRequest(BaseModel):
+    """Compatibility command used by the original /system presentation."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    job_count: int = Field(ge=2, le=100)
+
+    @model_validator(mode="after")
+    def require_complete_renewal_graphs(self) -> EnqueueDemoJobsRequest:
+        if self.job_count % 2:
+            raise ValueError("job_count must be even")
+        return self
 
 
 def _service(settings: Settings) -> BackpressureDemoService:
@@ -67,6 +81,17 @@ async def enqueue_demo_workflows(
     return await _service(settings).enqueue_workflows(
         payload.workflow_count,
         payload.scenario,
+    )
+
+
+@router.post("/jobs", response_model=BackpressureSnapshot)
+async def enqueue_demo_jobs(
+    payload: EnqueueDemoJobsRequest,
+    settings: SettingsDependency,
+) -> BackpressureSnapshot:
+    return await _service(settings).enqueue_workflows(
+        payload.job_count // 2,
+        "renewal",
     )
 
 
