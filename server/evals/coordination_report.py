@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
-from .coordination_contracts import CoordinationReport, CoordinationTrial
+from .coordination_contracts import PAIRED_SCENARIO_IDS, CoordinationReport, CoordinationTrial
 
 
 def build_coordination_report(
@@ -19,6 +19,8 @@ def build_coordination_report(
     pairs: dict[str, list[CoordinationTrial]] = {}
     for trial in trials:
         pairs.setdefault(trial.scenario_id, []).append(trial)
+    if set(pairs) != PAIRED_SCENARIO_IDS:
+        raise ValueError("Report requires the complete renewal-coordination.v1 corpus")
     if any(
         len(pair) != 2 or {trial.profile for trial in pair} != {"legacy", "workflow"}
         for pair in pairs.values()

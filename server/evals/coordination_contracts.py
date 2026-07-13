@@ -18,11 +18,25 @@ class _EvidenceModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
+class CoordinationToolStep(_EvidenceModel):
+    """One bounded, secret-safe observation at a tool boundary."""
+
+    name: str = Field(min_length=1, max_length=100)
+    success: bool
+    result_code: str | None = Field(default=None, max_length=100)
+    argument_fields: tuple[str, ...] = ()
+    arguments_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    total_matches: int | None = Field(default=None, ge=0)
+    has_more: bool | None = None
+    workflow_id: UUID | None = None
+
+
 class CoordinationDiagnostics(_EvidenceModel):
     """Soft trajectory measurements that never decide V0 correctness."""
 
     model_calls: int = Field(ge=0)
     tool_calls: tuple[str, ...]
+    tool_steps: tuple[CoordinationToolStep, ...] = ()
     search_calls: int = Field(ge=0)
     packet_reads: int = Field(ge=0)
     max_context_bytes: int = Field(ge=0)
@@ -42,7 +56,7 @@ class CoordinationTrial(_EvidenceModel):
     correctness: bool | None
     response_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     selected_workflow_id: UUID | None = None
-    mutated_workflow_ids: tuple[UUID, ...] = ()
+    created_job_workflow_ids: tuple[UUID, ...] = ()
     diagnostics: CoordinationDiagnostics
 
     @model_validator(mode="after")
@@ -58,6 +72,7 @@ class CoordinationReport(_EvidenceModel):
     """One paired evidence report with a strict V0 verdict."""
 
     schema_version: Literal[1] = 1
+    suite_id: Literal["renewal-coordination.v1"] = "renewal-coordination.v1"
     run_id: str = Field(pattern=r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$")
     generated_at: datetime
     v0_passed: bool
@@ -147,13 +162,21 @@ RENEWAL_COORDINATION_SCENARIOS: tuple[CoordinationScenario, ...] = (
     ),
 )
 
+PAIRED_SCENARIO_IDS = frozenset(
+    scenario.scenario_id
+    for scenario in RENEWAL_COORDINATION_SCENARIOS
+    if scenario.phase == "paired"
+)
+
 
 __all__ = [
+    "PAIRED_SCENARIO_IDS",
     "RENEWAL_COORDINATION_SCENARIOS",
     "CoordinationDiagnostics",
     "CoordinationOutcome",
     "CoordinationProfile",
     "CoordinationReport",
     "CoordinationScenario",
+    "CoordinationToolStep",
     "CoordinationTrial",
 ]

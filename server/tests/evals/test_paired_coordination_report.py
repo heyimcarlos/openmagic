@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 import pytest
 
 from server.evals.coordination import (
+    PAIRED_SCENARIO_IDS,
     CoordinationDiagnostics,
     CoordinationTrial,
     build_coordination_report,
@@ -58,27 +59,29 @@ def test_report_gates_workflow_correctness_and_keeps_baseline_diagnostic(tmp_pat
         ),
     )
 
+    trials = tuple(
+        trial.model_copy(update={"scenario_id": scenario_id})
+        for scenario_id in sorted(PAIRED_SCENARIO_IDS)
+        for trial in (baseline, workflow)
+    )
     report = build_coordination_report(
         run_id="paired-test-run",
         generated_at=datetime(2026, 7, 13, tzinfo=UTC),
-        trials=(baseline, workflow),
+        trials=trials,
     )
     json_path, markdown_path = write_coordination_report(report, tmp_path)
 
     assert report.v0_passed is True
-    assert report.workflow_trials == 1
-    assert report.baseline_trials == 1
+    assert report.workflow_trials == 5
+    assert report.baseline_trials == 5
     payload = json.loads(json_path.read_text())
     assert payload["schema_version"] == 1
     assert payload["v0_passed"] is True
     assert payload["trials"][0]["correctness"] is None
     assert "prompt" not in json_path.read_text().casefold()
     trial_paths = sorted((json_path.parent / "trials").glob("*.json"))
-    assert [path.name for path in trial_paths] == [
-        "unique-renewal-legacy.json",
-        "unique-renewal-workflow.json",
-    ]
-    assert json.loads(trial_paths[1].read_text())["profile"] == "workflow"
+    assert len(trial_paths) == 10
+    assert json.loads(trial_paths[-1].read_text())["profile"] in {"legacy", "workflow"}
     markdown = markdown_path.read_text()
     assert "Strict V0 verdict: PASS" in markdown
     assert "Baseline outcomes and trajectory measurements are diagnostic" in markdown
@@ -121,7 +124,7 @@ def test_report_rejects_unpaired_scenario_results() -> None:
         diagnostics=diagnostics,
     )
 
-    with pytest.raises(ValueError, match="one legacy and one Workflow trial"):
+    with pytest.raises(ValueError, match=r"complete renewal-coordination\.v1 corpus"):
         build_coordination_report(
             run_id="unpaired",
             generated_at=datetime(2026, 7, 13, tzinfo=UTC),

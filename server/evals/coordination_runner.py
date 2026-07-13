@@ -11,19 +11,18 @@ from html import escape
 from typing import Any
 from uuid import UUID
 
-from server.agents.interaction_agent.agent import build_system_prompt
-from server.agents.interaction_agent.runtime import Completion, InteractionAgentRuntime
-from server.agents.interaction_agent.toolbox import (
+from server.agents.interaction_agent import (
+    Completion,
+    InteractionAgentRuntime,
     InteractionToolbox,
     InteractionToolContext,
+    LegacyInteractionToolbox,
     ToolResult,
-)
-from server.agents.interaction_agent.tools import TOOL_SCHEMAS
-from server.agents.interaction_agent.workflow_agent import (
+    WorkflowInteractionToolbox,
+    build_system_prompt,
     build_workflow_system_prompt,
     prepare_workflow_message,
 )
-from server.agents.interaction_agent.workflow_tools import WorkflowInteractionToolbox
 from server.config import Settings
 
 from .coordination_contracts import (
@@ -31,16 +30,52 @@ from .coordination_contracts import (
     CoordinationOutcome,
     CoordinationProfile,
     CoordinationScenario,
+    CoordinationToolStep,
     CoordinationTrial,
 )
 
 MutatedWorkflows = Callable[[], Awaitable[tuple[UUID, ...]]]
 
+_KNOWN_TOOL_NAMES = frozenset(
+    {
+        "approve_job",
+        "propose_renewal_email",
+        "read_workflow_packet",
+        "search_workflows",
+        "send_draft",
+        "send_message_to_agent",
+        "send_message_to_user",
+        "wait",
+    }
+)
+_KNOWN_ARGUMENT_FIELDS = frozenset(
+    {
+        "agent_name",
+        "body",
+        "cc",
+        "cursor",
+        "expected_draft_revision_id",
+        "instructions",
+        "job_id",
+        "limit",
+        "message",
+        "organization",
+        "participant",
+        "query",
+        "reason",
+        "renewal_period",
+        "status",
+        "subject",
+        "to",
+        "workflow_id",
+        "workflow_kind",
+    }
+)
+
 
 @dataclass
 class _Observation:
     model_calls: int = 0
-    tool_calls: list[str] = field(default_factory=list)
     search_calls: int = 0
     packet_reads: int = 0
     max_context_bytes: int = 0
@@ -49,6 +84,8 @@ class _Observation:
     delegated: bool = False
     selected_workflow_id: UUID | None = None
     last_search_matches: int | None = None
+    tool_steps: list[CoordinationToolStep] = field(default_factory=list)
+    user_messages: list[str] = field(default_factory=list)
 
 
 class _MemoryConversationState:
@@ -91,7 +128,7 @@ class _ObservedToolbox:
     def schemas(self) -> tuple[dict[str, Any], ...]:
         if self._delegate is not None:
             return self._delegate.schemas
-        return tuple(TOOL_SCHEMAS)
+        return LegacyInteractionToolbox().schemas
 
     async def invoke(
         self,
@@ -100,15 +137,11 @@ class _ObservedToolbox:
         context: InteractionToolContext,
     ) -> ToolResult:
         started = time.perf_counter_ns()
-        self._observation.tool_calls.append(name)
-        if name == "search_workflows":
-            self._observation.search_calls += 1
-        elif name == "read_workflow_packet":
-            self._observation.packet_reads += 1
         try:
             result = await self._invoke_safely(name, arguments, context)
         finally:
             self._observation.local_tool_duration_ns += time.perf_counter_ns() - started
+        self._observation.tool_steps.append(_tool_step(name, arguments, result))
         self._record_result(name, result)
         return result
 
@@ -140,17 +173,26 @@ class _ObservedToolbox:
             )
         if name in {"wait", "send_draft"}:
             return ToolResult(success=True, payload={"status": "observed_not_delivered"})
-        if self._delegate is None:
+        if self._delegate is None or name not in {
+            "search_workflows",
+            "read_workflow_packet",
+            "propose_renewal_email",
+        }:
             return ToolResult(success=False, payload={"code": "unknown_tool"})
         return await self._delegate.invoke(name, arguments, context)
 
     def _record_result(self, name: str, result: ToolResult) -> None:
+        if result.user_message:
+            self._observation.user_messages.append(result.user_message)
         if name == "send_message_to_agent" and result.success:
             self._observation.delegated = True
         if name == "search_workflows" and result.success and isinstance(result.payload, dict):
+            self._observation.search_calls += 1
             matches = result.payload.get("total_matches")
             if isinstance(matches, int):
                 self._observation.last_search_matches = matches
+        if name == "read_workflow_packet" and result.success:
+            self._observation.packet_reads += 1
         if name == "propose_renewal_email" and result.success and isinstance(result.payload, dict):
             workflow_id = result.payload.get("workflow_id")
             if workflow_id is not None:
@@ -204,12 +246,17 @@ class PairedCoordinationEvaluator:
             scenario.request,
             cause_id=f"eval:{self._run_id}:{scenario.scenario_id}:{profile}",
         )
-        mutations = _new_items(before, await self._mutated_workflows())
-        outcome = _outcome(result.success, observation)
+        created_job_workflow_ids = _new_items(before, await self._mutated_workflows())
+        outcome = _outcome(result.success, observation, result.response)
         correctness = (
             None
             if profile == "legacy"
-            else _workflow_correctness(scenario, outcome, observation, mutations)
+            else _workflow_correctness(
+                scenario,
+                outcome,
+                observation,
+                created_job_workflow_ids,
+            )
         )
         return CoordinationTrial(
             scenario_id=scenario.scenario_id,
@@ -220,7 +267,7 @@ class PairedCoordinationEvaluator:
             correctness=correctness,
             response_digest=hashlib.sha256(result.response.encode()).hexdigest(),
             selected_workflow_id=observation.selected_workflow_id,
-            mutated_workflow_ids=mutations,
+            created_job_workflow_ids=created_job_workflow_ids,
             diagnostics=_diagnostics(observation),
         )
 
@@ -277,7 +324,8 @@ def _diagnostics(observation: _Observation) -> CoordinationDiagnostics:
     context_bytes = observation.max_context_bytes
     return CoordinationDiagnostics(
         model_calls=observation.model_calls,
-        tool_calls=tuple(observation.tool_calls),
+        tool_calls=tuple(step.name for step in observation.tool_steps),
+        tool_steps=tuple(observation.tool_steps),
         search_calls=observation.search_calls,
         packet_reads=observation.packet_reads,
         max_context_bytes=context_bytes,
@@ -295,16 +343,21 @@ def _new_items(before: tuple[UUID, ...], after: tuple[UUID, ...]) -> tuple[UUID,
     return tuple(remaining)
 
 
-def _outcome(success: bool, observation: _Observation) -> CoordinationOutcome:
+def _outcome(
+    success: bool,
+    observation: _Observation,
+    final_response: str,
+) -> CoordinationOutcome:
     if not success:
         return "failed"
     if observation.selected_workflow_id is not None:
         return "proposed"
     if observation.delegated:
         return "delegated"
-    if observation.last_search_matches == 0:
+    user_text = "\n".join((*observation.user_messages, final_response))
+    if observation.last_search_matches == 0 and _reports_no_match(user_text):
         return "no_match"
-    if observation.last_search_matches is not None:
+    if observation.last_search_matches is not None and _requests_clarification(user_text):
         return "clarified"
     return "failed"
 
@@ -321,9 +374,116 @@ def _workflow_correctness(
         return not mutations
     return (
         observation.selected_workflow_id == scenario.expected_workflow_id
+        and _has_successful_workflow_step(
+            observation, "search_workflows", scenario.expected_workflow_id
+        )
+        and _has_successful_workflow_step(
+            observation, "read_workflow_packet", scenario.expected_workflow_id
+        )
         and len(mutations) == scenario.expected_workflow_jobs
         and all(workflow_id == scenario.expected_workflow_id for workflow_id in mutations)
     )
+
+
+def _has_successful_workflow_step(
+    observation: _Observation,
+    name: str,
+    workflow_id: UUID | None,
+) -> bool:
+    return any(
+        step.name == name and step.success and step.workflow_id == workflow_id
+        for step in observation.tool_steps
+    )
+
+
+def _requests_clarification(text: str) -> bool:
+    normalized = " ".join(text.casefold().split())
+    asks_for_detail = any(
+        phrase in normalized
+        for phrase in (
+            "can you confirm",
+            "could you clarify",
+            "could you specify",
+            "need more detail",
+            "please clarify",
+            "please specify",
+            "which john",
+            "which renewal",
+        )
+    )
+    identifies_missing_context = any(
+        term in normalized
+        for term in ("brokerage", "john", "organization", "renewal", "workflow", "year")
+    )
+    claims_action = any(term in normalized for term in ("queued", "selected", "sent"))
+    return asks_for_detail and identifies_missing_context and not claims_action
+
+
+def _reports_no_match(text: str) -> bool:
+    normalized = " ".join(text.casefold().split())
+    reports_absence = any(
+        phrase in normalized
+        for phrase in (
+            "could not find a matching",
+            "could not find any",
+            "couldn't find a matching",
+            "couldn't find any",
+            "did not find a matching",
+            "did not find any",
+            "didn't find a matching",
+            "didn't find any",
+            "no matching",
+            "unable to find a matching",
+            "unable to find any",
+        )
+    )
+    identifies_domain = any(term in normalized for term in ("renewal", "workflow"))
+    claims_action = any(term in normalized for term in ("queued", "selected", "sent"))
+    return reports_absence and identifies_domain and not claims_action
+
+
+def _tool_step(
+    name: str,
+    arguments: dict[str, Any],
+    result: ToolResult,
+) -> CoordinationToolStep:
+    payload = result.payload if isinstance(result.payload, dict) else {}
+    result_code = payload.get("code")
+    workflow_id = _workflow_id_from_step(name, arguments, payload)
+    supplied_fields = {key for key, value in arguments.items() if value is not None}
+    argument_fields = tuple(sorted(supplied_fields & _KNOWN_ARGUMENT_FIELDS))
+    if supplied_fields - _KNOWN_ARGUMENT_FIELDS:
+        argument_fields = (*argument_fields, "unknown_field")
+    return CoordinationToolStep(
+        name=name if name in _KNOWN_TOOL_NAMES else "unknown_tool",
+        success=result.success,
+        result_code=result_code if isinstance(result_code, str) else None,
+        argument_fields=argument_fields,
+        arguments_digest=hashlib.sha256(
+            json.dumps(arguments, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest(),
+        total_matches=(
+            payload.get("total_matches") if isinstance(payload.get("total_matches"), int) else None
+        ),
+        has_more=payload.get("has_more") if isinstance(payload.get("has_more"), bool) else None,
+        workflow_id=workflow_id,
+    )
+
+
+def _workflow_id_from_step(
+    name: str,
+    arguments: dict[str, Any],
+    payload: dict[str, Any],
+) -> UUID | None:
+    candidate = payload.get("workflow_id", arguments.get("workflow_id"))
+    if name == "search_workflows" and payload.get("total_matches") == 1:
+        results = payload.get("results")
+        if isinstance(results, list) and results and isinstance(results[0], dict):
+            candidate = results[0].get("workflow_id")
+    try:
+        return UUID(str(candidate)) if candidate is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _legacy_message_builder(

@@ -5,8 +5,10 @@ legacy Interaction profile and the V0 Workflow profile.
 
 Strict V0 correctness includes authorized Workflow resolution, safe
 clarification or no-match behavior, correct proposal, and no unintended Job
-mutation. The legacy result, Packet reads, context burden, tool counts, and
-segmented duration are diagnostics.
+mutation. A proposal passes only after a successful search and Packet read. A
+clarification or no-match passes only when the user-facing response actually
+communicates that disposition. The legacy result, Packet reads, context burden,
+tool counts, and segmented duration are diagnostics.
 
 The legacy profile uses the inherited prompt and tool schemas, but its
 named-agent dispatch boundary is observation-only. The evaluator never starts
@@ -40,7 +42,10 @@ OPENMAGIC_PAIRED_EVAL_OUTPUT_DIR
 
 The default evidence directory is `/tmp/openmagic-paired-eval`. Each run gets an
 isolated directory containing one JSON record per trial, one aggregate JSON
-record, and one Markdown summary. Reports contain synthetic scenario
-identifiers, build and model identity, typed outcomes, digests, stable synthetic
-Workflow IDs, counts, and timings. They do not contain prompts, conversation
-history, credentials, raw model payloads, or provider data.
+record, and one Markdown summary. The aggregate verdict requires the complete
+`renewal-coordination.v1` paired corpus. Reports contain synthetic scenario
+identifiers, build and model identity, typed outcomes, stable synthetic Workflow
+IDs, counts, timings, and bounded tool outcomes. Argument digests and field
+names show whether searches changed without retaining raw search text. Reports
+do not contain prompts, conversation history, credentials, raw model payloads,
+or provider data.
