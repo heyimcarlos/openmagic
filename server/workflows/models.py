@@ -265,6 +265,8 @@ class InteractionActivityReceiptRow(Base):
     sequence: Mapped[int] = mapped_column(sa.Integer, nullable=False)
     action_key: Mapped[str] = mapped_column(sa.Text, nullable=False)
     status: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    input_summary: Mapped[str | None] = mapped_column(sa.Text, nullable=True)
+    presentation: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     workflow_id: Mapped[UUID | None] = mapped_column(
         PGUUID(as_uuid=True),
         sa.ForeignKey(

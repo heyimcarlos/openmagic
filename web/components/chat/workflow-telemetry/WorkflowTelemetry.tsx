@@ -1,3 +1,5 @@
+import { useEffect, useState } from 'react';
+
 import {
   CheckIcon,
   ChevronDownIcon,
@@ -28,12 +30,32 @@ import type {
 interface WorkflowTelemetryProps {
   telemetry: ChatTurnTelemetry;
   className?: string;
+  defaultActivityOpen?: boolean;
 }
 
-export function WorkflowTelemetry({ telemetry, className }: WorkflowTelemetryProps) {
+export function WorkflowTelemetry({
+  telemetry,
+  className,
+  defaultActivityOpen = false,
+}: WorkflowTelemetryProps) {
+  const [openItems, setOpenItems] = useState<string[]>(
+    defaultActivityOpen && telemetry.activity.length > 0 ? ['turn-activity'] : [],
+  );
+
+  useEffect(() => {
+    setOpenItems((current) => {
+      const withoutActivity = current.filter((item) => item !== 'turn-activity');
+      return defaultActivityOpen && telemetry.activity.length > 0
+        ? ['turn-activity', ...withoutActivity]
+        : withoutActivity;
+    });
+  }, [defaultActivityOpen, telemetry.activity.length]);
+
   return (
     <Accordion
       multiple
+      value={openItems}
+      onValueChange={setOpenItems}
       className={cn('mt-3 gap-0.5', className)}
       aria-label="Agent activity and Workflow progress"
     >
@@ -62,7 +84,7 @@ function ActivityDisclosure({
       <TelemetryTrigger icon={WrenchIcon} summary={summary} />
       {activity.length > 0 && (
         <AccordionContent className="pb-1">
-          <TelemetryRows rows={activity} />
+          <ActivityRows activity={activity} />
         </AccordionContent>
       )}
     </AccordionItem>
@@ -122,6 +144,42 @@ function TelemetryRows({
         <div key={row.id} className="flex min-h-7 items-center gap-2 text-xs text-muted-foreground">
           <StatusIcon row={row} />
           <p className="min-w-0 font-normal">{row.label}</p>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ActivityRows({ activity }: { activity: ReadonlyArray<AgentActivity> }) {
+  return (
+    <div className="space-y-2 py-1">
+      {activity.map((item) => (
+        <div key={item.id} className="flex gap-2 text-xs text-muted-foreground">
+          <StatusIcon row={item} />
+          <div className="min-w-0 flex-1 space-y-1">
+            <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+              <code className="font-mono text-[0.6875rem] text-foreground/80">{item.tool}</code>
+              <span>{item.label}</span>
+            </div>
+            {item.inputSummary && (
+              <p className="break-words text-foreground/60">Input: {item.inputSummary}</p>
+            )}
+            {item.resultSummary && (
+              <p className={cn(
+                'break-words',
+                item.status === 'failed' ? 'text-destructive' : 'text-foreground/70',
+              )}>
+                Result: {item.resultSummary}
+              </p>
+            )}
+            {item.resultItems.length > 0 && (
+              <ul className="space-y-1 border-l pl-2.5 text-foreground/60">
+                {item.resultItems.map((result, index) => (
+                  <li key={`${item.id}:result:${index}`} className="break-words">{result}</li>
+                ))}
+              </ul>
+            )}
+          </div>
         </div>
       ))}
     </div>

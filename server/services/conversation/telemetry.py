@@ -165,10 +165,15 @@ class WorkflowTelemetryProjector:
 
     @staticmethod
     def _activity(receipt: InteractionActivityReceipt) -> ChatAgentActivity:
+        presentation = receipt.presentation
         return ChatAgentActivity(
             id=str(receipt.id),
+            tool=receipt.action.value,
             label=_ACTIVITY_LABELS[receipt.action],
             status=receipt.status.value,
+            input_summary=receipt.input_summary,
+            result_summary=presentation.summary if presentation is not None else None,
+            result_items=list(presentation.items) if presentation is not None else [],
         )
 
     @staticmethod

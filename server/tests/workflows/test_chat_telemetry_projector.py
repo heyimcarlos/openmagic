@@ -16,6 +16,7 @@ from server.tests.workflows.retrieval_fixtures import (
 from server.workflows import (
     ClaimWorkflowJobCommand,
     InteractionActivityAction,
+    InteractionActivityPresentation,
     InteractionActivityStatus,
     InteractionActivityStore,
     RecordInteractionCauseCommand,
@@ -66,11 +67,16 @@ async def test_projects_sanitized_activity_and_current_authorized_workflow_state
     search = await store.start(
         cause_id="renewal-request-message",
         action=InteractionActivityAction.SEARCH_WORKFLOWS,
+        input_summary='query "John Smith" · status active',
     )
     await store.finish(
         search.id,
         status=InteractionActivityStatus.SUCCEEDED,
         workflow_id=TARGET_ID,
+        presentation=InteractionActivityPresentation(
+            summary="1 authorized match, showing 1",
+            items=("John Smith renewal outreach · active · Acme Brokerage",),
+        ),
     )
     projector = WorkflowTelemetryProjector(
         retrieval=WorkflowRetrieval(database=database, cursor_secret=b"telemetry-test"),
@@ -88,6 +94,11 @@ async def test_projects_sanitized_activity_and_current_authorized_workflow_state
     assert [(item.label, item.status) for item in telemetry.activity] == [
         ("Searched authorized Workflows", "succeeded")
     ]
+    activity = telemetry.activity[0]
+    assert activity.tool == "search_workflows"
+    assert activity.input_summary == 'query "John Smith" · status active'
+    assert activity.result_summary == "1 authorized match, showing 1"
+    assert activity.result_items == ["John Smith renewal outreach · active · Acme Brokerage"]
     assert len(telemetry.workflows) == 1
     workflow = telemetry.workflows[0]
     assert workflow.id == str(TARGET_ID)

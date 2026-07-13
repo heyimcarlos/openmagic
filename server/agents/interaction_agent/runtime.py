@@ -16,6 +16,7 @@ from ...workflows import (
     InteractionActivityStore,
     ProtectedOperation,
 )
+from .activity_presenter import present_activity_input, present_activity_result
 from .agent import build_system_prompt, prepare_message_with_history
 from .toolbox import InteractionToolbox, InteractionToolContext, ToolResult
 
@@ -597,7 +598,11 @@ class InteractionAgentRuntime:
         except ValueError:
             return None
         try:
-            receipt = await activity_store.start(cause_id=context.cause_id, action=action)
+            receipt = await activity_store.start(
+                cause_id=context.cause_id,
+                action=action,
+                input_summary=present_activity_input(action, tool_call.arguments),
+            )
         except Exception as exc:  # pragma: no cover - telemetry must remain non-blocking
             logger.warning(
                 "Interaction activity receipt start failed",
@@ -627,6 +632,7 @@ class InteractionAgentRuntime:
                     else InteractionActivityStatus.FAILED
                 ),
                 workflow_id=workflow_id,
+                presentation=present_activity_result(action, result),
             )
         except Exception as exc:  # pragma: no cover - telemetry must remain non-blocking
             logger.warning(

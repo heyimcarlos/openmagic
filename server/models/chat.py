@@ -15,8 +15,12 @@ class ChatAgentActivity(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     id: str = Field(..., min_length=1, max_length=255)
+    tool: str = Field(..., min_length=1, max_length=255)
     label: str = Field(..., min_length=1, max_length=255)
     status: AgentActivityStatus
+    input_summary: str | None = Field(default=None, min_length=1, max_length=500)
+    result_summary: str | None = Field(default=None, min_length=1, max_length=255)
+    result_items: list[str] = Field(default_factory=list, max_length=8)
 
 
 class ChatWorkflowJobStage(BaseModel):

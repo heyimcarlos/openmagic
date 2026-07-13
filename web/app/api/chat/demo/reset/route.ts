@@ -1,16 +1,10 @@
 const serverBase = process.env.PY_SERVER_URL || 'http://localhost:8001';
-const upstreamPath = `${serverBase.replace(/\/$/, '')}/api/v1/chat/telemetry/latest`;
+const upstreamPath = `${serverBase.replace(/\/$/, '')}/api/v1/chat/demo/reset`;
 
-export async function GET(request: Request) {
-  const requestUrl = new URL(request.url);
-  const upstreamUrl = new URL(upstreamPath);
-  const senderPhone = requestUrl.searchParams.get('sender_phone');
-  const causeId = requestUrl.searchParams.get('cause_id');
-  if (senderPhone) upstreamUrl.searchParams.set('sender_phone', senderPhone);
-  if (causeId) upstreamUrl.searchParams.set('cause_id', causeId);
-
+export async function POST() {
   try {
-    const response = await fetch(upstreamUrl, {
+    const response = await fetch(upstreamPath, {
+      method: 'POST',
       headers: { Accept: 'application/json' },
       cache: 'no-store',
     });

@@ -66,7 +66,10 @@ WORKFLOW_TOOL_SCHEMAS: tuple[dict[str, Any], ...] = (
         "type": "function",
         "function": {
             "name": "search_workflows",
-            "description": "Search authorized Workflow summaries with counts, facets, and pagination.",
+            "description": (
+                "Search authorized Workflow summaries with counts, facets, and pagination. "
+                "For V0, workflow_kind is renewal_outreach.v1 or is omitted."
+            ),
             "parameters": WorkflowSearchRequest.model_json_schema(),
         },
     },
