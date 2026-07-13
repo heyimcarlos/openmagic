@@ -7,14 +7,6 @@ const notificationStatuses = ['queued', 'delivering', 'delivered', 'failed'] as 
 export type BackpressureJobStatus = (typeof jobStatuses)[number];
 export type BackpressureRunStatus = (typeof runStatuses)[number];
 export type BackpressureNotificationStatus = (typeof notificationStatuses)[number];
-export type BackpressureStageId =
-  | 'tooling'
-  | 'queue'
-  | 'worker'
-  | 'runs'
-  | 'execution'
-  | 'notifications'
-  | 'interaction';
 
 interface WorkerView {
   configuredJobConcurrency: number;
@@ -116,22 +108,35 @@ export interface BackpressureSnapshot {
   activity: ReadonlyArray<BackpressureActivity>;
 }
 
-export interface FlowToken {
-  id: string;
-  label: string;
-  detail: string;
-  status: string;
+export interface BackpressureLabJob extends BackpressureJob {
+  assignedWorkerId?: string;
+  runId?: string;
+  runtimeInstanceId?: string;
 }
 
-export interface BackpressureFlowStage {
-  [key: string]: unknown;
-  id: BackpressureStageId;
-  title: string;
-  count: number;
-  active: boolean;
-  signal: boolean;
-  transitionMs?: number;
-  tokens: ReadonlyArray<FlowToken>;
+export interface BackpressureLabWorker {
+  id: string;
+  label: string;
+  local: boolean;
+  status: 'active' | 'recent' | 'ready';
+  jobId?: string;
+  runId?: string;
+  runtimeInstanceId?: string;
+}
+
+export interface BackpressureLabRun extends BackpressureRun {
+  workflowId: string;
+  taskSummary: string;
+}
+
+export interface BackpressureLabScene {
+  jobs: ReadonlyArray<BackpressureLabJob>;
+  hiddenJobCount: number;
+  workers: ReadonlyArray<BackpressureLabWorker>;
+  runs: ReadonlyArray<BackpressureLabRun>;
+  notifications: ReadonlyArray<BackpressureNotification>;
+  interactions: ReadonlyArray<BackpressureNotification>;
+  latestActivity?: BackpressureActivity;
 }
 
 const jobStatusSet = new Set<string>(jobStatuses);
@@ -357,139 +362,103 @@ export function parseBackpressureSnapshot(value: unknown): BackpressureSnapshot 
   };
 }
 
-function token(id: string, label: string, detail: string, itemStatus: string): FlowToken {
-  return { id, label, detail, status: itemStatus };
-}
-
-function shortId(value: string): string {
-  return value.includes('-') ? value.slice(-8) : value;
-}
-
 function happenedRecently(capturedAt: string, occurredAt: string, seconds = 5): boolean {
   const age = Date.parse(capturedAt) - Date.parse(occurredAt);
   return age >= 0 && age <= seconds * 1000;
 }
 
-export function buildBackpressureFlow(
+export function buildBackpressureLabScene(
   snapshot: BackpressureSnapshot,
-): ReadonlyArray<BackpressureFlowStage> {
-  const queued = snapshot.jobs.filter((item) => item.status === 'queued');
-  const runningAgents = snapshot.runs.filter(
-    (item) => item.status === 'running' && item.runtimeInstanceId,
+): BackpressureLabScene {
+  const jobById = new Map(snapshot.jobs.map((item) => [item.id, item]));
+  const visibleRuns = snapshot.runs
+    .filter(
+      (item) => item.status === 'running' ||
+        (item.finishedAt && happenedRecently(snapshot.capturedAt, item.finishedAt, 10)),
+    )
+    .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt));
+  const latestRunByWorker = new Map<string, BackpressureRun>();
+  for (const run of visibleRuns) {
+    if (!latestRunByWorker.has(run.workerId)) latestRunByWorker.set(run.workerId, run);
+  }
+  const localWorkerIds = snapshot.worker.jobWorkerIds;
+  const observedWorkerIds = visibleRuns
+    .map((item) => item.workerId)
+    .filter((workerId) => !localWorkerIds.includes(workerId));
+  const workerIds = [...localWorkerIds, ...new Set(observedWorkerIds)];
+  const workerIndex = new Map(workerIds.map((workerId, index) => [workerId, index]));
+  const activeRunByJob = new Map(
+    visibleRuns.map((run) => [run.jobId, run]),
   );
-  const visibleRuns = snapshot.runs.filter(
-    (item) => item.status === 'running' ||
-      (item.finishedAt && happenedRecently(snapshot.capturedAt, item.finishedAt, 8)),
-  );
-  const visibleAgents = visibleRuns.filter((item) => item.runtimeInstanceId);
+  const statusOrder: Record<BackpressureJobStatus, number> = {
+    running: 0,
+    queued: 1,
+    waiting: 2,
+    succeeded: 3,
+    failed: 4,
+    cancelled: 5,
+  };
+  const candidateJobs = snapshot.jobs
+    .filter((job) => ['running', 'queued', 'waiting'].includes(job.status) || activeRunByJob.has(job.id))
+    .sort((left, right) => {
+      const leftRun = activeRunByJob.get(left.id);
+      const rightRun = activeRunByJob.get(right.id);
+      if (Boolean(leftRun) !== Boolean(rightRun)) return leftRun ? -1 : 1;
+      const byStatus = statusOrder[left.status] - statusOrder[right.status];
+      if (byStatus !== 0) return byStatus;
+      const leftWorker = leftRun ? workerIndex.get(leftRun.workerId) ?? workerIds.length : workerIds.length;
+      const rightWorker = rightRun ? workerIndex.get(rightRun.workerId) ?? workerIds.length : workerIds.length;
+      if (leftWorker !== rightWorker) return leftWorker - rightWorker;
+      return Date.parse(left.createdAt) - Date.parse(right.createdAt);
+    });
+  const jobs = candidateJobs.slice(0, 6).map((job): BackpressureLabJob => {
+    const run = activeRunByJob.get(job.id);
+    return {
+      ...job,
+      assignedWorkerId: run?.workerId,
+      runId: run?.id,
+      runtimeInstanceId: run?.runtimeInstanceId,
+    };
+  });
+  const workers = workerIds.map((workerId, index): BackpressureLabWorker => {
+    const run = latestRunByWorker.get(workerId);
+    return {
+      id: workerId,
+      label: index < localWorkerIds.length ? `W${index + 1}` : `X${index - localWorkerIds.length + 1}`,
+      local: index < localWorkerIds.length,
+      status: run?.status === 'running' ? 'active' : run ? 'recent' : 'ready',
+      jobId: run?.jobId,
+      runId: run?.id,
+      runtimeInstanceId: run?.runtimeInstanceId,
+    };
+  });
+  const runs = [...latestRunByWorker.values()].map((run): BackpressureLabRun => {
+    const job = jobById.get(run.jobId);
+    return {
+      ...run,
+      workflowId: job?.workflowId ?? 'unknown',
+      taskSummary: job?.taskSummary ?? `Job ${run.jobId}`,
+    };
+  });
   const pendingNotifications = snapshot.notifications.filter(
     (item) => item.status === 'queued' || item.status === 'delivering',
   );
-  const delivered = snapshot.notifications.filter((item) => item.status === 'delivered');
-  const recentCommands = snapshot.activity.filter(
-    (item) => item.type === 'workflow_jobs_proposed' &&
-      happenedRecently(snapshot.capturedAt, item.occurredAt),
+  const delivered = snapshot.notifications
+    .filter((item) => item.status === 'delivered')
+    .sort(
+      (left, right) => Date.parse(right.deliveredAt ?? right.createdAt) -
+        Date.parse(left.deliveredAt ?? left.createdAt),
+    );
+  const recentDelivered = delivered.filter(
+    (item) => item.deliveredAt && happenedRecently(snapshot.capturedAt, item.deliveredAt, 10),
   );
-  const jobById = new Map(snapshot.jobs.map((item) => [item.id, item]));
-  const recentDeliveries = delivered.filter(
-    (item) => item.deliveredAt && happenedRecently(snapshot.capturedAt, item.deliveredAt),
-  );
-  const recentRunStarts = snapshot.activity.filter(
-    (item) => item.type === 'run_started' &&
-      happenedRecently(snapshot.capturedAt, item.occurredAt, 8),
-  );
-  const recentDrafts = snapshot.activity.filter(
-    (item) => item.type === 'draft_ready' &&
-      happenedRecently(snapshot.capturedAt, item.occurredAt, 8),
-  );
-  const recentNotificationEnqueues = snapshot.activity.filter(
-    (item) => item.type === 'notification_queued' &&
-      happenedRecently(snapshot.capturedAt, item.occurredAt, 8),
-  );
-  const recentInteractionCompletions = snapshot.activity.filter(
-    (item) => item.type === 'approval_presentation_committed' &&
-      happenedRecently(snapshot.capturedAt, item.occurredAt, 8),
-  );
-  return [
-    {
-      id: 'tooling',
-      title: 'create_workflow command',
-      count: snapshot.counts.workflows,
-      active: recentCommands.length > 0,
-      signal: recentCommands.length > 0,
-      tokens: recentCommands.slice(0, 4).map((item) =>
-        token(item.id, 'create_workflow', `Workflow ${shortId(item.workflowId)}`, 'committed')),
-    },
-    {
-      id: 'queue',
-      title: 'Durable Job queue',
-      count: snapshot.counts.queued,
-      active: snapshot.counts.queued > 0,
-      signal: recentCommands.length > 0,
-      tokens: queued.slice(0, 4).map((item) =>
-        token(item.id, item.label, `Job ${shortId(item.id)}`, item.status)),
-    },
-    {
-      id: 'worker',
-      title: 'Local Workers (same process)',
-      count: snapshot.worker.configuredJobConcurrency,
-      active: snapshot.counts.running > 0,
-      signal: recentRunStarts.length > 0,
-      transitionMs: snapshot.latency.queueClaimP50Ms,
-      tokens: snapshot.worker.jobWorkerIds.map((workerId, index) => {
-        const active = snapshot.runs.some(
-          (run) => run.workerId === workerId && run.status === 'running',
-        );
-        return token(workerId, `W${index + 1}`, shortId(workerId), active ? 'active' : 'ready');
-      }),
-    },
-    {
-      id: 'runs',
-      title: 'Workflow Job Runs',
-      count: snapshot.counts.runsRunning,
-      active: snapshot.counts.runsRunning > 0,
-      signal: recentRunStarts.length > 0,
-      tokens: visibleRuns.slice(0, 4).map((item) =>
-        token(item.id, `Job Run ${shortId(item.id)}`, item.workerId, item.status)),
-    },
-    {
-      id: 'execution',
-      title: 'Execution Agents',
-      count: snapshot.counts.runsRunning,
-      active: runningAgents.length > 0 || visibleAgents.length > 0,
-      signal: recentRunStarts.length > 0,
-      tokens: visibleAgents.slice(0, 4).map((item) =>
-        token(
-          item.runtimeInstanceId!,
-          `Agent ${shortId(item.runtimeInstanceId!)}`,
-          jobById.get(item.jobId)?.taskSummary ?? `Job Run ${shortId(item.id)}`,
-          item.status,
-        )),
-    },
-    {
-      id: 'notifications',
-      title: 'Notifications',
-      count: snapshot.counts.notificationsQueued + snapshot.counts.notificationsDelivering,
-      active: snapshot.counts.notificationsQueued + snapshot.counts.notificationsDelivering > 0,
-      signal: recentDrafts.length > 0 || recentNotificationEnqueues.length > 0,
-      transitionMs: snapshot.latency.executionP50Ms,
-      tokens: pendingNotifications.slice(0, 4).map((item) =>
-        token(item.id, item.kind, `attempt ${item.attempts}`, item.status)),
-    },
-    {
-      id: 'interaction',
-      title: 'Interaction Agent turns',
-      count: snapshot.counts.notificationsDelivered,
-      active: recentDeliveries.length > 0 || recentInteractionCompletions.length > 0,
-      signal: recentDeliveries.length > 0 || recentInteractionCompletions.length > 0,
-      transitionMs: snapshot.latency.notificationDeliveryP50Ms,
-      tokens: recentDeliveries.slice(0, 4).map((item) =>
-        token(
-          item.id,
-          `Turn ${shortId(item.id)}`,
-          item.deliveredBy ? `worker ${shortId(item.deliveredBy)}` : item.kind,
-          item.status,
-        )),
-    },
-  ];
+  return {
+    jobs,
+    hiddenJobCount: Math.max(0, candidateJobs.length - jobs.length),
+    workers,
+    runs,
+    notifications: [...pendingNotifications, ...recentDelivered].slice(0, 5),
+    interactions: delivered.slice(0, 5),
+    latestActivity: snapshot.activity[0],
+  };
 }

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { buildBackpressureFlow, parseBackpressureSnapshot } from './backpressureDemo.ts';
+import { buildBackpressureLabScene, parseBackpressureSnapshot } from './backpressureDemo.ts';
 
 const payload = {
   captured_at: '2026-07-13T14:00:05Z',
@@ -144,7 +144,7 @@ const payload = {
   ],
 };
 
-test('parses the sanitized live projection and derives each real pipeline stage', () => {
+test('parses the live projection and derives explicit Job-to-Worker assignments', () => {
   const snapshot = parseBackpressureSnapshot(payload);
   assert.ok(snapshot);
   assert.deepEqual(snapshot.scope, {
@@ -154,29 +154,28 @@ test('parses the sanitized live projection and derives each real pipeline stage'
     truncated: false,
   });
 
-  const flow = buildBackpressureFlow(snapshot);
+  const scene = buildBackpressureLabScene(snapshot);
 
+  assert.equal(scene.jobs[0]?.id, 'job-running');
+  assert.equal(scene.jobs[0]?.assignedWorkerId, 'workflow-worker:12345678');
+  assert.equal(scene.jobs[0]?.runId, 'run-1');
+  assert.equal(scene.jobs[0]?.runtimeInstanceId, 'runtime-fresh-1');
+  assert.deepEqual(scene.workers[0], {
+    id: 'workflow-worker:12345678',
+    label: 'W1',
+    local: true,
+    status: 'active',
+    jobId: 'job-running',
+    runId: 'run-1',
+    runtimeInstanceId: 'runtime-fresh-1',
+  });
+  assert.equal(scene.runs[0]?.taskSummary, 'Draft the 2026 renewal for Demo Policyholder 2');
   assert.deepEqual(
-    flow.map((stage) => [stage.id, stage.count, stage.active]),
-    [
-      ['tooling', 3, true],
-      ['queue', 2, true],
-      ['worker', 1, true],
-      ['runs', 1, true],
-      ['execution', 1, true],
-      ['notifications', 1, true],
-      ['interaction', 1, true],
-    ],
+    scene.notifications.map((item) => item.id),
+    ['notification-queued', 'notification-delivered'],
   );
-  assert.equal(flow[2]?.tokens[0]?.id, 'workflow-worker:12345678');
-  assert.equal(flow[2]?.tokens[0]?.status, 'active');
-  assert.equal(flow[2]?.transitionMs, 1200);
-  assert.equal(flow[3]?.tokens[0]?.id, 'run-1');
-  assert.equal(flow[4]?.tokens[0]?.id, 'runtime-fresh-1');
-  assert.equal(flow[4]?.tokens[0]?.detail, 'Draft the 2026 renewal for Demo Policyholder 2');
-  assert.equal(flow[6]?.tokens[0]?.id, 'notification-delivered');
-  assert.equal(flow[6]?.tokens[0]?.detail, 'worker 12345678');
-  assert.deepEqual(flow.map((stage) => stage.signal), [true, true, true, true, true, true, true]);
+  assert.equal(scene.interactions[0]?.id, 'notification-delivered');
+  assert.equal(scene.latestActivity?.type, 'workflow_jobs_proposed');
 });
 
 test('rejects malformed operational projections instead of animating invented state', () => {
