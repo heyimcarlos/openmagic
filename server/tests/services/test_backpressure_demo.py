@@ -47,7 +47,7 @@ async def test_job_burst_uses_atomic_workflow_commands_and_projects_queue_pressu
 ):
     service = _service(migrated_postgres_url)
 
-    snapshot = await service.enqueue_jobs(10)
+    snapshot = await service.enqueue_workflows(5, "renewal")
 
     assert snapshot.counts.workflows == 5
     assert snapshot.scope.visible_workflows == 5
@@ -83,6 +83,35 @@ async def test_job_burst_uses_atomic_workflow_commands_and_projects_queue_pressu
     await service.dispose()
 
 
+async def test_mixed_workflow_burst_contains_distinct_workflow_and_job_shapes(
+    migrated_postgres_url: str,
+    seeded_workflow_identity,
+):
+    service = _service(migrated_postgres_url)
+
+    snapshot = await service.enqueue_workflows(6)
+
+    assert snapshot.counts.workflows == 6
+    assert {
+        job.kind for job in snapshot.jobs
+    } == {
+        "renewal_email.draft.v1",
+        "gmail.send_email.v1",
+        "insurance_task.execute.v1",
+    }
+    assert {
+        job.label for job in snapshot.jobs if job.kind == "insurance_task.execute.v1"
+    } == {
+        "Extract claim facts",
+        "Assess claim routing",
+        "Review policy coverage",
+    }
+    assert snapshot.counts.waiting > 0
+    assert snapshot.counts.queued > 0
+
+    await service.dispose()
+
+
 async def test_snapshot_separates_run_completion_from_notification_delivery(
     migrated_postgres_url: str,
     seeded_workflow_identity,
@@ -93,7 +122,7 @@ async def test_snapshot_separates_run_completion_from_notification_delivery(
         worker_ids=lambda: ("workflow-worker:test",),
         max_worker_capacity=lambda: 8,
     )
-    await service.enqueue_jobs(2)
+    await service.enqueue_workflows(1, "renewal")
     database = WorkflowDatabase(migrated_postgres_url)
     control_plane = WorkflowControlPlane(
         database=database,
@@ -147,7 +176,7 @@ async def test_snapshot_projects_exact_approval_and_fresh_interaction_identity(
     seeded_workflow_identity,
 ):
     service = _service(migrated_postgres_url)
-    await service.enqueue_jobs(2)
+    await service.enqueue_workflows(1, "renewal")
     database = WorkflowDatabase(migrated_postgres_url)
     control_plane = WorkflowControlPlane(
         database=database,
@@ -210,18 +239,80 @@ async def test_snapshot_projects_exact_approval_and_fresh_interaction_identity(
     await service.dispose()
 
 
+async def test_completed_non_approval_work_notifies_the_interaction_agent(
+    migrated_postgres_url: str,
+    seeded_workflow_identity,
+):
+    service = _service(migrated_postgres_url)
+    await service.enqueue_workflows(1, "policy")
+    database = WorkflowDatabase(migrated_postgres_url)
+    control_plane = WorkflowControlPlane(
+        database=database,
+        registry=default_workflow_registry(),
+        authority=StaticWorkflowAuthority(grants=set()),
+    )
+    packet = await control_plane.claim_job(
+        ClaimWorkflowJobCommand(
+            worker_id="demo-worker",
+            application_build="test-build",
+            lease_duration=timedelta(minutes=5),
+            executor_keys=("insurance_work_agent",),
+        )
+    )
+    assert packet is not None
+    await control_plane.report_run_result(
+        ReportRunResultCommand(
+            run_id=packet.run_id,
+            result=RunResult(
+                outcome="succeeded",
+                data={
+                    "title": "Coverage review ready",
+                    "summary": "A licensed reviewer should verify the listed policy facts.",
+                },
+                evidence=({"type": "deterministic-test"},),
+            ),
+        )
+    )
+    notification = await control_plane.claim_notification(
+        ClaimNotificationCommand(
+            worker_id="notification-worker:test",
+            lease_duration=timedelta(minutes=5),
+            kinds=("work_completed",),
+        )
+    )
+    assert notification is not None
+
+    status = await control_plane.resolve_notification_status(
+        notification.notification_id,
+        notification.workflow_event_id,
+        notification.workflow_id,
+        "notification-worker:test",
+        notification.delivery_attempt,
+    )
+
+    assert status.message == (
+        "Coverage review ready: A licensed reviewer should verify the listed policy facts."
+    )
+    snapshot = await service.snapshot()
+    assert snapshot.notifications[0].kind == "work_completed"
+    assert snapshot.approval_requests == ()
+
+    await database.dispose()
+    await service.dispose()
+
+
 async def test_snapshot_bounds_repeated_demo_history(
     migrated_postgres_url: str,
     seeded_workflow_identity,
 ):
     service = _service(migrated_postgres_url)
 
-    await service.enqueue_jobs(40)
-    await service.enqueue_jobs(40)
-    snapshot = await service.enqueue_jobs(40)
+    await service.enqueue_workflows(20, "renewal")
+    await service.enqueue_workflows(20, "renewal")
+    snapshot = await service.enqueue_workflows(20, "renewal")
 
-    assert snapshot.counts.workflows == 50
-    assert snapshot.counts.jobs == 100
+    assert snapshot.counts.workflows == 60
+    assert snapshot.counts.jobs == 120
     assert snapshot.scope.visible_workflows == 50
     assert snapshot.scope.total_workflows == 60
     assert snapshot.scope.workflow_limit == 50
@@ -229,4 +320,96 @@ async def test_snapshot_bounds_repeated_demo_history(
     assert len(snapshot.jobs) == 100
     assert len(snapshot.activity) <= 80
 
+    await service.dispose()
+
+
+async def test_snapshot_prioritizes_active_work_outside_the_newest_workflow_window(
+    migrated_postgres_url: str,
+    seeded_workflow_identity,
+):
+    service = _service(migrated_postgres_url)
+    await service.enqueue_workflows(20, "renewal")
+    await service.enqueue_workflows(20, "renewal")
+    await service.enqueue_workflows(20, "renewal")
+    database = WorkflowDatabase(migrated_postgres_url)
+    control_plane = WorkflowControlPlane(
+        database=database,
+        registry=default_workflow_registry(),
+        authority=StaticWorkflowAuthority(grants=set()),
+    )
+
+    oldest = await control_plane.claim_job(
+        ClaimWorkflowJobCommand(
+            worker_id="workflow-worker:oldest",
+            application_build="test-build",
+            lease_duration=timedelta(minutes=5),
+            executor_keys=("renewal_email_drafter",),
+        )
+    )
+    assert oldest is not None
+
+    snapshot = await service.snapshot()
+
+    assert snapshot.scope.visible_workflows == 50
+    assert snapshot.scope.total_workflows == 60
+    assert snapshot.counts.workflows == 60
+    assert snapshot.counts.running == 1
+    assert any(run.id == oldest.run_id and run.status == "running" for run in snapshot.runs)
+    assert any(job.id == oldest.job_id and job.status == "running" for job in snapshot.jobs)
+
+    await database.dispose()
+    await service.dispose()
+
+
+async def test_snapshot_prioritizes_delivering_notification_outside_newest_window(
+    migrated_postgres_url: str,
+    seeded_workflow_identity,
+):
+    service = _service(migrated_postgres_url)
+    await service.enqueue_workflows(20, "renewal")
+    await service.enqueue_workflows(20, "renewal")
+    await service.enqueue_workflows(20, "renewal")
+    database = WorkflowDatabase(migrated_postgres_url)
+    control_plane = WorkflowControlPlane(
+        database=database,
+        registry=default_workflow_registry(),
+        authority=StaticWorkflowAuthority(grants=set()),
+    )
+    draft = await control_plane.claim_job(
+        ClaimWorkflowJobCommand(
+            worker_id="workflow-worker:oldest",
+            application_build="test-build",
+            lease_duration=timedelta(minutes=5),
+            executor_keys=("renewal_email_drafter",),
+        )
+    )
+    assert draft is not None
+    await control_plane.report_run_result(
+        ReportRunResultCommand(
+            run_id=draft.run_id,
+            result=RunResult(
+                outcome="succeeded",
+                data={"subject": "2026 renewal", "body": "Hello John"},
+                evidence=({"type": "deterministic-test"},),
+            ),
+        )
+    )
+    notification = await control_plane.claim_notification(
+        ClaimNotificationCommand(
+            worker_id="notification-worker:oldest",
+            lease_duration=timedelta(minutes=5),
+            kinds=("approval_required",),
+        )
+    )
+    assert notification is not None
+
+    snapshot = await service.snapshot()
+
+    assert snapshot.counts.notifications_delivering == 1
+    assert any(
+        item.id == notification.notification_id and item.status == "delivering"
+        for item in snapshot.notifications
+    )
+
+    await database.dispose()
     await service.dispose()

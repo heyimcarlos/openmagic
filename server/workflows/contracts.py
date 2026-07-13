@@ -385,7 +385,7 @@ class NotificationAudienceContext(WorkflowContract):
     """Trusted destination and kind for one claimed Notification."""
 
     destination_party_id: UUID
-    kind: Literal["approval_required", "send_confirmed"]
+    kind: Literal["approval_required", "send_confirmed", "work_completed"]
 
 
 class NotificationStatusContext(WorkflowContract):

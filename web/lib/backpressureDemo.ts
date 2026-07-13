@@ -420,7 +420,8 @@ export function buildBackpressureLabScene(
       if (leftWorker !== rightWorker) return leftWorker - rightWorker;
       return Date.parse(left.createdAt) - Date.parse(right.createdAt);
     });
-  const jobs = candidateJobs.slice(0, 6).map((job): BackpressureLabJob => {
+  const visibleJobLimit = Math.max(6, workerIds.length);
+  const jobs = candidateJobs.slice(0, visibleJobLimit).map((job): BackpressureLabJob => {
     const run = activeRunByJob.get(job.id);
     return {
       ...job,
@@ -449,9 +450,12 @@ export function buildBackpressureLabScene(
       taskSummary: job?.taskSummary ?? `Job ${run.jobId}`,
     };
   });
-  const pendingNotifications = snapshot.notifications.filter(
-    (item) => item.status === 'queued' || item.status === 'delivering',
-  );
+  const pendingNotifications = snapshot.notifications
+    .filter((item) => item.status === 'queued' || item.status === 'delivering')
+    .sort((left, right) => {
+      if (left.status !== right.status) return left.status === 'delivering' ? -1 : 1;
+      return Date.parse(left.createdAt) - Date.parse(right.createdAt);
+    });
   const delivered = snapshot.notifications
     .filter((item) => item.status === 'delivered')
     .sort(
@@ -463,7 +467,10 @@ export function buildBackpressureLabScene(
   );
   return {
     jobs,
-    hiddenJobCount: Math.max(0, candidateJobs.length - jobs.length),
+    hiddenJobCount: Math.max(
+      0,
+      snapshot.counts.queued + snapshot.counts.waiting + snapshot.counts.running - jobs.length,
+    ),
     workers,
     runs,
     notifications: [...pendingNotifications, ...recentDelivered].slice(0, 5),

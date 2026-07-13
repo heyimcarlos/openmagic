@@ -7,6 +7,9 @@ from contextlib import suppress
 from functools import lru_cache
 from uuid import UUID, uuid4
 
+from server.agents.execution_agent.workflow_analysis import (
+    FreshInsuranceWorkExecutionAgentFactory,
+)
 from server.agents.execution_agent.workflow_draft import FreshDraftExecutionAgentFactory
 from server.agents.interaction_agent.verification_resume import (
     VerificationDeliveryAttentionInteractionFactory,
@@ -131,6 +134,9 @@ class WorkflowRuntimeService:
                 control_plane=control_plane,
                 executors={
                     "renewal_email_drafter": FreshDraftExecutionAgentFactory(self._settings),
+                    "insurance_work_agent": FreshInsuranceWorkExecutionAgentFactory(
+                        self._settings
+                    ),
                 },
                 email_adapters=email_adapters,
                 deterministic_handlers=deterministic_handlers,
@@ -152,7 +158,7 @@ class WorkflowRuntimeService:
                 conversation=conversation,
             ),
             worker_id=f"notification-worker:{uuid4()}",
-            notification_kinds=("approval_required", "send_confirmed"),
+            notification_kinds=("approval_required", "send_confirmed", "work_completed"),
         )
         if verification is not None:
             self._verification_resume_worker = NotificationWorker(
@@ -283,6 +289,19 @@ class WorkflowRuntimeService:
             extra={"worker_id": worker_id, "capacity": len(self._job_workers.worker_ids)},
         )
         return worker_id
+
+    def remove_demo_worker(self, worker_id: str) -> None:
+        """Remove one local claim loop while preserving minimum demo capacity."""
+
+        if not self._settings.enable_backpressure_demo:
+            raise PermissionError("The backpressure demo is not enabled")
+        if self._job_workers is None:
+            raise RuntimeError("The Workflow runtime is not running")
+        self._job_workers.remove_worker(worker_id)
+        logger.info(
+            "Workflow demo worker removed",
+            extra={"worker_id": worker_id, "capacity": len(self._job_workers.worker_ids)},
+        )
 
 
 @lru_cache(maxsize=1)

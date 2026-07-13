@@ -21,6 +21,7 @@ export function BackpressureSystem() {
   });
   const [error, setError] = useState<string>();
   const [submitting, setSubmitting] = useState<'workflows' | 'worker' | 'approval'>();
+  const [removingWorkerId, setRemovingWorkerId] = useState<string>();
 
   const refresh = useCallback(async (signal?: AbortSignal) => {
     try {
@@ -58,7 +59,7 @@ export function BackpressureSystem() {
       const response = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ job_count: workflowCount * 2 }),
+        body: JSON.stringify({ workflow_count: workflowCount, scenario: 'mixed' }),
       });
       if (!response.ok) throw new Error(await response.text() || 'Could not queue demo work');
       const parsed = parseBackpressureSnapshot(await response.json());
@@ -85,6 +86,28 @@ export function BackpressureSystem() {
       setError(cause instanceof Error ? cause.message : 'Could not add Worker');
     } finally {
       setSubmitting(undefined);
+    }
+  }, []);
+
+  const removeWorker = useCallback(async (workerId: string) => {
+    setSubmitting('worker');
+    setRemovingWorkerId(workerId);
+    try {
+      const response = await fetch(`${endpoint}/workers`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ worker_id: workerId }),
+      });
+      if (!response.ok) throw new Error(await response.text() || 'Could not remove Worker');
+      const parsed = parseBackpressureSnapshot(await response.json());
+      if (!parsed) throw new Error('Worker command returned an invalid projection');
+      dispatchTimeline({ type: 'capture', snapshot: parsed });
+      setError(undefined);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Could not remove Worker');
+    } finally {
+      setSubmitting(undefined);
+      setRemovingWorkerId(undefined);
     }
   }, []);
 
@@ -187,9 +210,11 @@ export function BackpressureSystem() {
                 snapshot={snapshot}
                 addingWorkflows={submitting === 'workflows'}
                 addingWorker={submitting === 'worker'}
+                removingWorkerId={removingWorkerId}
                 approving={submitting === 'approval'}
                 onAddWorkflows={enqueueWorkflows}
                 onAddWorker={addWorker}
+                onRemoveWorker={removeWorker}
                 onApprove={approveExactEmail}
               />
               <BackpressureTimeline

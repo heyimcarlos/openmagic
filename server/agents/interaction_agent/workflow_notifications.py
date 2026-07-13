@@ -122,9 +122,10 @@ present_approval_request. Do not approve, edit, summarize, select a Job, or
 paraphrase the email. You have no previous conversation context."""
 
 _STATUS_PROMPT = """You handle one Workflow Notification in a fresh context.
-Read the supplied Workflow Packet, verify that the renewal email Send Job and
-Workflow succeeded, then call present_status_update. Do not claim recipient
-delivery or add provider details. You have no previous conversation context."""
+Read the supplied Workflow Packet, then call present_status_update so the
+Control Plane can resolve the exact completed work or external-effect status.
+Do not invent business facts, recipient delivery, or provider details. You have
+no previous conversation context."""
 
 
 class _NotificationToolbox:

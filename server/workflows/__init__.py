@@ -86,6 +86,7 @@ from .operations_projection import (
     WorkflowOperationalJobRun,
     WorkflowOperationalNotification,
     WorkflowOperationalSnapshot,
+    WorkflowOperationalTotals,
     WorkflowOperationsProjection,
 )
 from .party_resolution import (
@@ -97,14 +98,19 @@ from .party_resolution import (
     sms_interaction_id,
 )
 from .registry import (
+    CLAIM_INTAKE_REVIEW_KIND,
     DRAFT_RENEWAL_EMAIL_KIND,
     GMAIL_SEND_EMAIL_KIND,
+    INSURANCE_TASK_KIND,
+    POLICY_COVERAGE_REVIEW_KIND,
     RENEWAL_OUTREACH_KIND,
     VERIFICATION_DELIVERY_ATTENTION_NOTIFICATION_KIND,
     VERIFICATION_EMAIL_DELIVERY_WORKFLOW_KIND,
     VERIFICATION_EMAIL_JOB_KIND,
+    WORK_COMPLETED_NOTIFICATION_KIND,
     DraftRenewalEmailOutput,
     ExecutionStrategy,
+    InsuranceTaskOutput,
     WorkflowKindContract,
     WorkflowKindRegistry,
     default_workflow_registry,
@@ -131,15 +137,19 @@ from .verification_notifications import (
 from .worker import NotificationWorker, WorkflowWorker
 
 __all__ = [
+    "CLAIM_INTAKE_REVIEW_KIND",
     "COMPOSIO_GMAIL_TOOLKIT_VERSION",
     "DRAFT_RENEWAL_EMAIL_KIND",
     "GMAIL_SEND_EMAIL_KIND",
+    "INSURANCE_TASK_KIND",
+    "POLICY_COVERAGE_REVIEW_KIND",
     "RENEWAL_OUTREACH_KIND",
     "VERIFICATION_DELIVERY_ATTENTION_NOTIFICATION_KIND",
     "VERIFICATION_EMAIL_DELIVERY_WORKFLOW_KIND",
     "VERIFICATION_EMAIL_JOB_KIND",
     "VERIFICATION_RESUME_NOTIFICATION_KIND",
     "VERIFICATION_RESUME_RECOVERY_NOTIFICATION_KIND",
+    "WORK_COMPLETED_NOTIFICATION_KIND",
     "AcknowledgeNotificationCommand",
     "ApprovalGrant",
     "ApproveWorkflowJobCommand",
@@ -164,6 +174,7 @@ __all__ = [
     "EmailSendEffectV1",
     "EmailSendExecutionContextV1",
     "ExecutionStrategy",
+    "InsuranceTaskOutput",
     "InteractionActivityAction",
     "InteractionActivityReceipt",
     "InteractionActivityStatus",
@@ -223,6 +234,7 @@ __all__ = [
     "WorkflowOperationalJobRun",
     "WorkflowOperationalNotification",
     "WorkflowOperationalSnapshot",
+    "WorkflowOperationalTotals",
     "WorkflowOperationsProjection",
     "WorkflowPacket",
     "WorkflowPacketJob",

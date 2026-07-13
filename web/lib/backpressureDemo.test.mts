@@ -209,3 +209,48 @@ test('rejects malformed operational projections instead of animating invented st
     undefined,
   );
 });
+
+test('keeps active delivery visible and reports hidden global pressure', () => {
+  const queuedNotifications = Array.from({ length: 6 }, (_, index) => ({
+    id: `notification-queued-${index}`,
+    workflow_id: `workflow-${index}`,
+    kind: 'work_completed',
+    status: 'queued',
+    attempts: 0,
+    claimed_by: null,
+    delivered_by: null,
+    interaction_runtime_instance_id: null,
+    created_at: `2026-07-13T14:00:0${index}Z`,
+    delivered_at: null,
+  }));
+  const delivering = {
+    id: 'notification-delivering',
+    workflow_id: 'workflow-active',
+    kind: 'work_completed',
+    status: 'delivering',
+    attempts: 1,
+    claimed_by: 'notification-worker:active',
+    delivered_by: null,
+    interaction_runtime_instance_id: null,
+    created_at: '2026-07-13T13:59:00Z',
+    delivered_at: null,
+  };
+  const snapshot = parseBackpressureSnapshot({
+    ...payload,
+    counts: {
+      ...payload.counts,
+      queued: 50,
+      waiting: 50,
+      running: 1,
+      notifications_queued: 6,
+      notifications_delivering: 1,
+    },
+    notifications: [...queuedNotifications, delivering],
+  });
+  assert.ok(snapshot);
+
+  const scene = buildBackpressureLabScene(snapshot);
+
+  assert.equal(scene.notifications[0]?.id, 'notification-delivering');
+  assert.equal(scene.hiddenJobCount, 99);
+});

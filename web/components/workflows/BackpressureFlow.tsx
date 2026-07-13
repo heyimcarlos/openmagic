@@ -21,6 +21,7 @@ import {
   BoxesIcon,
   DatabaseIcon,
   LoaderCircleIcon,
+  MinusIcon,
   PlusIcon,
   RadioTowerIcon,
   UserCheckIcon,
@@ -70,6 +71,9 @@ interface WorkerData extends LabDataBase {
   kind: 'worker';
   worker: BackpressureLabWorker;
   selected: boolean;
+  removable: boolean;
+  removing: boolean;
+  onRemoveWorker: (workerId: string) => void;
   onInspect: (selection: LabSelection) => void;
 }
 
@@ -144,17 +148,21 @@ export function BackpressureFlow({
   snapshot,
   addingWorkflows,
   addingWorker,
+  removingWorkerId,
   approving,
   onAddWorkflows,
   onAddWorker,
+  onRemoveWorker,
   onApprove,
 }: {
   snapshot: BackpressureSnapshot;
   addingWorkflows: boolean;
   addingWorker: boolean;
+  removingWorkerId?: string;
   approving: boolean;
   onAddWorkflows: (workflowCount: number) => void;
   onAddWorker: () => void;
+  onRemoveWorker: (workerId: string) => void;
   onApprove: (approval: ApprovalRequest) => void;
 }) {
   return (
@@ -163,9 +171,11 @@ export function BackpressureFlow({
         snapshot={snapshot}
         addingWorkflows={addingWorkflows}
         addingWorker={addingWorker}
+        removingWorkerId={removingWorkerId}
         approving={approving}
         onAddWorkflows={onAddWorkflows}
         onAddWorker={onAddWorker}
+        onRemoveWorker={onRemoveWorker}
         onApprove={onApprove}
       />
     </ReactFlowProvider>
@@ -176,17 +186,21 @@ function BackpressureLabCanvas({
   snapshot,
   addingWorkflows,
   addingWorker,
+  removingWorkerId,
   approving,
   onAddWorkflows,
   onAddWorker,
+  onRemoveWorker,
   onApprove,
 }: {
   snapshot: BackpressureSnapshot;
   addingWorkflows: boolean;
   addingWorker: boolean;
+  removingWorkerId?: string;
   approving: boolean;
   onAddWorkflows: (workflowCount: number) => void;
   onAddWorker: () => void;
+  onRemoveWorker: (workerId: string) => void;
   onApprove: (approval: ApprovalRequest) => void;
 }) {
   const [selection, setSelection] = useState<LabSelection>();
@@ -202,8 +216,10 @@ function BackpressureLabCanvas({
       selection,
       addingWorkflows,
       addingWorker,
+      removingWorkerId,
       onAddWorkflows,
       onAddWorker,
+      onRemoveWorker,
       onReviewApproval: (approval) => setReviewingJobId(approval.jobId),
       onInspect: setSelection,
     }),
@@ -213,8 +229,10 @@ function BackpressureLabCanvas({
       selection,
       addingWorkflows,
       addingWorker,
+      removingWorkerId,
       onAddWorkflows,
       onAddWorker,
+      onRemoveWorker,
     ],
   );
 
@@ -270,8 +288,10 @@ function buildLabGraph({
   selection,
   addingWorkflows,
   addingWorker,
+  removingWorkerId,
   onAddWorkflows,
   onAddWorker,
+  onRemoveWorker,
   onReviewApproval,
   onInspect,
 }: {
@@ -280,8 +300,10 @@ function buildLabGraph({
   selection?: LabSelection;
   addingWorkflows: boolean;
   addingWorker: boolean;
+  removingWorkerId?: string;
   onAddWorkflows: (workflowCount: number) => void;
   onAddWorker: () => void;
+  onRemoveWorker: (workerId: string) => void;
   onReviewApproval: (approval: ApprovalRequest) => void;
   onInspect: (selection: LabSelection) => void;
 }): { nodes: LabNode[]; edges: LabEdge[] } {
@@ -367,14 +389,17 @@ function buildLabGraph({
       kind: 'worker',
       worker,
       selected: selection?.id === worker.id,
+      removable: worker.local && snapshot.worker.configuredJobConcurrency > 1,
+      removing: removingWorkerId === worker.id,
+      onRemoveWorker,
       onInspect,
     }));
   });
   if (snapshot.worker.configuredJobConcurrency < snapshot.worker.maxJobWorkerCapacity) {
     nodes.push(labNode('worker-add', { x: workerX, y: rowStartY + scene.workers.length * rowGap }, 72, 52, {
       kind: 'worker-add',
-      disabled: addingWorkflows || addingWorker,
-      submitting: addingWorker,
+      disabled: addingWorkflows || addingWorker || Boolean(removingWorkerId),
+      submitting: addingWorker && !removingWorkerId,
       onAddWorker,
     }));
   }
@@ -429,19 +454,15 @@ function buildLabGraph({
       }
     }
   }
-  if (scene.notifications.length > 0) {
-    edges.push(signalEdge('notification-worker-claim', 'notifications', 'notification-worker', {
-      active: Boolean(activeNotification),
-      latencyMs: snapshot.latency.notificationDeliveryP50Ms,
-    }));
-  }
-  if (scene.interactions.length > 0 || activeNotification) {
-    edges.push(signalEdge('worker-interaction', 'notification-worker', 'interactions', {
-      active: Boolean(activeNotification) || scene.interactions.some((item) =>
-        item.deliveredAt && happenedRecently(snapshot.capturedAt, item.deliveredAt, 10)),
-      latencyMs: snapshot.latency.notificationDeliveryP50Ms,
-    }));
-  }
+  edges.push(signalEdge('notification-worker-claim', 'notifications', 'notification-worker', {
+    active: Boolean(activeNotification),
+    latencyMs: snapshot.latency.notificationDeliveryP50Ms,
+  }));
+  edges.push(signalEdge('worker-interaction', 'notification-worker', 'interactions', {
+    active: Boolean(activeNotification) || scene.interactions.some((item) =>
+      item.deliveredAt && happenedRecently(snapshot.capturedAt, item.deliveredAt, 10)),
+    latencyMs: snapshot.latency.notificationDeliveryP50Ms,
+  }));
   return { nodes, edges };
 }
 
@@ -497,7 +518,7 @@ function QueueNode({ data }: { data: QueueData }) {
               {data.snapshot.counts.queued} eligible · {data.snapshot.counts.waiting} blocked · {data.snapshot.counts.running} claimed
             </p>
           </div>
-          <span className="font-mono text-lg font-medium">{data.snapshot.counts.workflows}</span>
+          <span className="font-mono text-lg font-medium">{data.snapshot.counts.jobs}</span>
         </div>
         <div className="nodrag nopan mt-3 flex gap-1.5" aria-label="Add demo Workflows">
           {[1, 5, 25].map((count) => (
@@ -602,6 +623,19 @@ function WorkerNode({ data }: { data: WorkerData }) {
       >
         {worker.label}
       </button>
+      {data.removable && (
+        <button
+          type="button"
+          aria-label={`Remove ${worker.label} Worker`}
+          className="nodrag nopan absolute right-1 top-0 grid size-5 place-items-center rounded-full border bg-card text-muted-foreground shadow-sm transition hover:border-red-300 hover:text-red-700 disabled:opacity-50"
+          disabled={data.removing}
+          onClick={() => data.onRemoveWorker(worker.id)}
+        >
+          {data.removing
+            ? <LoaderCircleIcon className="size-3 animate-spin" />
+            : <MinusIcon className="size-3" />}
+        </button>
+      )}
       <span className="mt-0.5 text-[0.52rem] uppercase text-muted-foreground">{worker.status}</span>
       <Handle type="source" position={Position.Right} className="!size-2 !border-background !bg-primary" />
     </div>

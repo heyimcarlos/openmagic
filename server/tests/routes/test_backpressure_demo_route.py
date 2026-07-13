@@ -11,8 +11,8 @@ def test_backpressure_controls_require_explicit_demo_enablement() -> None:
     )
     try:
         response = TestClient(app).post(
-            "/api/v1/demo/backpressure/jobs",
-            json={"job_count": 10},
+            "/api/v1/demo/backpressure/workflows",
+            json={"workflow_count": 5},
         )
     finally:
         app.dependency_overrides.clear()
