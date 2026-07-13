@@ -11,6 +11,7 @@ from .config import get_settings
 from .logging_config import configure_logging, logger
 from .routes import api_router
 from .services import (
+    dispose_backpressure_demo_services,
     get_important_email_watcher,
     get_trigger_scheduler,
     get_workflow_runtime_service,
@@ -87,6 +88,7 @@ async def _stop_trigger_scheduler() -> None:
     watcher = get_important_email_watcher()
     await watcher.stop()
     await get_workflow_runtime_service().stop()
+    await dispose_backpressure_demo_services()
 
 
 __all__ = ["app"]

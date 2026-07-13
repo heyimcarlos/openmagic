@@ -16,8 +16,14 @@ from .models import InteractionActivityReceiptRow, InteractionCauseRow
 class InteractionActivityAction(StrEnum):
     SEARCH_WORKFLOWS = "search_workflows"
     READ_WORKFLOW_PACKET = "read_workflow_packet"
-    PROPOSE_RENEWAL_EMAIL = "propose_renewal_email"
+    PROPOSE_WORKFLOW_WORK = "propose_workflow_work"
     APPROVE_JOB = "approve_job"
+
+    @classmethod
+    def _missing_(cls, value: object) -> InteractionActivityAction | None:
+        if value == "propose_renewal_email":
+            return cls.PROPOSE_WORKFLOW_WORK
+        return None
 
 
 class InteractionActivityStatus(StrEnum):

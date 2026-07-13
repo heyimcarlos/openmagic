@@ -39,7 +39,7 @@ MutatedWorkflows = Callable[[], Awaitable[tuple[UUID, ...]]]
 _KNOWN_TOOL_NAMES = frozenset(
     {
         "approve_job",
-        "propose_renewal_email",
+        "propose_workflow_work",
         "read_workflow_packet",
         "search_workflows",
         "send_draft",
@@ -60,6 +60,7 @@ _KNOWN_ARGUMENT_FIELDS = frozenset(
         "limit",
         "message",
         "organization",
+        "operation",
         "participant",
         "query",
         "reason",
@@ -67,6 +68,7 @@ _KNOWN_ARGUMENT_FIELDS = frozenset(
         "status",
         "subject",
         "to",
+        "type",
         "workflow_id",
         "workflow_kind",
     }
@@ -176,7 +178,7 @@ class _ObservedToolbox:
         if self._delegate is None or name not in {
             "search_workflows",
             "read_workflow_packet",
-            "propose_renewal_email",
+            "propose_workflow_work",
         }:
             return ToolResult(success=False, payload={"code": "unknown_tool"})
         return await self._delegate.invoke(name, arguments, context)
@@ -193,7 +195,7 @@ class _ObservedToolbox:
                 self._observation.last_search_matches = matches
         if name == "read_workflow_packet" and result.success:
             self._observation.packet_reads += 1
-        if name == "propose_renewal_email" and result.success and isinstance(result.payload, dict):
+        if name == "propose_workflow_work" and result.success and isinstance(result.payload, dict):
             workflow_id = result.payload.get("workflow_id")
             if workflow_id is not None:
                 self._observation.selected_workflow_id = UUID(str(workflow_id))

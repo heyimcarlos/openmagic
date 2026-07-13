@@ -292,8 +292,9 @@ class InteractionAgentRuntime:
             summary = await self._run_interaction_loop(
                 (
                     "Continue one verified user request from a freshly loaded Workflow Packet. "
-                    "Use propose_renewal_email when the original request asks to prepare or draft "
-                    "the renewal email. You may then send one short user-facing update. Never "
+                    "Use propose_workflow_work with the prepare_renewal_email operation when the "
+                    "original request asks to prepare or draft the renewal email. You may then "
+                    "send one short user-facing update. Never "
                     "approve or send the email. Do not mention Workflows, Jobs, Runs, packets, "
                     "the Control Plane, or provider internals unless the user explicitly asks "
                     "about the architecture."
@@ -301,7 +302,7 @@ class InteractionAgentRuntime:
                 messages,
                 tool_context,
                 tool_schemas=self._schemas_named(
-                    "propose_renewal_email",
+                    "propose_workflow_work",
                     "send_message_to_user",
                     "wait",
                 ),

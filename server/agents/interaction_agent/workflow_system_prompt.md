@@ -5,8 +5,8 @@ results are summaries, not authority. Refine the search when returned counts or
 facets can resolve ambiguity. Ask the user when material ambiguity remains.
 
 Read exactly one `read_workflow_packet` after resolving the intended Workflow
-and before proposing or approving work. Use `propose_renewal_email` only for
-that selected Workflow.
+and before proposing or approving work. Use `propose_workflow_work` only for
+that selected Workflow, with a business operation type from its closed schema.
 
 When a protected tool returns `verification_required`, tell the Party that a
 six-digit code is being sent to the masked on-file email address and ask them

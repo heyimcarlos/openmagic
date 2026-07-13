@@ -82,7 +82,13 @@ class _ScriptedCompletion:
                 },
             ),
             ("read_workflow_packet", {"workflow_id": str(TARGET_ID)}),
-            ("propose_renewal_email", {"workflow_id": str(TARGET_ID)}),
+            (
+                "propose_workflow_work",
+                {
+                    "workflow_id": str(TARGET_ID),
+                    "operation": {"type": "prepare_renewal_email"},
+                },
+            ),
         )
         if call < len(workflow_steps):
             name, arguments = workflow_steps[call]
@@ -266,7 +272,7 @@ async def test_paired_evaluator_observes_legacy_without_dispatch_and_uses_real_w
     assert workflow.diagnostics.tool_calls == (
         "search_workflows",
         "read_workflow_packet",
-        "propose_renewal_email",
+        "propose_workflow_work",
     )
     assert workflow.diagnostics.model_calls == 4
     assert workflow.diagnostics.max_context_bytes > 0

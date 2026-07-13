@@ -1143,8 +1143,11 @@ async def test_authorized_sensitive_read_can_verify_a_completed_workflow(
         update={
             "purpose": "sensitive_write",
             "operation": ProtectedOperation(
-                name="propose_renewal_email",
-                arguments={"workflow_id": str(TARGET_ID)},
+                name="propose_workflow_work",
+                arguments={
+                    "workflow_id": str(TARGET_ID),
+                    "operation": {"type": "prepare_renewal_email"},
+                },
             ),
         }
     )

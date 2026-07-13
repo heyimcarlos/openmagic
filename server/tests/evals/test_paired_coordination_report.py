@@ -48,7 +48,7 @@ def test_report_gates_workflow_correctness_and_keeps_baseline_diagnostic(tmp_pat
             tool_calls=(
                 "search_workflows",
                 "read_workflow_packet",
-                "propose_renewal_email",
+                "propose_workflow_work",
             ),
             search_calls=1,
             packet_reads=1,

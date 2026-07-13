@@ -1,5 +1,11 @@
 """Service layer components."""
 
+from .backpressure_demo import (
+    BackpressureDemoService,
+    BackpressureSnapshot,
+    dispose_backpressure_demo_services,
+    get_backpressure_demo_service,
+)
 from .conversation import (
     ConversationLog,
     SummaryState,
@@ -32,6 +38,8 @@ from .workflow_runtime import WorkflowRuntimeService, get_workflow_runtime_servi
 
 __all__ = [
     "AgentRoster",
+    "BackpressureDemoService",
+    "BackpressureSnapshot",
     "ConversationLog",
     "ExecutionAgentLogStore",
     "GmailSeenStore",
@@ -41,10 +49,12 @@ __all__ = [
     "WorkflowRuntimeService",
     "classify_email_importance",
     "disconnect_account",
+    "dispose_backpressure_demo_services",
     "execute_gmail_tool",
     "fetch_status",
     "get_active_gmail_user_id",
     "get_agent_roster",
+    "get_backpressure_demo_service",
     "get_conversation_log",
     "get_execution_agent_logs",
     "get_important_email_watcher",

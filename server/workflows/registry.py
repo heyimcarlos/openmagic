@@ -12,7 +12,11 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, ValidationError, field_validator
 
-from .contracts import WorkflowJobProposal, WorkflowProposal
+from .contracts import (
+    PrepareRenewalEmailOperation,
+    WorkflowJobProposal,
+    WorkflowProposal,
+)
 from .errors import (
     InvalidWorkflowProposalError,
     UnknownWorkflowJobKindError,
@@ -37,6 +41,13 @@ class KindSchema(BaseModel):
 class RenewalOutreachInput(KindSchema):
     renewal_period: str = Field(pattern=r"^[0-9]{4}$")
     renewal_details: str | None = Field(default=None, min_length=1, max_length=1000)
+
+
+class RenewalWorkFacts(KindSchema):
+    recipient_name: str = Field(min_length=1, max_length=200)
+    renewal_period: str = Field(pattern=r"^[0-9]{4}$")
+    sender_mailbox: EmailStr
+    recipient_email: EmailStr
 
 
 class DraftRenewalEmailInput(KindSchema):
@@ -251,6 +262,41 @@ class WorkflowKindRegistry:
             objective=proposal.objective,
             input=workflow_input.model_dump(mode="json", exclude_none=True),
             jobs=tuple(validated_jobs),
+        )
+
+    def compile_work(
+        self,
+        workflow_kind: str,
+        operation: PrepareRenewalEmailOperation,
+        facts: Mapping[str, Any],
+    ) -> tuple[WorkflowJobProposal, ...]:
+        """Compile one closed business operation into a trusted Job graph."""
+
+        if workflow_kind != RENEWAL_OUTREACH_KIND:
+            raise InvalidWorkflowProposalError(
+                f"Work operation {operation.type!r} is not available for {workflow_kind!r}"
+            )
+        renewal = RenewalWorkFacts.model_validate(facts)
+        return (
+            WorkflowJobProposal(
+                key="draft",
+                kind=DRAFT_RENEWAL_EMAIL_KIND,
+                input={
+                    "recipient_name": renewal.recipient_name,
+                    "renewal_period": renewal.renewal_period,
+                },
+            ),
+            WorkflowJobProposal(
+                key="send",
+                kind=GMAIL_SEND_EMAIL_KIND,
+                input={
+                    "sender_mailbox": renewal.sender_mailbox,
+                    "to": [renewal.recipient_email],
+                    "subject": {"job_output": "draft", "field": "subject"},
+                    "body": {"job_output": "draft", "field": "body"},
+                },
+                depends_on=("draft",),
+            ),
         )
 
     def materialize_job_input(
