@@ -15,7 +15,11 @@ type TelemetryState =
   | { status: 'loading' | 'failed'; telemetry?: undefined }
   | { status: 'ready'; telemetry?: ChatTurnTelemetry; stale: boolean };
 
-export function CockpitTelemetryPanel() {
+export function CockpitTelemetryPanel({
+  onTelemetry,
+}: {
+  onTelemetry?: (telemetry: ChatTurnTelemetry | undefined) => void;
+}) {
   const [state, setState] = useState<TelemetryState>({ status: 'loading' });
   const load = useCallback(async () => {
     if (!broker) {
@@ -31,12 +35,13 @@ export function CockpitTelemetryPanel() {
       const payload: unknown = await response.json();
       const telemetry = isRecord(payload) ? parseChatTurnTelemetry(payload.telemetry) : undefined;
       setState({ status: 'ready', telemetry, stale: false });
+      onTelemetry?.(telemetry);
     } catch {
       setState((current) => current.status === 'ready'
         ? { ...current, stale: true }
         : { status: 'failed' });
     }
-  }, []);
+  }, [onTelemetry]);
 
   useEffect(() => {
     let cancelled = false;

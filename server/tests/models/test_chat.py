@@ -61,6 +61,8 @@ def test_history_message_carries_sanitized_workflow_telemetry():
                 ],
             }
         ],
+        "approval_request": None,
+        "cockpit": None,
     }
 
 

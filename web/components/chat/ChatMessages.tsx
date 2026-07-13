@@ -1,8 +1,10 @@
+import { useState } from 'react';
 import { LoaderCircleIcon } from 'lucide-react';
 
 import { Markdown } from './Markdown';
 import type { ChatBubble } from './types';
-import { WorkflowTelemetry } from './workflow-telemetry/WorkflowTelemetry';
+import { ApprovalRequestCard } from '@/components/workflows/ApprovalRequestCard';
+import type { ApprovalRequest } from '@/lib/chatTelemetry';
 import { Bubble, BubbleContent } from '@/components/ui/bubble';
 import { Marker, MarkerContent, MarkerIcon } from '@/components/ui/marker';
 import { Message, MessageContent, MessageHeader } from '@/components/ui/message';
@@ -18,9 +20,16 @@ import {
 interface ChatMessagesProps {
   messages: ReadonlyArray<ChatBubble>;
   isWaitingForResponse: boolean;
+  onApprove: (request: ApprovalRequest) => Promise<void>;
+  onRequestChanges: (request: ApprovalRequest) => void;
 }
 
-export function ChatMessages({ messages, isWaitingForResponse }: ChatMessagesProps) {
+export function ChatMessages({
+  messages,
+  isWaitingForResponse,
+  onApprove,
+  onRequestChanges,
+}: ChatMessagesProps) {
   return (
     <MessageScrollerProvider autoScroll defaultScrollPosition="end">
       <MessageScroller className="h-[calc(100dvh-12rem)] min-h-[24rem] sm:h-[70vh]">
@@ -29,7 +38,12 @@ export function ChatMessages({ messages, isWaitingForResponse }: ChatMessagesPro
             {messages.length === 0 && <EmptyState />}
 
             {messages.map((message) => (
-              <ChatMessage key={message.id} message={message} />
+              <ChatMessage
+                key={message.id}
+                message={message}
+                onApprove={onApprove}
+                onRequestChanges={onRequestChanges}
+              />
             ))}
 
             {isWaitingForResponse && <TypingIndicator />}
@@ -41,10 +55,29 @@ export function ChatMessages({ messages, isWaitingForResponse }: ChatMessagesPro
   );
 }
 
-function ChatMessage({ message }: { message: ChatBubble }) {
+function ChatMessage({
+  message,
+  onApprove,
+  onRequestChanges,
+}: {
+  message: ChatBubble;
+  onApprove: (request: ApprovalRequest) => Promise<void>;
+  onRequestChanges: (request: ApprovalRequest) => void;
+}) {
+  const [isApproving, setIsApproving] = useState(false);
   const isUser = message.role === 'user';
   const isDraft = message.role === 'draft';
   const telemetry = message.role === 'assistant' ? message.telemetry : undefined;
+  const approval = telemetry?.approvalRequest;
+  const approve = async () => {
+    if (!approval) return;
+    setIsApproving(true);
+    try {
+      await onApprove(approval);
+    } finally {
+      setIsApproving(false);
+    }
+  };
 
   return (
     <MessageScrollerItem messageId={message.id} scrollAnchor={isUser}>
@@ -55,8 +88,30 @@ function ChatMessage({ message }: { message: ChatBubble }) {
             <BubbleContent className={isUser ? 'max-w-[min(34rem,85vw)] whitespace-pre-wrap' : 'w-full'}>
               {isUser ? message.text : (
                 <>
-                  <Markdown>{message.text}</Markdown>
-                  {telemetry && <WorkflowTelemetry telemetry={telemetry} />}
+                  {approval ? (
+                    <p className="mb-3 text-sm text-muted-foreground">
+                      Your renewal email is ready. Review the exact message below.
+                    </p>
+                  ) : (
+                    <Markdown>{message.text}</Markdown>
+                  )}
+                  {approval && (
+                    <ApprovalRequestCard
+                      revision={approval.revision}
+                      email={{
+                        from: approval.sender,
+                        to: approval.to.join(', '),
+                        cc: approval.cc.join(', '),
+                        bcc: approval.bcc.join(', '),
+                        subject: approval.subject,
+                        body: approval.body,
+                      }}
+                      onApprove={() => void approve()}
+                      onRequestChanges={() => onRequestChanges(approval)}
+                      disabled={isApproving}
+                      statusMessage={isApproving ? 'Recording your approval...' : undefined}
+                    />
+                  )}
                 </>
               )}
             </BubbleContent>

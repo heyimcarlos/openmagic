@@ -245,6 +245,7 @@ class AuthorizeProtectedOperationCommand(WorkflowContract):
     workflow_id: UUID
     purpose: Literal["sensitive_read", "sensitive_write"]
     cause_id: str = Field(min_length=1, max_length=255)
+    cause_type: Literal["message", "ui_action"] = "message"
     operation: ProtectedOperation
 
 
@@ -310,6 +311,7 @@ class VerificationResumeDelivery(WorkflowContract):
     interaction_id: str
     workflow_id: UUID
     request_cause_id: str
+    request_cause_type: Literal["message", "ui_action"]
     operation: ProtectedOperation
 
 

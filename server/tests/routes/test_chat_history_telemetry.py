@@ -4,7 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID
 
-from server.models import ChatTurnTelemetry
+from server.models import ChatApprovalCommand, ChatTurnTelemetry
 from server.routes import chat as chat_route
 from server.services.conversation.log import ConversationLog
 from server.workflows import ResolvedSmsParty
@@ -199,3 +199,72 @@ async def test_latest_telemetry_projects_only_bounded_recent_reply_causes(
 
     assert projected_causes == [f"cause-{index}" for index in range(24, 4, -1)]
     assert response.telemetry == latest
+
+
+async def test_direct_approval_uses_ui_cause_and_current_verification_session(monkeypatch):
+    actor_id = UUID("10000000-0000-0000-0000-000000000001")
+    organization_id = UUID("20000000-0000-0000-0000-000000000001")
+    workflow_id = UUID("40000000-0000-0000-0000-000000000001")
+    job_id = UUID("50000000-0000-0000-0000-000000000001")
+    draft_id = UUID("50000000-0000-0000-0000-000000000002")
+    recorded = []
+    approved = []
+
+    class ControlPlane:
+        async def record_interaction_cause(self, command):
+            recorded.append(command)
+
+        async def approve_job(self, command):
+            approved.append(command)
+            return SimpleNamespace(job_id=command.job_id)
+
+    class Verification:
+        async def authorize_or_challenge(self, command):
+            assert command.actor_party_id == actor_id
+            assert command.workflow_id == workflow_id
+            assert command.cause_type == "ui_action"
+            assert command.operation.name == "approve_job"
+            return SimpleNamespace(status="session_valid")
+
+    monkeypatch.setattr(
+        chat_route,
+        "get_settings",
+        lambda: SimpleNamespace(
+            interaction_mode="workflow",
+            database_url="postgresql+psycopg://unused",
+            workflow_organization_party_id=str(organization_id),
+            verification_code_secret="verification-secret",
+            composio_api_key="composio-key",
+            workflow_composio_user_id="broker-user",
+        ),
+    )
+    monkeypatch.setattr(
+        chat_route,
+        "_workflow_approval_services",
+        lambda *_args: (object(), ControlPlane(), Verification()),
+    )
+
+    async def find_party(_database, _phone):
+        return ResolvedSmsParty(
+            party_id=actor_id,
+            display_name="Carlos Broker",
+            phone="+14165550101",
+        )
+
+    monkeypatch.setattr(chat_route, "find_sms_party", find_party)
+
+    response = await chat_route.approve_exact_email(
+        ChatApprovalCommand(
+            sender_phone="+14165550101",
+            cause_id="ui-approval-1",
+            workflow_id=workflow_id,
+            job_id=job_id,
+            expected_draft_revision_id=draft_id,
+        )
+    )
+
+    assert response.status == "approved"
+    assert response.job_id == job_id
+    assert recorded[0].context.cause_type == "ui_action"
+    assert approved[0].context.cause_type == "ui_action"
+    assert approved[0].expected_draft_revision_id == draft_id

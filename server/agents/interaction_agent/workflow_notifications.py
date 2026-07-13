@@ -51,6 +51,7 @@ class ConversationApprovalPresenter:
         get_conversation_log().record_reply_once(
             str(notification_id),
             message,
+            cause_id=f"notification:{notification_id}",
         )
         return message
 
@@ -202,7 +203,11 @@ class _NotificationToolbox:
             )
             if status.destination_party_id != self._destination_party_id:
                 return ToolResult(success=False, payload={"code": "destination_changed"})
-            get_conversation_log().record_reply_once(str(self._notification_id), status.message)
+            get_conversation_log().record_reply_once(
+                str(self._notification_id),
+                status.message,
+                cause_id=f"notification:{self._notification_id}",
+            )
             return ToolResult(
                 success=True,
                 payload={"status": "presented"},

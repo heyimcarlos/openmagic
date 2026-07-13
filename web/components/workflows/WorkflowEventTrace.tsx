@@ -2,10 +2,10 @@ import { DatabaseIcon } from 'lucide-react';
 
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { cn } from '@/lib/utils';
-import type { WorkflowEventView } from '@/lib/workflowCockpit';
+import type { CockpitEvent } from '@/lib/chatTelemetry';
 
 interface WorkflowEventTraceProps {
-  events: ReadonlyArray<WorkflowEventView>;
+  events: ReadonlyArray<CockpitEvent>;
 }
 
 export function WorkflowEventTrace({ events }: WorkflowEventTraceProps) {
@@ -47,10 +47,12 @@ export function WorkflowEventTrace({ events }: WorkflowEventTraceProps) {
   );
 }
 
-function EventRow({ event, connected }: { event: WorkflowEventView; connected: boolean }) {
+function EventRow({ event, connected }: { event: CockpitEvent; connected: boolean }) {
   return (
     <li className="grid grid-cols-[4.75rem_0.75rem_minmax(0,1fr)] gap-3 text-xs">
-      <time className="py-2 font-mono text-[0.6875rem] text-slate-600">{event.time}</time>
+      <time className="py-2 font-mono text-[0.6875rem] text-slate-600">
+        {formatEventTime(event.occurredAt)}
+      </time>
       <div className="relative flex justify-center">
         <span
           className={cn(
@@ -70,4 +72,16 @@ function EventRow({ event, connected }: { event: WorkflowEventView; connected: b
       </div>
     </li>
   );
+}
+
+function formatEventTime(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleTimeString([], {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    fractionalSecondDigits: 3,
+    hour12: false,
+  });
 }

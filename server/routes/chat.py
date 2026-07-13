@@ -1,4 +1,5 @@
 from functools import lru_cache
+from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, status
 from fastapi.responses import JSONResponse, Response
@@ -6,6 +7,8 @@ from fastapi.responses import JSONResponse, Response
 from ..config import get_settings
 from ..logging_config import logger
 from ..models import (
+    ChatApprovalCommand,
+    ChatApprovalResponse,
     ChatHistoryClearResponse,
     ChatHistoryResponse,
     ChatLatestTelemetryResponse,
@@ -17,8 +20,17 @@ from ..services.conversation import (
     get_conversation_session,
 )
 from ..workflows import (
+    ApproveWorkflowJobCommand,
+    AuthorizeProtectedOperationCommand,
     InteractionActivityStore,
+    ProtectedOperation,
+    RecordInteractionCauseCommand,
+    StaticWorkflowAuthority,
+    StepUpVerification,
+    WorkflowCommandContext,
+    WorkflowControlPlane,
     WorkflowDatabase,
+    WorkflowError,
     WorkflowRetrieval,
     default_workflow_registry,
     find_sms_party,
@@ -159,6 +171,87 @@ async def latest_chat_telemetry(
     return ChatLatestTelemetryResponse(telemetry=telemetry)
 
 
+@router.post("/approval", response_model=ChatApprovalResponse)
+async def approve_exact_email(payload: ChatApprovalCommand) -> ChatApprovalResponse:
+    """Apply one direct approval UI action through the deterministic boundary."""
+
+    settings = get_settings()
+    if settings.interaction_mode != "workflow":
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+    required = (
+        settings.database_url,
+        settings.workflow_organization_party_id,
+        settings.verification_code_secret,
+    )
+    if not all(required):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Exact approval is unavailable",
+        )
+    assert settings.database_url is not None
+    assert settings.workflow_organization_party_id is not None
+    assert settings.verification_code_secret is not None
+    database, control_plane, verification = _workflow_approval_services(
+        settings.database_url,
+        settings.verification_code_secret,
+        bool(settings.composio_api_key and settings.workflow_composio_user_id),
+    )
+    party = await find_sms_party(database, payload.sender_phone)
+    if party is None:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Party is not authorized")
+    context = WorkflowCommandContext(
+        actor_party_id=party.party_id,
+        organization_party_id=UUID(settings.workflow_organization_party_id),
+        cause_type="ui_action",
+        cause_id=payload.cause_id,
+    )
+    operation = ProtectedOperation(
+        name="approve_job",
+        arguments={
+            "job_id": str(payload.job_id),
+            "expected_draft_revision_id": str(payload.expected_draft_revision_id),
+        },
+    )
+    try:
+        await control_plane.record_interaction_cause(
+            RecordInteractionCauseCommand(
+                context=context,
+                content=f"Approve exact email for Job {payload.job_id}",
+            )
+        )
+        decision = await verification.authorize_or_challenge(
+            AuthorizeProtectedOperationCommand(
+                actor_party_id=party.party_id,
+                interaction_id=sms_interaction_id(payload.sender_phone),
+                workflow_id=payload.workflow_id,
+                purpose="sensitive_write",
+                cause_id=payload.cause_id,
+                cause_type="ui_action",
+                operation=operation,
+            )
+        )
+        if decision.status != "session_valid":
+            if decision.status in {"verification_required", "verification_in_progress"}:
+                return ChatApprovalResponse(
+                    status="verification_required",
+                    masked_destination=decision.masked_destination,
+                )
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Identity verification is unavailable",
+            )
+        grant = await control_plane.approve_job(
+            ApproveWorkflowJobCommand(
+                context=context,
+                job_id=payload.job_id,
+                expected_draft_revision_id=payload.expected_draft_revision_id,
+            )
+        )
+        return ChatApprovalResponse(status="approved", job_id=grant.job_id)
+    except WorkflowError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+
 @lru_cache(maxsize=4)
 def _workflow_telemetry_services(
     database_url: str,
@@ -170,6 +263,28 @@ def _workflow_telemetry_services(
         retrieval=WorkflowRetrieval(database=database, cursor_secret=cursor_secret.encode()),
         activity_store=activity_store,
         registry=default_workflow_registry(),
+    )
+
+
+@lru_cache(maxsize=4)
+def _workflow_approval_services(
+    database_url: str,
+    verification_secret: str,
+    delivery_available: bool,
+) -> tuple[WorkflowDatabase, WorkflowControlPlane, StepUpVerification]:
+    database = WorkflowDatabase(database_url)
+    return (
+        database,
+        WorkflowControlPlane(
+            database=database,
+            registry=default_workflow_registry(),
+            authority=StaticWorkflowAuthority(grants=set()),
+        ),
+        StepUpVerification(
+            database=database,
+            code_secret=verification_secret.encode(),
+            delivery_available=delivery_available,
+        ),
     )
 
 

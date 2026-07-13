@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import datetime
+from typing import Literal, cast
 from uuid import UUID
 
 import sqlalchemy as sa
@@ -15,7 +16,7 @@ from .contracts import (
 )
 from .database import WorkflowDatabase
 from .errors import NotificationLifecycleError
-from .models import NotificationRow, VerificationChallengeRow, WorkflowEventRow
+from .models import InteractionCauseRow, NotificationRow, VerificationChallengeRow, WorkflowEventRow
 from .registry import VERIFICATION_DELIVERY_ATTENTION_NOTIFICATION_KIND
 
 VERIFICATION_RESUME_NOTIFICATION_KIND = "verification_resume_required"
@@ -168,12 +169,33 @@ class VerificationNotificationResolver:
                 or event.cause_id != challenge.verified_cause_id
             ):
                 raise NotificationLifecycleError("Verification resume Challenge is invalid")
+            request_cause_type = await session.scalar(
+                sa.select(InteractionCauseRow.cause_type).where(
+                    InteractionCauseRow.id == challenge.request_cause_id,
+                    InteractionCauseRow.actor_party_id == challenge.actor_party_id,
+                )
+            )
+            if request_cause_type is None:
+                request_cause_type = await session.scalar(
+                    sa.select(WorkflowEventRow.cause_type).where(
+                        WorkflowEventRow.id == challenge.created_event_id,
+                        WorkflowEventRow.workflow_id == challenge.workflow_id,
+                        WorkflowEventRow.event_type == "verification_challenge_created",
+                        WorkflowEventRow.cause_id == challenge.request_cause_id,
+                    )
+                )
+            if request_cause_type not in {"message", "ui_action"}:
+                raise NotificationLifecycleError("Verification resume Cause is invalid")
             return VerificationResumeDelivery(
                 challenge_id=challenge.id,
                 actor_party_id=challenge.actor_party_id,
                 interaction_id=challenge.interaction_id,
                 workflow_id=challenge.workflow_id,
                 request_cause_id=challenge.request_cause_id,
+                request_cause_type=cast(
+                    Literal["message", "ui_action"],
+                    request_cause_type,
+                ),
                 operation=ProtectedOperation(
                     name=challenge.operation_name,
                     arguments=challenge.operation_arguments,

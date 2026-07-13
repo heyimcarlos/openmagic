@@ -386,6 +386,10 @@ async def test_verified_resume_runs_exact_stored_packet_read_in_fresh_context(
         def load_transcript(self) -> str:
             return ""
 
+        def user_message_for_cause(self, cause_id: str) -> str | None:
+            assert cause_id == "private-read-message"
+            return "Show my renewal details."
+
         def record_user_message(self, message: str, *, cause_id: str | None = None) -> None:
             del message, cause_id
             return None
@@ -432,7 +436,12 @@ async def test_verified_resume_runs_exact_stored_packet_read_in_fresh_context(
     async def completion(**kwargs):
         assert str(TARGET_ID) in json.dumps(kwargs["messages"])
         assert "$1,284" in json.dumps(kwargs["messages"])
-        assert kwargs["tools"] == []
+        assert "Show my renewal details." in json.dumps(kwargs["messages"])
+        assert {schema["function"]["name"] for schema in kwargs["tools"]} == {
+            "propose_renewal_email",
+            "send_message_to_user",
+            "wait",
+        }
         return {"choices": [{"message": {"content": "Your renewal is active."}}]}
 
     conversation = Conversation()
@@ -462,6 +471,122 @@ async def test_verified_resume_runs_exact_stored_packet_read_in_fresh_context(
     assert contexts[0].loaded_packet is not None
     assert contexts[0].loaded_packet.workflow.workflow_id == TARGET_ID
     await database.dispose()
+
+
+async def test_verified_resume_can_continue_a_draft_request_without_search_or_approval_tools():
+    tool_names = ("read_workflow_packet", "propose_renewal_email", "send_message_to_user", "wait")
+    invoked: list[str] = []
+
+    class Toolbox:
+        @property
+        def schemas(self):
+            return tuple(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "description": name,
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+                for name in tool_names
+            )
+
+        async def invoke(self, name, arguments, context):
+            del arguments, context
+            invoked.append(name)
+            return ToolResult(success=True, payload={"workflow_id": str(TARGET_ID)})
+
+    class Conversation:
+        def __init__(self):
+            self.replies: list[str] = []
+
+        def user_message_for_cause(self, cause_id):
+            assert cause_id == "draft-request"
+            return "Prepare John Smith's renewal email and show it to me before sending."
+
+        def record_reply_once(self, _delivery_id, message, *, cause_id=None):
+            assert cause_id == "draft-request"
+            self.replies.append(message)
+            return True
+
+        def load_transcript(self):
+            return ""
+
+        def record_user_message(self, *_args, **_kwargs):
+            return None
+
+        def record_agent_message(self, *_args, **_kwargs):
+            return None
+
+        def record_reply(self, *_args, **_kwargs):
+            return None
+
+    calls = 0
+
+    async def completion(**kwargs):
+        nonlocal calls
+        calls += 1
+        names = {schema["function"]["name"] for schema in kwargs["tools"]}
+        assert names == {"propose_renewal_email", "send_message_to_user", "wait"}
+        assert "Prepare John Smith's renewal email" in json.dumps(kwargs["messages"])
+        if calls == 1:
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "id": "proposal",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "propose_renewal_email",
+                                        "arguments": json.dumps({"workflow_id": str(TARGET_ID)}),
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                ]
+            }
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": "I'm preparing it now. I'll show you the exact email before anything is sent."
+                    }
+                }
+            ]
+        }
+
+    conversation = Conversation()
+    runtime = InteractionAgentRuntime(
+        toolbox=Toolbox(),
+        tool_context_factory=lambda cause_id: InteractionToolContext(
+            actor_party_id=BROKER_ID,
+            organization_party_id=ACME_ID,
+            cause_id=cause_id,
+        ),
+        completion=completion,
+        conversation_state=conversation,
+        settings=Settings(openrouter_api_key="test-key"),
+    )
+
+    result = await runtime.execute_verified_resume(
+        notification_id=uuid4(),
+        operation_cause_id="draft-request",
+        challenge_id=uuid4(),
+        workflow_id=TARGET_ID,
+        operation=ProtectedOperation(
+            name="read_workflow_packet",
+            arguments={"workflow_id": str(TARGET_ID)},
+        ),
+    )
+
+    assert result.success is True
+    assert invoked == ["read_workflow_packet", "propose_renewal_email"]
+    assert result.response.startswith("I'm preparing it now")
 
 
 async def test_verified_resume_explains_revalidation_failure_to_the_user():
