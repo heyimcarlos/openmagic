@@ -10,7 +10,12 @@ from ...config import Settings, get_settings
 from ...logging_config import logger
 from ...openrouter_client import request_chat_completion
 from ...services.conversation import get_conversation_log, get_working_memory_log
-from ...workflows import ProtectedOperation
+from ...workflows import (
+    InteractionActivityAction,
+    InteractionActivityStatus,
+    InteractionActivityStore,
+    ProtectedOperation,
+)
 from .agent import build_system_prompt, prepare_message_with_history
 from .toolbox import InteractionToolbox, InteractionToolContext, ToolResult
 
@@ -18,13 +23,19 @@ from .toolbox import InteractionToolbox, InteractionToolContext, ToolResult
 class _ConversationState(Protocol):
     def load_transcript(self) -> str: ...
 
-    def record_user_message(self, message: str) -> None: ...
+    def record_user_message(self, message: str, *, cause_id: str | None = None) -> None: ...
 
     def record_agent_message(self, message: str) -> None: ...
 
-    def record_reply(self, message: str) -> None: ...
+    def record_reply(self, message: str, *, cause_id: str | None = None) -> None: ...
 
-    def record_reply_once(self, delivery_id: str, message: str) -> bool: ...
+    def record_reply_once(
+        self,
+        delivery_id: str,
+        message: str,
+        *,
+        cause_id: str | None = None,
+    ) -> bool: ...
 
 
 class _WorkingMemoryState(Protocol):
@@ -78,6 +89,7 @@ class InteractionAgentRuntime:
         message_builder: Callable[..., list[dict[str, str]]] = prepare_message_with_history,
         interaction_cause_recorder: Callable[[InteractionToolContext, str], Awaitable[None]]
         | None = None,
+        activity_store: InteractionActivityStore | None = None,
         completion: Completion | None = None,
         conversation_state: _ConversationState | None = None,
         working_memory_state: _WorkingMemoryState | None = None,
@@ -95,6 +107,7 @@ class InteractionAgentRuntime:
         self._system_prompt_builder = system_prompt_builder
         self._message_builder = message_builder
         self._interaction_cause_recorder = interaction_cause_recorder
+        self._activity_store = activity_store
         self._completion = completion
 
         if not self.api_key:
@@ -120,7 +133,7 @@ class InteractionAgentRuntime:
             tool_context = self._tool_context_factory(cause_id or f"message-{uuid4()}")
             if self._interaction_cause_recorder is not None:
                 await self._interaction_cause_recorder(tool_context, user_message)
-            self.conversation_log.record_user_message(user_message)
+            self.conversation_log.record_user_message(user_message, cause_id=tool_context.cause_id)
 
             logger.info("Processing user message through interaction agent")
             summary = await self._run_interaction_loop(system_prompt, messages, tool_context)
@@ -128,7 +141,7 @@ class InteractionAgentRuntime:
             final_response = self._finalize_response(summary)
 
             if final_response and not summary.user_messages:
-                self.conversation_log.record_reply(final_response)
+                self.conversation_log.record_reply(final_response, cause_id=tool_context.cause_id)
 
             return InteractionResult(
                 success=True,
@@ -215,9 +228,12 @@ class InteractionAgentRuntime:
             tool_context.verification_challenge_id = challenge_id
             tool_context.trusted_workflow_id = workflow_id
             tool_context.delivery_id = str(notification_id)
-            result = await self.toolbox.invoke(
-                operation.name,
-                operation.arguments,
+            result = await self._execute_tool(
+                _ToolCall(
+                    identifier=None,
+                    name=operation.name,
+                    arguments=operation.arguments,
+                ),
                 tool_context,
             )
             if not result.success:
@@ -225,7 +241,11 @@ class InteractionAgentRuntime:
                     "Verification succeeded, but I can no longer complete that request because "
                     "your access or the Workflow state changed. Please start the request again."
                 )
-                self.conversation_log.record_reply_once(str(notification_id), recovery)
+                self.conversation_log.record_reply_once(
+                    str(notification_id),
+                    recovery,
+                    cause_id=operation_cause_id,
+                )
                 error_code = (
                     result.payload.get("code")
                     if isinstance(result.payload, dict)
@@ -265,7 +285,11 @@ class InteractionAgentRuntime:
             final_response = (assistant_message.get("content") or "").strip()
             if not final_response:
                 raise RuntimeError("Verified result presenter returned no response")
-            self.conversation_log.record_reply_once(str(notification_id), final_response)
+            self.conversation_log.record_reply_once(
+                str(notification_id),
+                final_response,
+                cause_id=operation_cause_id,
+            )
             return InteractionResult(success=True, response=final_response)
         except Exception as exc:
             logger.error(
@@ -437,10 +461,13 @@ class InteractionAgentRuntime:
     ) -> ToolResult:
         """Execute a tool call and convert low-level errors into structured results."""
 
+        activity_id = await self._start_activity(tool_call, context)
         if "__invalid_arguments__" in tool_call.arguments:
             error = tool_call.arguments["__invalid_arguments__"]
             self._log_tool_invocation(tool_call, stage="rejected", detail={"error": error})
-            return ToolResult(success=False, payload={"error": error})
+            result = ToolResult(success=False, payload={"error": error})
+            await self._finish_activity(activity_id, tool_call, result, context)
+            return result
 
         try:
             self._log_tool_invocation(tool_call, stage="start")
@@ -455,7 +482,9 @@ class InteractionAgentRuntime:
                 stage="error",
                 detail={"error_type": type(exc).__name__},
             )
-            return ToolResult(success=False, payload={"code": "internal_error"})
+            result = ToolResult(success=False, payload={"code": "internal_error"})
+            await self._finish_activity(activity_id, tool_call, result, context)
+            return result
 
         if not isinstance(result, ToolResult):
             logger.warning(
@@ -464,6 +493,7 @@ class InteractionAgentRuntime:
             )
             wrapped = ToolResult(success=True, payload=result)
             self._log_tool_invocation(tool_call, stage="done", result=wrapped)
+            await self._finish_activity(activity_id, tool_call, wrapped, context)
             return wrapped
 
         status = "success" if result.success else "error"
@@ -475,7 +505,76 @@ class InteractionAgentRuntime:
             },
         )
         self._log_tool_invocation(tool_call, stage="done", result=result)
+        await self._finish_activity(activity_id, tool_call, result, context)
         return result
+
+    async def _start_activity(
+        self,
+        tool_call: _ToolCall,
+        context: InteractionToolContext,
+    ) -> UUID | None:
+        activity_store = getattr(self, "_activity_store", None)
+        if activity_store is None:
+            return None
+        try:
+            action = InteractionActivityAction(tool_call.name)
+        except ValueError:
+            return None
+        try:
+            receipt = await activity_store.start(cause_id=context.cause_id, action=action)
+        except Exception as exc:  # pragma: no cover - telemetry must remain non-blocking
+            logger.warning(
+                "Interaction activity receipt start failed",
+                extra={"tool": tool_call.name, "error_type": type(exc).__name__},
+            )
+            return None
+        return receipt.id
+
+    async def _finish_activity(
+        self,
+        receipt_id: UUID | None,
+        tool_call: _ToolCall,
+        result: ToolResult,
+        context: InteractionToolContext,
+    ) -> None:
+        activity_store = getattr(self, "_activity_store", None)
+        if receipt_id is None or activity_store is None:
+            return
+        action = InteractionActivityAction(tool_call.name)
+        workflow_id = self._trusted_activity_workflow_id(action, result, context)
+        try:
+            await activity_store.finish(
+                receipt_id,
+                status=(
+                    InteractionActivityStatus.SUCCEEDED
+                    if result.success
+                    else InteractionActivityStatus.FAILED
+                ),
+                workflow_id=workflow_id,
+            )
+        except Exception as exc:  # pragma: no cover - telemetry must remain non-blocking
+            logger.warning(
+                "Interaction activity receipt finish failed",
+                extra={"error_type": type(exc).__name__},
+            )
+
+    @staticmethod
+    def _trusted_activity_workflow_id(
+        action: InteractionActivityAction,
+        result: ToolResult,
+        context: InteractionToolContext,
+    ) -> UUID | None:
+        if not result.success or action is InteractionActivityAction.SEARCH_WORKFLOWS:
+            return None
+        if action is InteractionActivityAction.READ_WORKFLOW_PACKET:
+            return (
+                context.loaded_packet.workflow.workflow_id
+                if context.loaded_packet is not None
+                else None
+            )
+        if context.loaded_packet is not None:
+            return context.loaded_packet.workflow.workflow_id
+        return context.trusted_workflow_id or context.resolved_workflow_id
 
     # Format tool execution results into JSON for LLM consumption
     def _format_tool_result(self, tool_call: _ToolCall, result: ToolResult) -> str:

@@ -316,9 +316,13 @@ class WorkflowInteractionToolbox:
                 request = _MessageArguments.model_validate(arguments)
                 conversation = context.conversation or get_conversation_log()
                 if context.delivery_id is not None:
-                    conversation.record_reply_once(context.delivery_id, request.message)
+                    conversation.record_reply_once(
+                        context.delivery_id,
+                        request.message,
+                        cause_id=context.cause_id,
+                    )
                 else:
-                    conversation.record_reply(request.message)
+                    conversation.record_reply(request.message, cause_id=context.cause_id)
                 return ToolResult(
                     success=True,
                     payload={"status": "delivered"},

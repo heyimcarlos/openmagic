@@ -1,3 +1,5 @@
+import { isRecord } from './typeGuards';
+
 export const agentActivityStatuses = ['succeeded', 'running', 'failed'] as const;
 export const workflowJobStatuses = [
   'waiting',
@@ -51,10 +53,6 @@ export interface ChatTurnTelemetry {
 const activityStatusSet = new Set<string>(agentActivityStatuses);
 const jobStatusSet = new Set<string>(workflowJobStatuses);
 const checkpointStatusSet = new Set<string>(workflowCheckpointStatuses);
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
 
 function readText(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim().length > 0 ? value : undefined;

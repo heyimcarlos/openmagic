@@ -13,7 +13,7 @@ import {
 import type { ChatBubble } from '@/components/chat/types';
 import { workflowTelemetryDemoMessages } from '@/components/chat/workflow-telemetry/demo';
 import { messageForDisplay } from '@/lib/chatDisplay';
-import { parseChatTurnTelemetry } from '@/lib/chatTelemetry';
+import { parseChatHistory } from '@/lib/chatHistory';
 import { isWorkflowTelemetryDemoVariant } from '@/lib/workflowTelemetryDemo';
 
 const POLL_INTERVAL_MS = 1500;
@@ -21,32 +21,6 @@ const RESPONSE_POLL_INTERVAL_MS = 1000;
 const RESPONSE_POLL_ATTEMPTS = 30;
 
 const wait = (milliseconds: number) => new Promise((resolve) => window.setTimeout(resolve, milliseconds));
-
-const formatEscapeCharacters = (text: string): string => {
-  return text
-    .replace(/\\n/g, '\n')
-    .replace(/\\t/g, '\t')
-    .replace(/\\r/g, '\r')
-    .replace(/\\\\/g, '\\');
-};
-
-const isRenderableMessage = (entry: any) =>
-  typeof entry?.role === 'string' &&
-  typeof entry?.content === 'string' &&
-  entry.content.trim().length > 0;
-
-const toBubbles = (payload: any): ChatBubble[] => {
-  if (!Array.isArray(payload?.messages)) return [];
-
-  return payload.messages
-    .filter(isRenderableMessage)
-    .map((message: any, index: number) => ({
-      id: typeof message.id === 'string' && message.id ? message.id : `history-${index}`,
-      role: message.role,
-      text: formatEscapeCharacters(message.content),
-      telemetry: parseChatTurnTelemetry(message.telemetry),
-    }));
-};
 
 export default function Page() {
   const { settings, setSettings } = useSettings();
@@ -72,7 +46,7 @@ export default function Page() {
       if (!res.ok) return;
       const data = await res.json();
       if (senderGeneration.current === requestGeneration) {
-        setMessages(toBubbles(data));
+        setMessages(parseChatHistory(data));
       }
     } catch (err: any) {
       if (err?.name === 'AbortError') return;
@@ -147,7 +121,7 @@ export default function Page() {
       const userMessage: ChatBubble = {
         id: `user-${Date.now()}`,
         role: 'user',
-        text: formatEscapeCharacters(messageForDisplay(trimmed)),
+        text: messageForDisplay(trimmed),
       };
       setMessages((previous) => [...previous, userMessage]);
 
@@ -185,7 +159,7 @@ export default function Page() {
           const response = await fetch(historyUrl, { cache: 'no-store' });
           if (!response.ok) continue;
 
-          const currentMessages = toBubbles(await response.json());
+          const currentMessages = parseChatHistory(await response.json());
           const assistantCount = currentMessages.filter((message) => message.role === 'assistant').length;
 
           if (

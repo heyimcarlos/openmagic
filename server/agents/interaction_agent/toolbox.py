@@ -10,9 +10,15 @@ from server.workflows import WorkflowPacket
 
 
 class ConversationRecorder(Protocol):
-    def record_reply(self, message: str) -> None: ...
+    def record_reply(self, message: str, *, cause_id: str | None = None) -> None: ...
 
-    def record_reply_once(self, delivery_id: str, message: str) -> bool: ...
+    def record_reply_once(
+        self,
+        delivery_id: str,
+        message: str,
+        *,
+        cause_id: str | None = None,
+    ) -> bool: ...
 
     def record_wait(self, reason: str) -> None: ...
 

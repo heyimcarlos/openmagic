@@ -11,7 +11,7 @@ export const workflowTelemetryDemoMessages: ReadonlyArray<ChatBubble> = [
     role: 'assistant',
     text: 'I found both renewals and started the drafts. I’ll ask before either email is sent.',
     telemetry: {
-      activitySummary: 'Found context, advanced 2 Workflows',
+      activitySummary: 'Found context for 2 Workflows',
       activity: [
         { id: 'search', label: 'Searched authorized Workflows', status: 'succeeded' },
         { id: 'packets', label: 'Read 2 Workflow Packets', status: 'succeeded' },

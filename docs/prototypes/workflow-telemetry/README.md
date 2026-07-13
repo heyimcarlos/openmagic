@@ -15,9 +15,8 @@ npm run demo:workflow-telemetry --prefix web -- -p 3010
 ```
 
 Open `http://127.0.0.1:3010/?variant=C`. This development-only URL renders the
-production component with a deterministic fixture and bypasses browser Basic
-Auth. Production and normal development routes retain the existing
-authentication behavior.
+production component with a deterministic fixture. Normal chat routes populate
+the same component from the live history API.
 
 ## Decision
 
@@ -38,8 +37,9 @@ Approval remains a checkpoint between Jobs, not a fake Workflow Job.
 The production component lives in
 `web/components/chat/workflow-telemetry/WorkflowTelemetry.tsx`. Assistant
 messages accept telemetry through the chat history contract. The development
-demo alone uses an in-memory fixture. Durable Cause correlation and the
-operational projection that populates that contract remain backend work.
+demo alone uses an in-memory fixture. Normal Workflow-mode history preserves
+durable Cause correlation and attaches the current authorization-scoped
+operational projection.
 
 ## Screenshots
 

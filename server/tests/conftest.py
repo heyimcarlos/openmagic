@@ -43,7 +43,8 @@ async def clean_workflow_database(migrated_postgres_url: str):
     async with engine.begin() as connection:
         await connection.execute(
             sa.text(
-                "TRUNCATE verification_challenges, notifications, workflow_events, "
+                "TRUNCATE interaction_activity_receipts, verification_challenges, "
+                "notifications, workflow_events, "
                 "interaction_causes, workflow_job_runs, "
                 "workflow_job_dependencies, workflow_jobs, "
                 "workflow_participant_roles, workflow_participants, "

@@ -106,5 +106,9 @@ class ChatHistoryResponse(BaseModel):
     messages: list[ChatMessage] = Field(default_factory=list)
 
 
+class ChatLatestTelemetryResponse(BaseModel):
+    telemetry: ChatTurnTelemetry | None = None
+
+
 class ChatHistoryClearResponse(BaseModel):
     ok: bool = True

@@ -32,6 +32,7 @@ from .identity_models import (
     WorkflowParticipantRow,
 )
 from .models import (
+    InteractionCauseRow,
     WorkflowEventRow,
     WorkflowJobDependencyRow,
     WorkflowJobRow,
@@ -69,6 +70,14 @@ CURSOR_VERSION = 1
 FACET_LIMIT = 10
 EVENT_LIMIT = 20
 HIDDEN_EVENT_TYPES = frozenset({"lease_extended", "run_claimed", "run_started"})
+TELEMETRY_MESSAGE_EVENT_TYPES = frozenset(
+    {
+        "approval_granted",
+        "approval_invalidated",
+        "workflow_cancelled",
+        "workflow_jobs_proposed",
+    }
+)
 QUERY_NOISE_TERMS = frozenset(
     {
         "a",
@@ -187,96 +196,153 @@ class WorkflowRetrieval:
         context: WorkflowInspectionContext,
         workflow_id: UUID,
     ) -> WorkflowPacket:
+        packets = await self.read_workflow_packets(context, [workflow_id])
+        if not packets:
+            raise WorkflowNotFoundError(str(workflow_id))
+        return packets[0]
+
+    async def read_workflow_packets(
+        self,
+        context: WorkflowInspectionContext,
+        workflow_ids: list[UUID],
+    ) -> tuple[WorkflowPacket, ...]:
+        """Batch current authorized packets without revealing omitted Workflows."""
+
+        ordered_ids = list(dict.fromkeys(workflow_ids))
+        if not ordered_ids:
+            return ()
         async with self._database.read_transaction() as session:
-            authorized = self._authorized_workflows(context.actor_party_id).where(
-                WorkflowRow.id == workflow_id
-            )
-            row = (await session.execute(authorized)).one_or_none()
-            if row is None:
-                raise WorkflowNotFoundError(str(workflow_id))
-            workflow, organization = row
-            participants = (await self._participants(session, [workflow_id]))[workflow_id]
+            authorized_rows = (
+                await session.execute(
+                    self._authorized_workflows(context.actor_party_id).where(
+                        WorkflowRow.id.in_(ordered_ids)
+                    )
+                )
+            ).all()
+            workflow_rows = {
+                workflow.id: (workflow, organization) for workflow, organization in authorized_rows
+            }
+            authorized_ids = [
+                workflow_id for workflow_id in ordered_ids if workflow_id in workflow_rows
+            ]
+            if not authorized_ids:
+                return ()
+            participants = await self._participants(session, authorized_ids)
             jobs = (
                 await session.scalars(
                     sa.select(WorkflowJobRow)
-                    .where(WorkflowJobRow.workflow_id == workflow_id)
-                    .order_by(WorkflowJobRow.created_at, WorkflowJobRow.id)
+                    .where(WorkflowJobRow.workflow_id.in_(authorized_ids))
+                    .order_by(
+                        WorkflowJobRow.workflow_id,
+                        WorkflowJobRow.created_at,
+                        WorkflowJobRow.id,
+                    )
                 )
             ).all()
             dependencies = (
                 await session.scalars(
-                    sa.select(WorkflowJobDependencyRow).where(
-                        WorkflowJobDependencyRow.workflow_id == workflow_id
+                    sa.select(WorkflowJobDependencyRow)
+                    .where(WorkflowJobDependencyRow.workflow_id.in_(authorized_ids))
+                    .order_by(
+                        WorkflowJobDependencyRow.workflow_id,
+                        WorkflowJobDependencyRow.job_id,
+                        WorkflowJobDependencyRow.depends_on_job_id,
                     )
                 )
             ).all()
             runs = (
                 await session.scalars(
                     sa.select(WorkflowJobRunRow)
-                    .where(WorkflowJobRunRow.workflow_id == workflow_id)
-                    .order_by(WorkflowJobRunRow.created_at, WorkflowJobRunRow.id)
+                    .where(WorkflowJobRunRow.workflow_id.in_(authorized_ids))
+                    .order_by(
+                        WorkflowJobRunRow.workflow_id,
+                        WorkflowJobRunRow.created_at,
+                        WorkflowJobRunRow.id,
+                    )
                 )
             ).all()
             events = (
                 await session.scalars(
                     sa.select(WorkflowEventRow)
                     .where(
-                        WorkflowEventRow.workflow_id == workflow_id,
+                        WorkflowEventRow.workflow_id.in_(authorized_ids),
                         WorkflowEventRow.event_type.not_in(HIDDEN_EVENT_TYPES),
                     )
-                    .order_by(WorkflowEventRow.occurred_at, WorkflowEventRow.id)
+                    .order_by(
+                        WorkflowEventRow.workflow_id,
+                        WorkflowEventRow.occurred_at,
+                        WorkflowEventRow.id,
+                    )
                 )
             ).all()
 
-        dependencies_by_job: dict[UUID, list[UUID]] = defaultdict(list)
+        jobs_by_workflow: dict[UUID, list[WorkflowJobRow]] = defaultdict(list)
+        dependencies_by_workflow: dict[UUID, list[WorkflowJobDependencyRow]] = defaultdict(list)
+        runs_by_workflow: dict[UUID, list[WorkflowJobRunRow]] = defaultdict(list)
+        events_by_workflow: dict[UUID, list[WorkflowEventRow]] = defaultdict(list)
+        for job in jobs:
+            jobs_by_workflow[job.workflow_id].append(job)
         for dependency in dependencies:
-            dependencies_by_job[dependency.job_id].append(dependency.depends_on_job_id)
-        runs_by_job: dict[UUID, list[WorkflowJobRunRow]] = defaultdict(list)
+            dependencies_by_workflow[dependency.workflow_id].append(dependency)
         for run in runs:
-            runs_by_job[run.job_id].append(run)
-        jobs_by_id = {job.id: job for job in jobs}
-        events_by_job: dict[UUID, list[WorkflowEventRow]] = defaultdict(list)
-        invalidated_approval_ids = {
-            event.approval_grant_id
-            for event in events
-            if event.event_type == "approval_invalidated" and event.approval_grant_id is not None
-        }
+            runs_by_workflow[run.workflow_id].append(run)
         for event in events:
-            if event.job_id is not None:
-                events_by_job[event.job_id].append(event)
+            events_by_workflow[event.workflow_id].append(event)
 
-        event_window = events[-EVENT_LIMIT:]
-        return WorkflowPacket(
-            generated_at=datetime.now(UTC),
-            workflow=WorkflowPacketWorkflow(
-                workflow_id=workflow.id,
-                workflow_kind=workflow.kind,
-                objective=workflow.objective,
-                status=workflow.status,
-                input=workflow.input,
-                organization=organization,
-                corrects_workflow_id=workflow.corrects_workflow_id,
-                created_at=workflow.created_at,
-            ),
-            participants=participants,
-            jobs=tuple(
-                self._packet_job(
-                    job,
-                    dependencies_by_job[job.id],
-                    runs_by_job[job.id],
-                    events_by_job[job.id],
-                    jobs_by_id,
-                    invalidated_approval_ids,
-                )
-                for job in jobs
-            ),
-            recent_events=tuple(self._packet_event(event) for event in event_window),
-            event_window=WorkflowPacketEventWindow(
-                returned=len(event_window),
-                total=len(events),
-                has_earlier=len(events) > EVENT_LIMIT,
-            ),
+        return tuple(
+            self._build_packet(
+                workflow=workflow_rows[workflow_id][0],
+                organization=workflow_rows[workflow_id][1],
+                participants=participants[workflow_id],
+                jobs=jobs_by_workflow[workflow_id],
+                dependencies=dependencies_by_workflow[workflow_id],
+                runs=runs_by_workflow[workflow_id],
+                events=events_by_workflow[workflow_id],
+            )
+            for workflow_id in authorized_ids
         )
+
+    async def authorized_workflow_ids_for_causes(
+        self,
+        context: WorkflowInspectionContext,
+        cause_ids: list[str],
+    ) -> dict[str, tuple[UUID, ...]]:
+        """Resolve Cause-linked Workflow IDs through current Party authorization."""
+
+        if not cause_ids:
+            return {}
+        async with self._database.read_transaction() as session:
+            rows = (
+                await session.execute(
+                    sa.select(
+                        WorkflowEventRow.cause_id,
+                        WorkflowEventRow.workflow_id,
+                        sa.func.min(WorkflowEventRow.occurred_at).label("first_seen_at"),
+                    )
+                    .join(WorkflowRow, WorkflowRow.id == WorkflowEventRow.workflow_id)
+                    .join(
+                        InteractionCauseRow,
+                        InteractionCauseRow.id == WorkflowEventRow.cause_id,
+                    )
+                    .where(
+                        WorkflowEventRow.cause_type == "message",
+                        WorkflowEventRow.event_type.in_(TELEMETRY_MESSAGE_EVENT_TYPES),
+                        WorkflowEventRow.cause_id.in_(set(cause_ids)),
+                        InteractionCauseRow.actor_party_id == context.actor_party_id,
+                        self._authorization_predicate(context.actor_party_id),
+                    )
+                    .group_by(WorkflowEventRow.cause_id, WorkflowEventRow.workflow_id)
+                    .order_by(
+                        WorkflowEventRow.cause_id,
+                        sa.func.min(WorkflowEventRow.occurred_at),
+                        WorkflowEventRow.workflow_id,
+                    )
+                )
+            ).all()
+        grouped: dict[str, list[UUID]] = defaultdict(list)
+        for cause_id, workflow_id, _first_seen_at in rows:
+            grouped[cause_id].append(workflow_id)
+        return {cause_id: tuple(ids) for cause_id, ids in grouped.items()}
 
     async def resolve_renewal_email_addresses(
         self,
@@ -333,6 +399,14 @@ class WorkflowRetrieval:
 
     @staticmethod
     def _authorized_workflows(actor_party_id: UUID) -> sa.Select[Any]:
+        return (
+            sa.select(WorkflowRow, PartyRow.display_name)
+            .join(PartyRow, PartyRow.id == WorkflowRow.organization_party_id)
+            .where(WorkflowRetrieval._authorization_predicate(actor_party_id))
+        )
+
+    @staticmethod
+    def _authorization_predicate(actor_party_id: UUID) -> sa.ColumnElement[bool]:
         verified_identifier = sa.exists(
             sa.select(PartyIdentifierRow.id).where(
                 PartyIdentifierRow.party_id == actor_party_id,
@@ -340,13 +414,9 @@ class WorkflowRetrieval:
                 PartyIdentifierRow.revoked_at.is_(None),
             )
         )
-        return (
-            sa.select(WorkflowRow, PartyRow.display_name)
-            .join(PartyRow, PartyRow.id == WorkflowRow.organization_party_id)
-            .where(
-                verified_identifier,
-                current_workflow_access_predicate(actor_party_id),
-            )
+        return sa.and_(
+            verified_identifier,
+            current_workflow_access_predicate(actor_party_id),
         )
 
     @classmethod
@@ -732,6 +802,67 @@ class WorkflowRetrieval:
             renewal_period=workflow.input.get("renewal_period"),
             created_at=workflow.created_at,
             match_reasons=candidate.match_reasons,
+        )
+
+    def _build_packet(
+        self,
+        *,
+        workflow: WorkflowRow,
+        organization: str,
+        participants: tuple[WorkflowParticipantSummary, ...],
+        jobs: list[WorkflowJobRow],
+        dependencies: list[WorkflowJobDependencyRow],
+        runs: list[WorkflowJobRunRow],
+        events: list[WorkflowEventRow],
+    ) -> WorkflowPacket:
+        dependencies_by_job: dict[UUID, list[UUID]] = defaultdict(list)
+        for dependency in dependencies:
+            dependencies_by_job[dependency.job_id].append(dependency.depends_on_job_id)
+        runs_by_job: dict[UUID, list[WorkflowJobRunRow]] = defaultdict(list)
+        for run in runs:
+            runs_by_job[run.job_id].append(run)
+        jobs_by_id = {job.id: job for job in jobs}
+        events_by_job: dict[UUID, list[WorkflowEventRow]] = defaultdict(list)
+        invalidated_approval_ids = {
+            event.approval_grant_id
+            for event in events
+            if event.event_type == "approval_invalidated" and event.approval_grant_id is not None
+        }
+        for event in events:
+            if event.job_id is not None:
+                events_by_job[event.job_id].append(event)
+
+        event_window = events[-EVENT_LIMIT:]
+        return WorkflowPacket(
+            generated_at=datetime.now(UTC),
+            workflow=WorkflowPacketWorkflow(
+                workflow_id=workflow.id,
+                workflow_kind=workflow.kind,
+                objective=workflow.objective,
+                status=cast(WorkflowStatus, workflow.status),
+                input=workflow.input,
+                organization=organization,
+                corrects_workflow_id=workflow.corrects_workflow_id,
+                created_at=workflow.created_at,
+            ),
+            participants=participants,
+            jobs=tuple(
+                self._packet_job(
+                    job,
+                    dependencies_by_job[job.id],
+                    runs_by_job[job.id],
+                    events_by_job[job.id],
+                    jobs_by_id,
+                    invalidated_approval_ids,
+                )
+                for job in jobs
+            ),
+            recent_events=tuple(self._packet_event(event) for event in event_window),
+            event_window=WorkflowPacketEventWindow(
+                returned=len(event_window),
+                total=len(events),
+                has_earlier=len(events) > EVENT_LIMIT,
+            ),
         )
 
     def _packet_job(

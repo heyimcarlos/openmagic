@@ -2,6 +2,12 @@
 
 # Import relational identity mappings so the shared Alembic metadata is complete.
 from . import identity_models as _identity_models  # noqa: F401
+from .activity import (
+    InteractionActivityAction,
+    InteractionActivityReceipt,
+    InteractionActivityStatus,
+    InteractionActivityStore,
+)
 from .authority import StaticWorkflowAuthority, WorkflowAuthority, WorkflowAuthorizationScope
 from .contracts import (
     AcknowledgeNotificationCommand,
@@ -73,6 +79,7 @@ from .mailbox_directory import VerifiedMailbox, resolve_verified_mailbox
 from .models import Base as WorkflowModelBase
 from .party_resolution import (
     ResolvedSmsParty,
+    find_sms_party,
     normalize_sms_phone,
     resolve_sms_party,
     sms_interaction_id,
@@ -94,6 +101,7 @@ from .retrieval import WorkflowRetrieval
 from .retrieval_contracts import (
     WorkflowInspectionContext,
     WorkflowPacket,
+    WorkflowPacketJob,
     WorkflowSearchPage,
     WorkflowSearchRequest,
 )
@@ -144,6 +152,10 @@ __all__ = [
     "EmailSendEffectV1",
     "EmailSendExecutionContextV1",
     "ExecutionStrategy",
+    "InteractionActivityAction",
+    "InteractionActivityReceipt",
+    "InteractionActivityStatus",
+    "InteractionActivityStore",
     "InvalidWorkflowProposalError",
     "InvalidWorkflowSearchError",
     "NotificationAudienceContext",
@@ -192,6 +204,7 @@ __all__ = [
     "WorkflowModelBase",
     "WorkflowNotFoundError",
     "WorkflowPacket",
+    "WorkflowPacketJob",
     "WorkflowProposal",
     "WorkflowRetrieval",
     "WorkflowSearchPage",
@@ -199,6 +212,7 @@ __all__ = [
     "WorkflowTrace",
     "WorkflowWorker",
     "default_workflow_registry",
+    "find_sms_party",
     "normalize_sms_phone",
     "resolve_sms_party",
     "resolve_verified_mailbox",

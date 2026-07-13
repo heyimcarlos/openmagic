@@ -27,13 +27,14 @@ import type {
 
 interface WorkflowTelemetryProps {
   telemetry: ChatTurnTelemetry;
+  className?: string;
 }
 
-export function WorkflowTelemetry({ telemetry }: WorkflowTelemetryProps) {
+export function WorkflowTelemetry({ telemetry, className }: WorkflowTelemetryProps) {
   return (
     <Accordion
       multiple
-      className="mt-3 gap-0.5"
+      className={cn('mt-3 gap-0.5', className)}
       aria-label="Agent activity and Workflow progress"
     >
       <ActivityDisclosure summary={telemetry.activitySummary} activity={telemetry.activity} />
