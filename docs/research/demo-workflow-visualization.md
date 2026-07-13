@@ -85,13 +85,13 @@ The implemented projection is bounded to the latest 50 demo Workflows and 200 du
 
 ## Truthfulness constraint
 
-[`WorkflowRuntimeService`](../../server/services/workflow_runtime.py) currently describes itself as polling one Job and one Notification at a time, and its loop invokes the Workflow Worker before the main Notification Worker. The visual therefore labels one as configured capacity and explicitly says worker liveness is not persisted. Claims are proven by durable Workflow Job Run events. The scalable claim demonstrated today is durable buffering and decoupled processing rates. It is not yet a claim that multiple Workers are active concurrently.
+[`WorkflowRuntimeService`](../../server/services/workflow_runtime.py) starts one local Workflow Worker and one Notification Worker. The demo can add up to eight independently identified Workflow Workers. Their claim loops run concurrently, and each claim remains transactionally exclusive. They are async tasks inside one FastAPI process, not a distributed production fleet. Claims are proven by durable Workflow Job Run events, while Worker liveness is still not persisted.
 
 ## Product command boundary
 
-The interview surface should not turn the current `propose_renewal_email` tool into the long-term product contract. The generalized Interaction Agent boundary should be `propose_workflow_work`, with a closed, registry-owned discriminated union of business operations. Each operation owns its validated input schema and compiles to a Workflow proposal. The model must not supply executor keys, prompts, dependency graphs, retry policy, or notification routing.
+The Interaction Agent now exposes `propose_workflow_work`, with a closed, registry-owned business operation schema. The current `prepare_renewal_email` operation compiles inside the Control Plane to its trusted Draft and Send Job graph. The model cannot supply executor keys, prompts, dependency graphs, retry policy, private addresses, or notification routing. Old stored verification operations are upgraded on read for durable compatibility, but the renewal-specific tool is no longer exposed to the model.
 
-The `/system` load controls call the typed `create_workflow` Control Plane command directly because they are engineering controls, not chat tools. They use the same registry-owned renewal graph and durable command path that `propose_workflow_work` should eventually target. This keeps the interviewer view compatible with the business-facing chat work without exposing orchestration vocabulary in chat.
+The `/system` load controls call the typed `create_workflow` Control Plane command directly because they are engineering controls, not chat tools. Business-facing chat calls `propose_workflow_work`, which targets the same registry and durable proposal protocol without exposing orchestration vocabulary.
 
 ## GAN Lab interaction model
 
@@ -105,8 +105,8 @@ The `/system` load controls call the typed `create_workflow` Control Plane comma
 
 The OpenMagic translation is a stable seven-stage infrastructure graph, a durable activity trace, queue and delivery metrics, real load controls, and an observed-state timeline. The browser retains up to 450 real PostgreSQL captures, roughly three minutes at the 400 ms poll rate. The viewer can pause, scrub backward or forward, and return to live state while new captures continue arriving.
 
-The timeline is observational. It never rolls the database backward and never invents events between captures. Worker capacity remains fixed at the configured value of one. A future capacity control should only appear after the runtime supports changing real Worker concurrency and persisting liveness.
+The timeline is observational. It never rolls the database backward and never invents events between captures. The Worker control changes real local async claim capacity, and the graph labels the resulting queue, execution, notification, and end-to-end p50 timings. Persisted Worker heartbeats and deployment-level fleet control remain production follow-ups.
 
 ## Branch compatibility audit
 
-The `codex/issue-13-verification` work is already integrated into `main` through PR 38 and commit `57c1241`. At the time of this audit, the active `codex/issue-41-real-chat-cockpit` worktree had uncommitted changes in Interaction Agent, chat telemetry, Workflow runtime, and Workflow package-export files. The system map intentionally uses a new `/system` route, a new demo projection, and separate React Flow components. The only shared integration seam is the public `server.workflows` export list, where both branches add independent exports.
+The `codex/issue-13-verification` work is integrated through PR 38 and commit `57c1241`. PR 42 is merged into this branch from `main` at commit `4d97bd3`, including the user-facing chat and live Workflow telemetry work. The `/system` route remains an interviewer-only engineering surface while sharing the current Workflow runtime and public package interfaces.

@@ -30,11 +30,19 @@ def _settings(database_url: str) -> Settings:
     )
 
 
+def _service(database_url: str) -> BackpressureDemoService:
+    return BackpressureDemoService(
+        _settings(database_url),
+        worker_ids=lambda: ("workflow-worker:test",),
+        max_worker_capacity=lambda: 8,
+    )
+
+
 async def test_job_burst_uses_atomic_workflow_commands_and_projects_queue_pressure(
     migrated_postgres_url: str,
     seeded_workflow_identity,
 ):
-    service = BackpressureDemoService(_settings(migrated_postgres_url))
+    service = _service(migrated_postgres_url)
 
     snapshot = await service.enqueue_jobs(10)
 
@@ -50,6 +58,8 @@ async def test_job_burst_uses_atomic_workflow_commands_and_projects_queue_pressu
     assert snapshot.counts.notifications_queued == 0
     assert snapshot.worker.configured_job_concurrency == 1
     assert snapshot.worker.configured_notification_concurrency == 1
+    assert snapshot.worker.job_worker_ids == ("workflow-worker:test",)
+    assert snapshot.worker.max_job_worker_capacity == 8
     assert snapshot.worker.liveness == "not_persisted"
     assert len(snapshot.jobs) == 10
     assert {job.kind for job in snapshot.jobs} == {
@@ -75,7 +85,11 @@ async def test_snapshot_separates_run_completion_from_notification_delivery(
     seeded_workflow_identity,
 ):
     settings = _settings(migrated_postgres_url)
-    service = BackpressureDemoService(settings)
+    service = BackpressureDemoService(
+        settings,
+        worker_ids=lambda: ("workflow-worker:test",),
+        max_worker_capacity=lambda: 8,
+    )
     await service.enqueue_jobs(2)
     database = WorkflowDatabase(migrated_postgres_url)
     control_plane = WorkflowControlPlane(
@@ -113,6 +127,8 @@ async def test_snapshot_separates_run_completion_from_notification_delivery(
     assert snapshot.counts.notifications_delivered == 0
     assert snapshot.runs[0].runtime_instance_id == packet.runtime_instance_id
     assert snapshot.notifications[0].status == "queued"
+    assert snapshot.latency.queue_claim_p50_ms is not None
+    assert snapshot.latency.execution_p50_ms is not None
     assert [item.type for item in snapshot.activity[:3]] == [
         "notification_queued",
         "draft_ready",
@@ -127,7 +143,7 @@ async def test_snapshot_bounds_repeated_demo_history(
     migrated_postgres_url: str,
     seeded_workflow_identity,
 ):
-    service = BackpressureDemoService(_settings(migrated_postgres_url))
+    service = _service(migrated_postgres_url)
 
     await service.enqueue_jobs(40)
     await service.enqueue_jobs(40)

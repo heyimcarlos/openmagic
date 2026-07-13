@@ -111,7 +111,7 @@ def test_workflow_tool_surface_omits_delegation_and_execution_configuration(
 
     assert "search_workflows" in encoded
     assert "read_workflow_packet" in encoded
-    assert "propose_renewal_email" in encoded
+    assert "propose_workflow_work" in encoded
     for forbidden in (
         "send_message_to_agent",
         "agent_name",
@@ -128,8 +128,12 @@ def test_workflow_tool_surface_omits_delegation_and_execution_configuration(
     proposal_schema = next(
         schema["function"]["parameters"]
         for schema in workflow_toolbox.schemas
-        if schema["function"]["name"] == "propose_renewal_email"
+        if schema["function"]["name"] == "propose_workflow_work"
     )
+    assert set(proposal_schema["required"]) == {"workflow_id", "operation"}
+    operation_schema = proposal_schema["$defs"]["PrepareRenewalEmailOperation"]
+    assert operation_schema["properties"]["type"]["const"] == "prepare_renewal_email"
+    assert operation_schema["additionalProperties"] is False
     assert "status" not in proposal_schema["properties"]
 
 
@@ -196,8 +200,11 @@ async def test_workflow_tools_search_read_one_packet_then_propose(
     assert context.loaded_packet.workflow.workflow_id == TARGET_ID
 
     proposal = await workflow_toolbox.invoke(
-        "propose_renewal_email",
-        {"workflow_id": str(TARGET_ID)},
+        "propose_workflow_work",
+        {
+            "workflow_id": str(TARGET_ID),
+            "operation": {"type": "prepare_renewal_email"},
+        },
         context,
     )
     assert proposal.success is True
@@ -333,8 +340,11 @@ async def test_verified_session_covers_later_sensitive_write(
     )
     assert loaded.success is True
     proposed = await toolbox.invoke(
-        "propose_renewal_email",
-        {"workflow_id": str(TARGET_ID)},
+        "propose_workflow_work",
+        {
+            "workflow_id": str(TARGET_ID),
+            "operation": {"type": "prepare_renewal_email"},
+        },
         context,
     )
 
@@ -468,14 +478,17 @@ async def test_verified_resume_uses_session_for_follow_on_proposal_with_actual_t
         assert "$1,284" in json.dumps(kwargs["messages"])
         assert "Prepare John Smith's renewal email" in json.dumps(kwargs["messages"])
         assert {schema["function"]["name"] for schema in kwargs["tools"]} == {
-            "propose_renewal_email",
+            "propose_workflow_work",
             "send_message_to_user",
             "wait",
         }
         if completion_calls == 1:
             return _tool_call(
-                "propose_renewal_email",
-                {"workflow_id": str(TARGET_ID)},
+                "propose_workflow_work",
+                {
+                    "workflow_id": str(TARGET_ID),
+                    "operation": {"type": "prepare_renewal_email"},
+                },
             )
         return {
             "choices": [
@@ -526,7 +539,7 @@ async def test_verified_resume_uses_session_for_follow_on_proposal_with_actual_t
 
 
 async def test_verified_resume_can_continue_a_draft_request_without_search_or_approval_tools():
-    tool_names = ("read_workflow_packet", "propose_renewal_email", "send_message_to_user", "wait")
+    tool_names = ("read_workflow_packet", "propose_workflow_work", "send_message_to_user", "wait")
     invoked: list[str] = []
 
     class Toolbox:
@@ -581,7 +594,7 @@ async def test_verified_resume_can_continue_a_draft_request_without_search_or_ap
         nonlocal calls
         calls += 1
         names = {schema["function"]["name"] for schema in kwargs["tools"]}
-        assert names == {"propose_renewal_email", "send_message_to_user", "wait"}
+        assert names == {"propose_workflow_work", "send_message_to_user", "wait"}
         assert "Prepare John Smith's renewal email" in json.dumps(kwargs["messages"])
         if calls == 1:
             return {
@@ -594,8 +607,13 @@ async def test_verified_resume_can_continue_a_draft_request_without_search_or_ap
                                     "id": "proposal",
                                     "type": "function",
                                     "function": {
-                                        "name": "propose_renewal_email",
-                                        "arguments": json.dumps({"workflow_id": str(TARGET_ID)}),
+                                        "name": "propose_workflow_work",
+                                        "arguments": json.dumps(
+                                            {
+                                                "workflow_id": str(TARGET_ID),
+                                                "operation": {"type": "prepare_renewal_email"},
+                                            }
+                                        ),
                                     },
                                 }
                             ],
@@ -638,7 +656,7 @@ async def test_verified_resume_can_continue_a_draft_request_without_search_or_ap
     )
 
     assert result.success is True
-    assert invoked == ["read_workflow_packet", "propose_renewal_email"]
+    assert invoked == ["read_workflow_packet", "propose_workflow_work"]
     assert result.response.startswith("I'm preparing it now")
 
 
@@ -738,8 +756,11 @@ async def test_proposal_requires_packet_in_same_interaction_turn(
     )
 
     result = await workflow_toolbox.invoke(
-        "propose_renewal_email",
-        {"workflow_id": str(TARGET_ID)},
+        "propose_workflow_work",
+        {
+            "workflow_id": str(TARGET_ID),
+            "operation": {"type": "prepare_renewal_email"},
+        },
         context,
     )
 
@@ -819,8 +840,11 @@ async def test_selected_authorized_workflow_derives_its_organization_context(
         context,
     )
     proposal = await workflow_toolbox.invoke(
-        "propose_renewal_email",
-        {"workflow_id": str(SAME_NAME_ID)},
+        "propose_workflow_work",
+        {
+            "workflow_id": str(SAME_NAME_ID),
+            "operation": {"type": "prepare_renewal_email"},
+        },
         context,
     )
 
@@ -918,8 +942,11 @@ async def test_ambiguous_search_cannot_read_or_propose_the_first_candidate(
         context,
     )
     proposal = await workflow_toolbox.invoke(
-        "propose_renewal_email",
-        {"workflow_id": str(TARGET_ID)},
+        "propose_workflow_work",
+        {
+            "workflow_id": str(TARGET_ID),
+            "operation": {"type": "prepare_renewal_email"},
+        },
         context,
     )
 
@@ -950,8 +977,11 @@ async def test_ambiguous_search_cannot_read_or_propose_the_first_candidate(
         context,
     )
     accepted = await workflow_toolbox.invoke(
-        "propose_renewal_email",
-        {"workflow_id": str(TARGET_ID)},
+        "propose_workflow_work",
+        {
+            "workflow_id": str(TARGET_ID),
+            "operation": {"type": "prepare_renewal_email"},
+        },
         context,
     )
 
@@ -1005,9 +1035,10 @@ async def test_scripted_workflow_runtime_loads_one_packet_and_never_delegates(
         ),
         ("read_workflow_packet", {"workflow_id": str(TARGET_ID)}),
         (
-            "propose_renewal_email",
+            "propose_workflow_work",
             {
                 "workflow_id": str(TARGET_ID),
+                "operation": {"type": "prepare_renewal_email"},
             },
         ),
         None,
@@ -1098,7 +1129,7 @@ async def test_scripted_workflow_runtime_loads_one_packet_and_never_delegates(
             TARGET_ID,
         ),
         (
-            InteractionActivityAction.PROPOSE_RENEWAL_EMAIL,
+            InteractionActivityAction.PROPOSE_WORKFLOW_WORK,
             InteractionActivityStatus.SUCCEEDED,
             TARGET_ID,
         ),

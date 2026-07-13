@@ -91,8 +91,9 @@ The web app proxies API calls to the Python server using the values in `.env`, s
 Set `OPENMAGIC_ENABLE_BACKPRESSURE_DEMO=1` only in the isolated local demo environment, then open [http://localhost:3000/system](http://localhost:3000/system) after starting both services. The system map reads real PostgreSQL state and shows the typed Control Plane command, durable Job backlog, worker claim, fresh Workflow Job Run and Execution Agent identities, Notification delivery, and fresh Interaction Agent turn.
 
 - **Create 1 Workflow** commits one renewal Workflow with a Draft Job and a dependent Send Job.
-- The **Burst size** control selects any even count from 2 through 40 Jobs. The default **Burst +10 Jobs** commits five complete Workflow graphs through the same atomic Control Plane boundary.
-- The runtime is configured to claim one eligible Job per tick. The visible queue-to-configured-capacity ratio demonstrates durable backpressure, not Worker liveness or concurrent Worker scale.
+- The **Burst size** control selects any even count from 2 through 100 Jobs. The default **Burst +10 Jobs** commits five complete Workflow graphs through the same atomic Control Plane interface.
+- **Add Worker** adds a real, independently identified async Worker, up to eight. These Workers claim and execute concurrently inside the local FastAPI process, not as a distributed production fleet.
+- Each Worker claims at most one eligible Job per tick. The visible queue-to-capacity ratio and p50 timings show how added claim capacity changes backpressure.
 - Draft Jobs call the configured execution LLM. Send Jobs remain blocked on exact approval, so the load control never sends demo email automatically.
 - The observed-state timeline retains roughly three minutes of 400 ms database captures. Pause, scrub backward or forward, then return to the still-running live system without mutating durable state.
 

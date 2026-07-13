@@ -106,7 +106,7 @@ async def test_activity_receipt_cannot_link_an_unknown_workflow(
     store = InteractionActivityStore(database)
     receipt = await store.start(
         cause_id="message-renewal-request",
-        action=InteractionActivityAction.PROPOSE_RENEWAL_EMAIL,
+        action=InteractionActivityAction.PROPOSE_WORKFLOW_WORK,
     )
 
     with pytest.raises(IntegrityError):

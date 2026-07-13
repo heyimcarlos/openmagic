@@ -41,7 +41,7 @@ from ...workflows import (
 _ACTIVITY_LABELS = {
     InteractionActivityAction.SEARCH_WORKFLOWS: "Searched authorized Workflows",
     InteractionActivityAction.READ_WORKFLOW_PACKET: "Read bounded Workflow context",
-    InteractionActivityAction.PROPOSE_RENEWAL_EMAIL: "Proposed renewal email work",
+    InteractionActivityAction.PROPOSE_WORKFLOW_WORK: "Proposed business work",
     InteractionActivityAction.APPROVE_JOB: "Submitted exact Job approval",
 }
 

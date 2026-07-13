@@ -12,6 +12,7 @@ from server.services import (
     BackpressureDemoService,
     BackpressureSnapshot,
     get_backpressure_demo_service,
+    get_workflow_runtime_service,
 )
 
 router = APIRouter(prefix="/demo/backpressure", tags=["demo"])
@@ -21,7 +22,7 @@ SettingsDependency = Annotated[Settings, Depends(get_settings)]
 class EnqueueDemoJobsRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    job_count: int = Field(ge=2, le=40)
+    job_count: int = Field(ge=2, le=100)
 
     @model_validator(mode="after")
     def require_complete_renewal_graphs(self) -> EnqueueDemoJobsRequest:
@@ -69,6 +70,19 @@ async def enqueue_demo_jobs(
     settings: SettingsDependency,
 ) -> BackpressureSnapshot:
     return await _service(settings).enqueue_jobs(payload.job_count)
+
+
+@router.post("/workers", response_model=BackpressureSnapshot)
+async def add_demo_worker(settings: SettingsDependency) -> BackpressureSnapshot:
+    service = _service(settings)
+    try:
+        get_workflow_runtime_service().add_demo_worker()
+    except (PermissionError, RuntimeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+    return await service.snapshot()
 
 
 __all__ = ["router"]

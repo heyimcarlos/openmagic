@@ -19,6 +19,9 @@ export type BackpressureStageId =
 interface WorkerView {
   configuredJobConcurrency: number;
   configuredNotificationConcurrency: number;
+  jobWorkerIds: ReadonlyArray<string>;
+  maxJobWorkerCapacity: number;
+  processModel: 'in_process_async_workers';
   claimPolicy: string;
   liveness: 'not_persisted';
 }
@@ -28,6 +31,13 @@ interface BackpressureScope {
   totalWorkflows: number;
   workflowLimit: number;
   truncated: boolean;
+}
+
+interface BackpressureLatency {
+  queueClaimP50Ms?: number;
+  executionP50Ms?: number;
+  notificationDeliveryP50Ms?: number;
+  endToEndP50Ms?: number;
 }
 
 export interface BackpressureCounts {
@@ -98,6 +108,7 @@ export interface BackpressureSnapshot {
   capturedAt: string;
   worker: WorkerView;
   scope: BackpressureScope;
+  latency: BackpressureLatency;
   counts: BackpressureCounts;
   jobs: ReadonlyArray<BackpressureJob>;
   runs: ReadonlyArray<BackpressureRun>;
@@ -116,11 +127,10 @@ export interface BackpressureFlowStage {
   [key: string]: unknown;
   id: BackpressureStageId;
   title: string;
-  eyebrow: string;
   count: number;
   active: boolean;
   signal: boolean;
-  secondary: string;
+  transitionMs?: number;
   tokens: ReadonlyArray<FlowToken>;
 }
 
@@ -153,11 +163,28 @@ function parseWorker(value: unknown): WorkerView | undefined {
   if (!isRecord(value)) return undefined;
   const configuredJobConcurrency = count(value.configured_job_concurrency);
   const configuredNotificationConcurrency = count(value.configured_notification_concurrency);
+  const jobWorkerIds = Array.isArray(value.job_worker_ids)
+    ? value.job_worker_ids.map(text)
+    : undefined;
+  const maxJobWorkerCapacity = count(value.max_job_worker_capacity);
+  const processModel = value.process_model === 'in_process_async_workers'
+    ? value.process_model
+    : undefined;
   const claimPolicy = text(value.claim_policy);
   const liveness = value.liveness === 'not_persisted' ? value.liveness : undefined;
   return configuredJobConcurrency !== undefined &&
-    configuredNotificationConcurrency !== undefined && claimPolicy && liveness
-    ? { configuredJobConcurrency, configuredNotificationConcurrency, claimPolicy, liveness }
+    configuredNotificationConcurrency !== undefined && jobWorkerIds &&
+    jobWorkerIds.every((item) => item !== undefined) && maxJobWorkerCapacity !== undefined &&
+    processModel && claimPolicy && liveness
+    ? {
+        configuredJobConcurrency,
+        configuredNotificationConcurrency,
+        jobWorkerIds: jobWorkerIds as string[],
+        maxJobWorkerCapacity,
+        processModel,
+        claimPolicy,
+        liveness,
+      }
     : undefined;
 }
 
@@ -171,6 +198,26 @@ function parseScope(value: unknown): BackpressureScope | undefined {
     workflowLimit !== undefined && truncated !== undefined
     ? { visibleWorkflows, totalWorkflows, workflowLimit, truncated }
     : undefined;
+}
+
+function nullableCount(value: unknown): number | undefined | false {
+  return value === null ? undefined : count(value) ?? false;
+}
+
+function parseLatency(value: unknown): BackpressureLatency | undefined {
+  if (!isRecord(value)) return undefined;
+  const queueClaimP50Ms = nullableCount(value.queue_claim_p50_ms);
+  const executionP50Ms = nullableCount(value.execution_p50_ms);
+  const notificationDeliveryP50Ms = nullableCount(value.notification_delivery_p50_ms);
+  const endToEndP50Ms = nullableCount(value.end_to_end_p50_ms);
+  if ([queueClaimP50Ms, executionP50Ms, notificationDeliveryP50Ms, endToEndP50Ms]
+    .some((item) => item === false)) return undefined;
+  return {
+    queueClaimP50Ms: queueClaimP50Ms as number | undefined,
+    executionP50Ms: executionP50Ms as number | undefined,
+    notificationDeliveryP50Ms: notificationDeliveryP50Ms as number | undefined,
+    endToEndP50Ms: endToEndP50Ms as number | undefined,
+  };
 }
 
 function parseCounts(value: unknown): BackpressureCounts | undefined {
@@ -288,18 +335,20 @@ export function parseBackpressureSnapshot(value: unknown): BackpressureSnapshot 
   const capturedAt = date(value.captured_at);
   const worker = parseWorker(value.worker);
   const scope = parseScope(value.scope);
+  const latency = parseLatency(value.latency);
   const counts = parseCounts(value.counts);
   const jobs = value.jobs.map(parseJob);
   const runs = value.runs.map(parseRun);
   const notifications = value.notifications.map(parseNotification);
   const activity = value.activity.map(parseActivity);
-  if (!capturedAt || !worker || !scope || !counts || jobs.some((item) => !item) ||
+  if (!capturedAt || !worker || !scope || !latency || !counts || jobs.some((item) => !item) ||
     runs.some((item) => !item) || notifications.some((item) => !item) ||
     activity.some((item) => !item)) return undefined;
   return {
     capturedAt,
     worker,
     scope,
+    latency,
     counts,
     jobs: jobs as BackpressureJob[],
     runs: runs as BackpressureRun[],
@@ -325,7 +374,6 @@ export function buildBackpressureFlow(
   snapshot: BackpressureSnapshot,
 ): ReadonlyArray<BackpressureFlowStage> {
   const queued = snapshot.jobs.filter((item) => item.status === 'queued');
-  const runningJobs = snapshot.jobs.filter((item) => item.status === 'running');
   const runningAgents = snapshot.runs.filter(
     (item) => item.status === 'running' && item.runtimeInstanceId,
   );
@@ -365,56 +413,51 @@ export function buildBackpressureFlow(
   return [
     {
       id: 'tooling',
-      title: 'Typed tool / command',
-      eyebrow: 'Business intent, closed schema',
+      title: 'create_workflow command',
       count: snapshot.counts.workflows,
       active: recentCommands.length > 0,
       signal: recentCommands.length > 0,
-      secondary: `${snapshot.counts.jobs} durable Jobs`,
       tokens: recentCommands.slice(0, 4).map((item) =>
         token(item.id, 'create_workflow', `Workflow ${shortId(item.workflowId)}`, 'committed')),
     },
     {
       id: 'queue',
-      title: 'PostgreSQL queue',
-      eyebrow: 'Durable backpressure buffer',
+      title: 'Durable Job queue',
       count: snapshot.counts.queued,
       active: snapshot.counts.queued > 0,
       signal: recentCommands.length > 0,
-      secondary: `${snapshot.counts.waiting} waiting on prerequisites`,
       tokens: queued.slice(0, 4).map((item) =>
         token(item.id, item.label, `Job ${shortId(item.id)}`, item.status)),
     },
     {
       id: 'worker',
-      title: 'Worker lease',
-      eyebrow: snapshot.worker.claimPolicy,
-      count: snapshot.counts.running,
+      title: 'Local Workers (same process)',
+      count: snapshot.worker.configuredJobConcurrency,
       active: snapshot.counts.running > 0,
       signal: recentRunStarts.length > 0,
-      secondary: `${snapshot.worker.configuredJobConcurrency} configured, liveness not persisted`,
-      tokens: runningJobs.slice(0, 4).map((item) =>
-        token(item.id, item.label, item.taskSummary, item.status)),
+      transitionMs: snapshot.latency.queueClaimP50Ms,
+      tokens: snapshot.worker.jobWorkerIds.map((workerId, index) => {
+        const active = snapshot.runs.some(
+          (run) => run.workerId === workerId && run.status === 'running',
+        );
+        return token(workerId, `W${index + 1}`, shortId(workerId), active ? 'active' : 'ready');
+      }),
     },
     {
       id: 'runs',
-      title: 'Fresh Workflow Job Run',
-      eyebrow: 'One isolated attempt + lease',
+      title: 'Workflow Job Runs',
       count: snapshot.counts.runsRunning,
       active: snapshot.counts.runsRunning > 0,
       signal: recentRunStarts.length > 0,
-      secondary: `${snapshot.counts.runsSucceeded} succeeded, ${snapshot.counts.runsFailed} failed`,
       tokens: visibleRuns.slice(0, 4).map((item) =>
         token(item.id, `Job Run ${shortId(item.id)}`, item.workerId, item.status)),
     },
     {
       id: 'execution',
-      title: 'Fresh Execution Agent',
-      eyebrow: 'Workflow Job Run-scoped LLM context',
+      title: 'Execution Agents',
       count: snapshot.counts.runsRunning,
       active: runningAgents.length > 0 || visibleAgents.length > 0,
       signal: recentRunStarts.length > 0,
-      secondary: `${snapshot.counts.runsSucceeded} contexts destroyed after success`,
       tokens: visibleAgents.slice(0, 4).map((item) =>
         token(
           item.runtimeInstanceId!,
@@ -425,23 +468,21 @@ export function buildBackpressureFlow(
     },
     {
       id: 'notifications',
-      title: 'Notification outbox',
-      eyebrow: 'Independent delivery obligation',
+      title: 'Notifications',
       count: snapshot.counts.notificationsQueued + snapshot.counts.notificationsDelivering,
       active: snapshot.counts.notificationsQueued + snapshot.counts.notificationsDelivering > 0,
       signal: recentDrafts.length > 0 || recentNotificationEnqueues.length > 0,
-      secondary: `${snapshot.counts.notificationsDelivered} delivered`,
+      transitionMs: snapshot.latency.executionP50Ms,
       tokens: pendingNotifications.slice(0, 4).map((item) =>
         token(item.id, item.kind, `attempt ${item.attempts}`, item.status)),
     },
     {
       id: 'interaction',
-      title: 'Fresh Interaction Agent turn',
-      eyebrow: 'Fresh turn from durable identifiers',
+      title: 'Interaction Agent turns',
       count: snapshot.counts.notificationsDelivered,
       active: recentDeliveries.length > 0 || recentInteractionCompletions.length > 0,
       signal: recentDeliveries.length > 0 || recentInteractionCompletions.length > 0,
-      secondary: 'Runtime identity is not persisted today',
+      transitionMs: snapshot.latency.notificationDeliveryP50Ms,
       tokens: recentDeliveries.slice(0, 4).map((item) =>
         token(
           item.id,

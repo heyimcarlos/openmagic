@@ -9,11 +9,10 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from server.services.conversation import get_conversation_log
 from server.workflows import (
-    DRAFT_RENEWAL_EMAIL_KIND,
-    GMAIL_SEND_EMAIL_KIND,
     ApproveWorkflowJobCommand,
     AuthorizeProtectedOperationCommand,
-    ProposeWorkflowJobsCommand,
+    ProposeWorkflowWorkArguments,
+    ProposeWorkflowWorkCommand,
     ProtectedOperation,
     RecordInteractionCauseCommand,
     StepUpVerification,
@@ -21,7 +20,6 @@ from server.workflows import (
     WorkflowControlPlane,
     WorkflowError,
     WorkflowInspectionContext,
-    WorkflowJobProposal,
     WorkflowRetrieval,
     WorkflowSearchRequest,
 )
@@ -34,10 +32,6 @@ class _ToolArguments(BaseModel):
 
 
 class _PacketArguments(_ToolArguments):
-    workflow_id: UUID
-
-
-class _ProposalArguments(_ToolArguments):
     workflow_id: UUID
 
 
@@ -74,9 +68,12 @@ WORKFLOW_TOOL_SCHEMAS: tuple[dict[str, Any], ...] = (
     {
         "type": "function",
         "function": {
-            "name": "propose_renewal_email",
-            "description": "Propose the typed Draft and dependent Send Jobs for a selected renewal Workflow.",
-            "parameters": _ProposalArguments.model_json_schema(),
+            "name": "propose_workflow_work",
+            "description": (
+                "Propose one typed business operation for a selected Workflow. "
+                "The application owns its Job graph and execution policy."
+            ),
+            "parameters": ProposeWorkflowWorkArguments.model_json_schema(),
         },
     },
     {
@@ -193,8 +190,8 @@ class WorkflowInteractionToolbox:
                 )
                 context.loaded_packet = packet
                 return ToolResult(success=True, payload=packet.model_dump(mode="json"))
-            if name == "propose_renewal_email":
-                request = _ProposalArguments.model_validate(arguments)
+            if name == "propose_workflow_work":
+                request = ProposeWorkflowWorkArguments.model_validate(arguments)
                 if context.loaded_packet is None:
                     if (
                         context.verification_challenge_id is None
@@ -209,8 +206,8 @@ class WorkflowInteractionToolbox:
                         workflow_id=request.workflow_id,
                         purpose="sensitive_write",
                         operation=ProtectedOperation(
-                            name="propose_renewal_email",
-                            arguments={"workflow_id": str(request.workflow_id)},
+                            name="propose_workflow_work",
+                            arguments=request.model_dump(mode="json"),
                         ),
                     )
                     if verification is not None:
@@ -236,8 +233,8 @@ class WorkflowInteractionToolbox:
                         workflow_id=request.workflow_id,
                         purpose="sensitive_write",
                         operation=ProtectedOperation(
-                            name="propose_renewal_email",
-                            arguments={"workflow_id": str(request.workflow_id)},
+                            name="propose_workflow_work",
+                            arguments=request.model_dump(mode="json"),
                         ),
                     )
                     if verification is not None:
@@ -421,7 +418,7 @@ class WorkflowInteractionToolbox:
 
     async def _propose(
         self,
-        request: _ProposalArguments,
+        request: ProposeWorkflowWorkArguments,
         context: InteractionToolContext,
     ) -> ToolResult:
         packet = context.loaded_packet
@@ -432,51 +429,17 @@ class WorkflowInteractionToolbox:
             or request.workflow_id != resolved_workflow_id
         ):
             return ToolResult(success=False, payload={"code": "workflow_packet_required"})
-        policyholders = [
-            participant
-            for participant in packet.participants
-            if "Policyholder" in participant.roles
-        ]
-        if len(policyholders) != 1:
-            return ToolResult(success=False, payload={"code": "policyholder_not_resolved"})
-        period = packet.workflow.input.get("renewal_period")
-        if not isinstance(period, str):
-            return ToolResult(success=False, payload={"code": "renewal_period_missing"})
-        addresses = await self._retrieval.resolve_renewal_email_addresses(
-            WorkflowInspectionContext(actor_party_id=context.actor_party_id),
-            request.workflow_id,
-        )
-        command = ProposeWorkflowJobsCommand(
+        command = ProposeWorkflowWorkCommand(
             context=WorkflowCommandContext(
                 actor_party_id=context.actor_party_id,
-                organization_party_id=addresses.organization_party_id,
+                organization_party_id=context.organization_party_id,
                 cause_type=context.cause_type,
                 cause_id=context.cause_id,
             ),
             workflow_id=request.workflow_id,
-            jobs=(
-                WorkflowJobProposal(
-                    key="draft",
-                    kind=DRAFT_RENEWAL_EMAIL_KIND,
-                    input={
-                        "recipient_name": policyholders[0].name,
-                        "renewal_period": period,
-                    },
-                ),
-                WorkflowJobProposal(
-                    key="send",
-                    kind=GMAIL_SEND_EMAIL_KIND,
-                    input={
-                        "sender_mailbox": addresses.sender_mailbox,
-                        "to": [addresses.recipient_email],
-                        "subject": {"job_output": "draft", "field": "subject"},
-                        "body": {"job_output": "draft", "field": "body"},
-                    },
-                    depends_on=("draft",),
-                ),
-            ),
+            operation=request.operation,
         )
-        trace = await self._control_plane.propose_jobs(command)
+        trace = await self._control_plane.propose_work(command)
         return ToolResult(
             success=True,
             payload={

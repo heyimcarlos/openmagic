@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import asyncio
 from collections import Counter
+from collections.abc import Callable, Iterable
 from datetime import datetime, timedelta
 from functools import lru_cache
+from statistics import median
 from typing import Literal, cast
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 
 from server.config import Settings
 from server.workflows import (
@@ -41,9 +43,12 @@ class DemoModel(BaseModel):
 
 
 class BackpressureWorkerView(DemoModel):
-    configured_job_concurrency: int = 1
-    configured_notification_concurrency: int = 1
-    claim_policy: str = "one eligible Job per tick"
+    configured_job_concurrency: int
+    configured_notification_concurrency: int
+    job_worker_ids: tuple[str, ...]
+    max_job_worker_capacity: int
+    process_model: Literal["in_process_async_workers"] = "in_process_async_workers"
+    claim_policy: str = "one eligible Job per Worker per tick"
     liveness: Literal["not_persisted"] = "not_persisted"
 
 
@@ -72,6 +77,13 @@ class BackpressureScope(DemoModel):
     total_workflows: int
     workflow_limit: int
     truncated: bool
+
+
+class BackpressureLatencyView(DemoModel):
+    queue_claim_p50_ms: int | None
+    execution_p50_ms: int | None
+    notification_delivery_p50_ms: int | None
+    end_to_end_p50_ms: int | None
 
 
 class BackpressureJobView(DemoModel):
@@ -120,8 +132,9 @@ class BackpressureActivityView(DemoModel):
 
 class BackpressureSnapshot(DemoModel):
     captured_at: datetime
-    worker: BackpressureWorkerView = Field(default_factory=BackpressureWorkerView)
+    worker: BackpressureWorkerView
     scope: BackpressureScope
+    latency: BackpressureLatencyView
     counts: BackpressureCounts
     jobs: tuple[BackpressureJobView, ...]
     runs: tuple[BackpressureRunView, ...]
@@ -132,12 +145,20 @@ class BackpressureSnapshot(DemoModel):
 class BackpressureDemoService:
     """Create safe renewal load through the real Control Plane and project its state."""
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        worker_ids: Callable[[], tuple[str, ...]] | None = None,
+        max_worker_capacity: Callable[[], int] | None = None,
+    ) -> None:
         if not settings.database_url:
             raise ValueError("Workflow database configuration is incomplete")
         if not settings.workflow_broker_party_id or not settings.workflow_organization_party_id:
             raise ValueError("Workflow demo identity configuration is incomplete")
         self._settings = settings
+        self._worker_ids = worker_ids or (lambda: ())
+        self._max_worker_capacity = max_worker_capacity or (lambda: 0)
         self._broker_party_id = UUID(settings.workflow_broker_party_id)
         self._organization_party_id = UUID(settings.workflow_organization_party_id)
         self._database = WorkflowDatabase(settings.database_url)
@@ -159,8 +180,8 @@ class BackpressureDemoService:
     async def enqueue_jobs(self, job_count: int) -> BackpressureSnapshot:
         """Create complete two-Job renewal graphs through atomic Control Plane commands."""
 
-        if job_count < 2 or job_count > 40 or job_count % 2 != 0:
-            raise ValueError("job_count must be an even number from 2 through 40")
+        if job_count < 2 or job_count > 100 or job_count % 2 != 0:
+            raise ValueError("job_count must be an even number from 2 through 100")
         await asyncio.gather(
             *(self._create_workflow(index) for index in range(1, job_count // 2 + 1))
         )
@@ -222,6 +243,13 @@ class BackpressureDemoService:
         job_counts = Counter(job.status for job in jobs)
         run_counts = Counter(run.status for run in runs)
         notification_counts = Counter(item.status for item in notifications)
+        jobs_by_id = {job.id: job for job in jobs}
+        first_job_at_by_workflow: dict[UUID, datetime] = {}
+        for job in jobs:
+            first_job_at_by_workflow[job.workflow_id] = min(
+                job.created_at,
+                first_job_at_by_workflow.get(job.workflow_id, job.created_at),
+            )
         queued_at = [job.created_at for job in jobs if job.status == "queued"]
         oldest_queued_seconds = (
             max(0, int((now - min(queued_at)).total_seconds())) if queued_at else 0
@@ -252,13 +280,46 @@ class BackpressureDemoService:
             key=lambda item: (item.occurred_at, item.source == "notification", item.id),
             reverse=True,
         )
+        worker_ids = self._worker_ids()
         return BackpressureSnapshot(
             captured_at=now,
+            worker=BackpressureWorkerView(
+                configured_job_concurrency=len(worker_ids),
+                configured_notification_concurrency=1,
+                job_worker_ids=worker_ids,
+                max_job_worker_capacity=self._max_worker_capacity(),
+            ),
             scope=BackpressureScope(
                 visible_workflows=projected.workflow_count,
                 total_workflows=projected.total_workflow_count,
                 workflow_limit=projected.workflow_limit,
                 truncated=projected.total_workflow_count > projected.workflow_count,
+            ),
+            latency=BackpressureLatencyView(
+                queue_claim_p50_ms=self._p50(
+                    self._elapsed_ms(run.created_at, jobs_by_id[run.job_id].created_at)
+                    for run in runs
+                    if run.job_id in jobs_by_id
+                ),
+                execution_p50_ms=self._p50(
+                    self._elapsed_ms(run.finished_at, run.created_at)
+                    for run in runs
+                    if run.finished_at is not None
+                ),
+                notification_delivery_p50_ms=self._p50(
+                    self._elapsed_ms(item.delivered_at, item.created_at)
+                    for item in notifications
+                    if item.delivered_at is not None
+                ),
+                end_to_end_p50_ms=self._p50(
+                    self._elapsed_ms(
+                        item.delivered_at,
+                        first_job_at_by_workflow[item.workflow_id],
+                    )
+                    for item in notifications
+                    if item.delivered_at is not None
+                    and item.workflow_id in first_job_at_by_workflow
+                ),
             ),
             counts=BackpressureCounts(
                 workflows=projected.workflow_count,
@@ -345,6 +406,15 @@ class BackpressureDemoService:
             return "Draft one renewal email from bounded Workflow input"
         return "Wait for exact approval, then send the frozen Draft Revision"
 
+    @staticmethod
+    def _p50(values: Iterable[int]) -> int | None:
+        collected = tuple(values)
+        return int(median(collected)) if collected else None
+
+    @staticmethod
+    def _elapsed_ms(later: datetime, earlier: datetime) -> int:
+        return max(0, int((later - earlier).total_seconds() * 1000))
+
 
 _services: set[BackpressureDemoService] = set()
 
@@ -359,6 +429,9 @@ def get_backpressure_demo_service(
 ) -> BackpressureDemoService:
     """Return one cached demo service for a complete Workflow configuration."""
 
+    from server.services.workflow_runtime import get_workflow_runtime_service
+
+    runtime = get_workflow_runtime_service()
     service = BackpressureDemoService(
         Settings(
             database_url=database_url,
@@ -367,7 +440,9 @@ def get_backpressure_demo_service(
             demo_broker_email=broker_email,
             demo_policyholder_email=policyholder_email,
             interaction_mode="workflow",
-        )
+        ),
+        worker_ids=lambda: runtime.job_worker_ids,
+        max_worker_capacity=lambda: runtime.max_job_worker_capacity,
     )
     _services.add(service)
     return service

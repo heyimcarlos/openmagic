@@ -43,9 +43,11 @@ from server.workflows import (
     sms_interaction_id,
 )
 
+from .workflow_worker_fleet import InProcessWorkflowWorkerFleet
+
 
 class WorkflowRuntimeService:
-    """Poll one Job and one Notification at a time in Workflow mode."""
+    """Poll a local Worker fleet and durable Notification handlers."""
 
     def __init__(self, settings: Settings, poll_interval_seconds: float = 1.0) -> None:
         self._settings = settings
@@ -53,7 +55,7 @@ class WorkflowRuntimeService:
         self._task: asyncio.Task[None] | None = None
         self._running = False
         self._database: WorkflowDatabase | None = None
-        self._job_worker: WorkflowWorker | None = None
+        self._job_workers: InProcessWorkflowWorkerFleet | None = None
         self._notification_worker: NotificationWorker | None = None
         self._verification_resume_worker: NotificationWorker | None = None
         self._verification_recovery_worker: NotificationWorker | None = None
@@ -124,15 +126,17 @@ class WorkflowRuntimeService:
                     ),
                 )
             )
-        self._job_worker = WorkflowWorker(
-            control_plane=control_plane,
-            executors={
-                "renewal_email_drafter": FreshDraftExecutionAgentFactory(self._settings),
-            },
-            email_adapters=email_adapters,
-            deterministic_handlers=deterministic_handlers,
-            worker_id=f"workflow-worker:{uuid4()}",
-            application_build=self._settings.app_version,
+        self._job_workers = InProcessWorkflowWorkerFleet(
+            lambda worker_id: WorkflowWorker(
+                control_plane=control_plane,
+                executors={
+                    "renewal_email_drafter": FreshDraftExecutionAgentFactory(self._settings),
+                },
+                email_adapters=email_adapters,
+                deterministic_handlers=deterministic_handlers,
+                worker_id=worker_id,
+                application_build=self._settings.app_version,
+            )
         )
         self._notification_worker = NotificationWorker(
             control_plane=control_plane,
@@ -224,7 +228,7 @@ class WorkflowRuntimeService:
         if self._database is not None:
             await self._database.dispose()
         self._database = None
-        self._job_worker = None
+        self._job_workers = None
         self._notification_worker = None
         self._verification_resume_worker = None
         self._verification_recovery_worker = None
@@ -244,16 +248,41 @@ class WorkflowRuntimeService:
             await asyncio.sleep(self._poll_interval)
 
     async def _poll_once(self) -> None:
-        if self._job_worker is None or self._notification_worker is None:
+        if self._job_workers is None or self._notification_worker is None:
             return
-        await self._job_worker.run_once()
-        await self._notification_worker.run_once()
+        pollers = [
+            self._job_workers.run_once(),
+            self._notification_worker.run_once(),
+        ]
         if self._verification_resume_worker is not None:
-            await self._verification_resume_worker.run_once()
+            pollers.append(self._verification_resume_worker.run_once())
         if self._verification_recovery_worker is not None:
-            await self._verification_recovery_worker.run_once()
+            pollers.append(self._verification_recovery_worker.run_once())
         if self._verification_attention_worker is not None:
-            await self._verification_attention_worker.run_once()
+            pollers.append(self._verification_attention_worker.run_once())
+        await asyncio.gather(*pollers)
+
+    @property
+    def job_worker_ids(self) -> tuple[str, ...]:
+        return self._job_workers.worker_ids if self._job_workers is not None else ()
+
+    @property
+    def max_job_worker_capacity(self) -> int:
+        return self._job_workers.max_capacity if self._job_workers is not None else 8
+
+    def add_demo_worker(self) -> str:
+        """Add real local claim capacity only through the explicitly enabled demo."""
+
+        if not self._settings.enable_backpressure_demo:
+            raise PermissionError("The backpressure demo is not enabled")
+        if self._job_workers is None:
+            raise RuntimeError("The Workflow runtime is not running")
+        worker_id = self._job_workers.add_worker()
+        logger.info(
+            "Workflow demo worker added",
+            extra={"worker_id": worker_id, "capacity": len(self._job_workers.worker_ids)},
+        )
+        return worker_id
 
 
 @lru_cache(maxsize=1)

@@ -57,6 +57,27 @@ class ProposeWorkflowJobsCommand(WorkflowContract):
     jobs: tuple[WorkflowJobProposal, ...] = Field(min_length=1)
 
 
+class PrepareRenewalEmailOperation(WorkflowContract):
+    """Prepare one reviewable renewal email without exposing its Job graph."""
+
+    type: Literal["prepare_renewal_email"]
+
+
+class ProposeWorkflowWorkArguments(WorkflowContract):
+    """Closed business operation accepted from the Interaction Agent."""
+
+    workflow_id: UUID
+    operation: PrepareRenewalEmailOperation
+
+
+class ProposeWorkflowWorkCommand(WorkflowContract):
+    """Compile and propose typed work for one existing Workflow."""
+
+    context: WorkflowCommandContext
+    workflow_id: UUID
+    operation: PrepareRenewalEmailOperation
+
+
 class ApproveWorkflowJobCommand(WorkflowContract):
     """Authorize one exact presented External Effect through an implicit Party."""
 
@@ -214,7 +235,7 @@ class _ApproveJobOperationArguments(WorkflowContract):
 
 _PROTECTED_OPERATION_SCHEMAS: dict[str, type[WorkflowContract]] = {
     "read_workflow_packet": _WorkflowPacketOperationArguments,
-    "propose_renewal_email": _WorkflowPacketOperationArguments,
+    "propose_workflow_work": ProposeWorkflowWorkArguments,
     "approve_job": _ApproveJobOperationArguments,
 }
 
@@ -230,6 +251,17 @@ class ProtectedOperation(WorkflowContract):
     def validate_operation_contract(cls, value: Any) -> Any:
         if not isinstance(value, dict):
             return value
+        if value.get("name") == "propose_renewal_email":
+            legacy_arguments = value.get("arguments")
+            if isinstance(legacy_arguments, dict):
+                value = {
+                    **value,
+                    "name": "propose_workflow_work",
+                    "arguments": {
+                        **legacy_arguments,
+                        "operation": {"type": "prepare_renewal_email"},
+                    },
+                }
         schema = _PROTECTED_OPERATION_SCHEMAS.get(value.get("name"))
         if schema is None:
             raise ValueError("protected operation is not recognized")

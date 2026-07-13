@@ -8,7 +8,10 @@ const payload = {
   worker: {
     configured_job_concurrency: 1,
     configured_notification_concurrency: 1,
-    claim_policy: 'one eligible Job per tick',
+    job_worker_ids: ['workflow-worker:12345678'],
+    max_job_worker_capacity: 8,
+    process_model: 'in_process_async_workers',
+    claim_policy: 'one eligible Job per Worker per tick',
     liveness: 'not_persisted',
   },
   scope: {
@@ -16,6 +19,12 @@ const payload = {
     total_workflows: 3,
     workflow_limit: 50,
     truncated: false,
+  },
+  latency: {
+    queue_claim_p50_ms: 1200,
+    execution_p50_ms: 2400,
+    notification_delivery_p50_ms: 800,
+    end_to_end_p50_ms: 4400,
   },
   counts: {
     workflows: 3,
@@ -65,7 +74,7 @@ const payload = {
       id: 'run-1',
       job_id: 'job-running',
       status: 'running',
-      worker_id: 'workflow-worker:abc',
+      worker_id: 'workflow-worker:12345678',
       runtime_instance_id: 'runtime-fresh-1',
       created_at: '2026-07-13T14:00:04Z',
       finished_at: null,
@@ -159,8 +168,9 @@ test('parses the sanitized live projection and derives each real pipeline stage'
       ['interaction', 1, true],
     ],
   );
-  assert.equal(flow[1]?.secondary, '3 waiting on prerequisites');
-  assert.equal(flow[2]?.tokens[0]?.id, 'job-running');
+  assert.equal(flow[2]?.tokens[0]?.id, 'workflow-worker:12345678');
+  assert.equal(flow[2]?.tokens[0]?.status, 'active');
+  assert.equal(flow[2]?.transitionMs, 1200);
   assert.equal(flow[3]?.tokens[0]?.id, 'run-1');
   assert.equal(flow[4]?.tokens[0]?.id, 'runtime-fresh-1');
   assert.equal(flow[4]?.tokens[0]?.detail, 'Draft the 2026 renewal for Demo Policyholder 2');

@@ -85,9 +85,6 @@ export function BackpressureTimeline({
             {live ? 'LIVE' : `${selectedIndex + 1}/${timeline.frames.length}`}
           </span>
         </div>
-        <p className="mt-2 text-[0.65rem] leading-5 text-muted-foreground">
-          Every frame is a real 400 ms PostgreSQL capture. Scrubbing never replays invented events.
-        </p>
       </div>
       <BackpressureTrace frames={chartFrames} selectedIndex={selectedChartIndex} />
     </section>
@@ -133,11 +130,11 @@ function BackpressureTrace({
       </div>
       <svg
         aria-label="Queue, Workflow Job Run, and Notification counts across captured frames"
-        className="h-24 w-full overflow-visible rounded-lg bg-slate-950"
+        className="h-24 w-full overflow-visible rounded-lg border bg-blue-50/60"
         role="img"
         viewBox={`0 0 ${width} ${height}`}
       >
-        <line x1="0" y1={height - 4} x2={width} y2={height - 4} stroke="#334155" />
+        <line x1="0" y1={height - 4} x2={width} y2={height - 4} stroke="#cbd5e1" />
         <polyline fill="none" stroke="#f59e0b" strokeWidth="3" points={points((frame) => frame.counts.queued)} />
         <polyline fill="none" stroke="#0ea5e9" strokeWidth="3" points={points((frame) => frame.counts.runsRunning)} />
         <polyline
@@ -146,7 +143,7 @@ function BackpressureTrace({
           strokeWidth="3"
           points={points((frame) => frame.counts.notificationsQueued + frame.counts.notificationsDelivering)}
         />
-        <line x1={cursorX} y1="0" x2={cursorX} y2={height} stroke="#f8fafc" strokeDasharray="3 4" />
+        <line x1={cursorX} y1="0" x2={cursorX} y2={height} stroke="#334155" strokeDasharray="3 4" />
       </svg>
     </div>
   );

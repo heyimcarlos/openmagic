@@ -29,6 +29,7 @@ from .contracts import (
     NotificationPresentationContext,
     NotificationStatusContext,
     ProposeWorkflowJobsCommand,
+    ProposeWorkflowWorkCommand,
     RecordInteractionCauseCommand,
     ReportNotificationFailureCommand,
     ReportRunResultCommand,
@@ -250,6 +251,75 @@ class WorkflowControlPlane:
             )
             trace = await self._proposals.read_receipt(session, workflow, proposal_event)
         return trace
+
+    async def propose_work(self, command: ProposeWorkflowWorkCommand) -> WorkflowTrace:
+        """Resolve trusted facts and compile one business operation into durable Jobs."""
+
+        async with self._database.read_transaction() as session:
+            workflow = await session.get(WorkflowRow, command.workflow_id)
+            if workflow is None:
+                raise WorkflowNotFoundError(str(command.workflow_id))
+            resolved_context = command.context.model_copy(
+                update={"organization_party_id": workflow.organization_party_id}
+            )
+            if not await self._has_current_broker_authority(session, resolved_context, workflow):
+                raise WorkflowAuthorizationError("Party cannot propose work for this Workflow")
+            policyholders = (
+                await session.execute(
+                    sa.select(PartyRow.id, PartyRow.display_name)
+                    .join(
+                        WorkflowParticipantRoleRow,
+                        WorkflowParticipantRoleRow.party_id == PartyRow.id,
+                    )
+                    .where(
+                        WorkflowParticipantRoleRow.workflow_id == workflow.id,
+                        WorkflowParticipantRoleRow.role == "Policyholder",
+                        WorkflowParticipantRoleRow.revoked_at.is_(None),
+                    )
+                )
+            ).all()
+            if len(policyholders) != 1:
+                raise WorkflowLifecycleError("Workflow must have one current Policyholder")
+            policyholder_id, policyholder_name = policyholders[0]
+            identifiers = (
+                await session.execute(
+                    sa.select(PartyIdentifierRow.party_id, PartyIdentifierRow.value).where(
+                        PartyIdentifierRow.party_id.in_(
+                            (resolved_context.actor_party_id, policyholder_id)
+                        ),
+                        PartyIdentifierRow.kind == "email",
+                        PartyIdentifierRow.verified_at.is_not(None),
+                        PartyIdentifierRow.revoked_at.is_(None),
+                    )
+                )
+            ).all()
+            emails_by_party: dict[UUID, list[str]] = defaultdict(list)
+            for party_id, value in identifiers:
+                emails_by_party[party_id].append(value)
+            broker_emails = emails_by_party[resolved_context.actor_party_id]
+            policyholder_emails = emails_by_party[policyholder_id]
+            if len(broker_emails) != 1 or len(policyholder_emails) != 1:
+                raise WorkflowLifecycleError(
+                    "Workflow work requires one verified Broker and Policyholder mailbox"
+                )
+            renewal_period = workflow.input.get("renewal_period")
+            jobs = self._registry.compile_work(
+                workflow.kind,
+                command.operation,
+                {
+                    "recipient_name": policyholder_name,
+                    "renewal_period": renewal_period,
+                    "sender_mailbox": broker_emails[0],
+                    "recipient_email": policyholder_emails[0],
+                },
+            )
+        return await self.propose_jobs(
+            ProposeWorkflowJobsCommand(
+                context=resolved_context,
+                workflow_id=command.workflow_id,
+                jobs=jobs,
+            )
+        )
 
     def _require_party_proposable_jobs(
         self,
