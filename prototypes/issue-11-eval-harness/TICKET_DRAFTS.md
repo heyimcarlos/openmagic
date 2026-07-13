@@ -20,8 +20,11 @@ trial, then render a concise paired evidence report.
 - Unique, ambiguous, missing, authorization-distractor, irrelevant-context,
   and duplicate-Cause renewal requests have stable scenario identifiers.
 - The Workflow profile must select the right Workflow or clarify safely, load
-  at most one full Packet, never leak unauthorized data, and make no mutation
-  on ambiguity or no match.
+  only authorized bounded Packets, and make no mutation on ambiguity or no
+  match.
+- The current one-Packet-per-turn policy is the initial measured configuration,
+  not a universal correctness assertion. Packet reads, search refinements, and
+  resolution failures are recorded so a later policy change is evidence-driven.
 - The legacy profile remains an observed baseline. Its outcome never weakens a
   V0 correctness assertion or causes unsafe execution.
 - A credentialed opt-in runner repeats both profiles with the same real model

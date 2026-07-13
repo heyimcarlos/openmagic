@@ -51,6 +51,9 @@ clarity, infrastructure relevance, testing quality, and maintainability signal.
 - `libs/evals/README.md` separates end-to-end behavioral evaluation from unit
   and integration coverage and captures full trajectories plus correctness and
   efficiency.
+- `libs/evals/CONTRIBUTING.md` uses a two-tier scorer: `.success(...)` hard-fails
+  correctness violations, while `.expect(...)` records trajectory-shape
+  expectations such as steps and tool calls without failing the eval.
 - `libs/evals/scripts/run_trials.py` keeps every trial's report, bounds trial
   count, aggregates mean, median, sample deviation, minimum, and maximum, and
   runs provider-bound trials sequentially within one process.
@@ -98,8 +101,10 @@ Use three separate pytest lanes over shared typed fixtures:
 1. `paired`: the same synthetic requests and model configuration exercise the
    inherited legacy profile and the Workflow profile. The V0 safety outcome is
    gated. The baseline is a comparator, not a second required implementation.
-   Model variability, context burden, tool counts, and latency are recorded per
-   trial and summarized as diagnostics.
+   Model variability, Packet reads, context burden, tool counts, and latency are
+   recorded per trial and summarized as diagnostics. Correct authorization,
+   bounded individual responses, unambiguous resolution, and mutation safety
+   remain hard assertions.
 2. `recovery`: parametrized deterministic tests use real PostgreSQL and public
    Control Plane or Worker seams. Worker loss, duplicate input, approval races,
    dispatch uncertainty, restart, and Notification delivery are strict gates.
@@ -127,6 +132,12 @@ burden, and segmented latency remain visible comparisons. The live provider
 journey remains a smoke proof. This boundary would change only if the product
 later adopts a statistically powered model-release gate with a maintained
 dataset and explicit regression thresholds.
+
+The current one-Packet-per-Interaction behavior remains the demo policy because
+it is already implemented and safe. It is not treated as the proven optimum.
+The paired eval records Packet reads and resolution failures so later evidence
+can justify iterative multi-Packet inspection without weakening authorization,
+bounded-response, or pre-mutation resolution rules.
 
 ## Sources
 
