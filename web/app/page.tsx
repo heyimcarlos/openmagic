@@ -1,20 +1,15 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { useRouter } from 'next/navigation';
 import SettingsModal, { useSettings } from '@/components/SettingsModal';
 import { ChatHeader } from '@/components/chat/ChatHeader';
 import { ChatInput } from '@/components/chat/ChatInput';
 import { ChatMessages } from '@/components/chat/ChatMessages';
 import { ErrorBanner } from '@/components/chat/ErrorBanner';
-import {
-  WorkflowTelemetryPrototype,
-} from '@/components/chat/workflow-telemetry-prototype/WorkflowTelemetryPrototype';
-import {
-  parseWorkflowTelemetryVariant,
-  type WorkflowTelemetryVariant,
-} from '@/components/chat/workflow-telemetry-prototype/variants';
+import { workflowTelemetryDemoMessages } from '@/components/chat/workflow-telemetry/demo';
 import type { ChatBubble } from '@/components/chat/types';
+import { parseChatTurnTelemetry } from '@/lib/chatTelemetry';
+import { isWorkflowTelemetryDemoVariant } from '@/lib/workflowTelemetryDemo';
 
 const POLL_INTERVAL_MS = 1500;
 const RESPONSE_POLL_INTERVAL_MS = 1000;
@@ -41,21 +36,21 @@ const toBubbles = (payload: any): ChatBubble[] => {
   return payload.messages
     .filter(isRenderableMessage)
     .map((message: any, index: number) => ({
-      id: `history-${index}`,
+      id: typeof message.id === 'string' && message.id ? message.id : `history-${index}`,
       role: message.role,
       text: formatEscapeCharacters(message.content),
+      telemetry: parseChatTurnTelemetry(message.telemetry),
     }));
 };
 
 export default function Page() {
-  const router = useRouter();
   const { settings, setSettings } = useSettings();
   const [open, setOpen] = useState(false);
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState<ChatBubble[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [isWaitingForResponse, setIsWaitingForResponse] = useState(false);
-  const [telemetryVariant, setTelemetryVariant] = useState<WorkflowTelemetryVariant | null>(null);
+  const [showTelemetryDemo, setShowTelemetryDemo] = useState(false);
   const openSettings = useCallback(() => setOpen(true), [setOpen]);
   const closeSettings = useCallback(() => setOpen(false), [setOpen]);
 
@@ -78,15 +73,8 @@ export default function Page() {
   useEffect(() => {
     if (process.env.NODE_ENV === 'production') return;
     const candidate = new URLSearchParams(window.location.search).get('variant');
-    setTelemetryVariant(parseWorkflowTelemetryVariant(candidate));
+    setShowTelemetryDemo(isWorkflowTelemetryDemoVariant(candidate));
   }, []);
-
-  const selectTelemetryVariant = useCallback((variant: WorkflowTelemetryVariant) => {
-    const params = new URLSearchParams(window.location.search);
-    params.set('variant', variant);
-    router.replace(`?${params.toString()}`, { scroll: false });
-    setTelemetryVariant(variant);
-  }, [router]);
 
   // Detect and store browser timezone on first load
   useEffect(() => {
@@ -239,14 +227,8 @@ export default function Page() {
 
         <div className="flex-1 overflow-hidden">
           <ChatMessages
-            messages={telemetryVariant ? [] : messages}
-            isWaitingForResponse={telemetryVariant ? false : isWaitingForResponse}
-            prototype={telemetryVariant ? (
-              <WorkflowTelemetryPrototype
-                variant={telemetryVariant}
-                onVariantChange={selectTelemetryVariant}
-              />
-            ) : undefined}
+            messages={showTelemetryDemo ? workflowTelemetryDemoMessages : messages}
+            isWaitingForResponse={showTelemetryDemo ? false : isWaitingForResponse}
           />
 
           <div className="border-t bg-background/80 p-3 backdrop-blur sm:p-4">

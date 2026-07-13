@@ -1,39 +1,29 @@
-# Workflow telemetry presentation prototype
+# Workflow telemetry presentation decision
 
-> PROTOTYPE: throwaway presentation code for deciding how Workflow progress and
-> Agent activity should appear inside the existing OpenMagic chat.
+Variant C is locked and implemented in the OpenMagic chat surface.
 
-## Question
+## Contract
 
-What is the quietest useful disclosure structure for one chat turn that may
-advance zero or more durable Workflows?
+A chat turn may carry sanitized Agent activity and zero or more durable
+Workflows. Each Workflow owns its flat Job and checkpoint progress. The API
+contract does not carry model reasoning or arbitrary nested tool output.
 
 ## Run
 
 ```bash
-npm run prototype:workflow-telemetry --prefix web -- -p 3010
+npm run demo:workflow-telemetry --prefix web -- -p 3010
 ```
 
-Open `http://127.0.0.1:3010/?variant=A`. Use the floating switcher or the left
-and right arrow keys to compare:
-
-- `A`: Quiet stack
-- `B`: Request ledger
-- `C`: Codex rail with hover-only arrows
-- `D`: Codex rail with persistent arrows
-
-Both Codex rail variants remove the horizontal separators between disclosure
-rows. They differ only in whether the chevron appears on hover or remains
-visible.
-
-The development-only prototype URLs bypass browser Basic Auth. Production and
-normal development routes retain the existing authentication behavior.
+Open `http://127.0.0.1:3010/?variant=C`. This development-only URL renders the
+production component with a deterministic fixture and bypasses browser Basic
+Auth. Production and normal development routes retain the existing
+authentication behavior.
 
 ## Decision
 
 Variant C, the hover-arrow Codex rail, is the selected direction. It keeps Agent
-activity and each Workflow collapsed into one quiet line, supports independently
-expanded Workflows, and offers a nested disclosure for deeper Workflow activity.
+activity and each Workflow collapsed into one quiet line and supports independently
+expanded Workflows.
 Its chevron sits immediately after the summary, appears only on hover or
 keyboard focus, points right while closed and down while open, and adds no hover
 background. Expanded activity is a flat list of single-line status rows, with no
@@ -45,9 +35,11 @@ the assistant message text.
 Variant C uses the official shadcn Accordion abstraction backed by Base UI.
 Approval remains a checkpoint between Jobs, not a fake Workflow Job.
 
-The presentation prototype uses in-memory fixtures. Durable Cause correlation,
-the user-facing Workflow projection, and sanitized activity receipts belong to
-the later backend integration phase.
+The production component lives in
+`web/components/chat/workflow-telemetry/WorkflowTelemetry.tsx`. Assistant
+messages accept telemetry through the chat history contract. The development
+demo alone uses an in-memory fixture. Durable Cause correlation and the
+operational projection that populates that contract remain backend work.
 
 ## Screenshots
 

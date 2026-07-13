@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "scripts": {
     "dev": "next dev",
-    "prototype:workflow-telemetry": "next dev",
+    "demo:workflow-telemetry": "next dev",
     "build": "next build",
     "test": "tsx --test lib/*.test.mts",
     "start": "next start",
