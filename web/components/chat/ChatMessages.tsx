@@ -3,6 +3,7 @@ import { LoaderCircleIcon } from 'lucide-react';
 
 import { Markdown } from './Markdown';
 import type { ChatBubble } from './types';
+import { WorkflowTelemetry } from './workflow-telemetry/WorkflowTelemetry';
 import { ApprovalRequestCard } from '@/components/workflows/ApprovalRequestCard';
 import type { ApprovalRequest } from '@/lib/chatTelemetry';
 import { Bubble, BubbleContent } from '@/components/ui/bubble';
@@ -112,6 +113,7 @@ function ChatMessage({
                       statusMessage={isApproving ? 'Recording your approval...' : undefined}
                     />
                   )}
+                  {telemetry && <WorkflowTelemetry telemetry={telemetry} />}
                 </>
               )}
             </BubbleContent>
