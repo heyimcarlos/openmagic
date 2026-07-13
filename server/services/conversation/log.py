@@ -57,12 +57,17 @@ _ATTR_PATTERN = re.compile(r"(\w+)\s*=\s*\"([^\"]*)\"")
 class ConversationLog:
     """Append-only conversation log persisted to disk for the interaction agent."""
 
-    def __init__(self, path: Path, formatter: TranscriptFormatter = _default_formatter):
+    def __init__(
+        self,
+        path: Path,
+        formatter: TranscriptFormatter = _default_formatter,
+        working_memory_log: WorkingMemoryLog | None = None,
+    ):
         self._path = path
         self._formatter = formatter
         self._lock = threading.Lock()
         self._ensure_directory()
-        self._working_memory_log = _resolve_working_memory_log()
+        self._working_memory_log = working_memory_log or _resolve_working_memory_log()
 
     def _ensure_directory(self) -> None:
         try:

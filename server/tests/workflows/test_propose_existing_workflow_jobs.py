@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+from uuid import uuid4
 
 import pytest
 import sqlalchemy as sa
@@ -16,6 +17,7 @@ from server.tests.workflows.retrieval_fixtures import (
 from server.workflows import (
     DRAFT_RENEWAL_EMAIL_KIND,
     GMAIL_SEND_EMAIL_KIND,
+    VERIFICATION_EMAIL_JOB_KIND,
     ClaimWorkflowJobCommand,
     InvalidWorkflowProposalError,
     RecordInteractionCauseCommand,
@@ -23,6 +25,7 @@ from server.workflows import (
     WorkflowAuthorizationError,
     WorkflowControlPlane,
     WorkflowDatabase,
+    WorkflowJobProposal,
     WorkflowLifecycleError,
     default_workflow_registry,
 )
@@ -108,6 +111,36 @@ async def test_invalid_graph_changes_nothing(
 
     with pytest.raises(InvalidWorkflowProposalError):
         await control_plane.propose_jobs(command.model_copy(update={"jobs": command.jobs[:1]}))
+
+    assert await job_count(migrated_postgres_url) == 0
+    await database.dispose()
+
+
+async def test_party_cannot_propose_a_system_authorized_job(
+    migrated_postgres_url: str,
+    clean_workflow_database,
+):
+    await seed_retrieval_landscape(migrated_postgres_url)
+    database = WorkflowDatabase(migrated_postgres_url)
+    control_plane = WorkflowControlPlane(
+        database=database,
+        registry=default_workflow_registry(),
+        authority=StaticWorkflowAuthority(grants=set()),
+    )
+    command = renewal_job_command().model_copy(
+        update={
+            "jobs": (
+                WorkflowJobProposal(
+                    key="verification",
+                    kind=VERIFICATION_EMAIL_JOB_KIND,
+                    input={"challenge_id": str(uuid4())},
+                ),
+            )
+        }
+    )
+
+    with pytest.raises(WorkflowAuthorizationError, match="system-authorized"):
+        await control_plane.propose_jobs(command)
 
     assert await job_count(migrated_postgres_url) == 0
     await database.dispose()

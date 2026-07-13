@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
-from uuid import UUID
+from typing import cast
+from uuid import UUID, uuid4
 
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,6 +16,7 @@ from .contracts import (
     ClaimNotificationCommand,
     NotificationAudienceContext,
     NotificationDeliveryPacket,
+    NotificationDeliveryStatus,
     NotificationPresentationContext,
     NotificationStatusContext,
     ReportNotificationFailureCommand,
@@ -29,6 +31,10 @@ from .models import (
     WorkflowJobDependencyRow,
     WorkflowJobRow,
     WorkflowRow,
+)
+from .verification_notifications import (
+    VERIFICATION_RESUME_NOTIFICATION_KIND,
+    VERIFICATION_RESUME_RECOVERY_NOTIFICATION_KIND,
 )
 
 
@@ -52,13 +58,16 @@ class WorkflowNotificationProtocol:
         now = self._clock()
         async with self._database.transaction() as session:
             await self._recover_expired(session, now)
+            filters = [
+                NotificationRow.status == "queued",
+                NotificationRow.available_at <= now,
+                NotificationRow.attempts < NotificationRow.max_attempts,
+            ]
+            if command.kinds:
+                filters.append(NotificationRow.kind.in_(command.kinds))
             notification = await session.scalar(
                 sa.select(NotificationRow)
-                .where(
-                    NotificationRow.status == "queued",
-                    NotificationRow.available_at <= now,
-                    NotificationRow.attempts < NotificationRow.max_attempts,
-                )
+                .where(*filters)
                 .order_by(
                     NotificationRow.available_at,
                     NotificationRow.created_at,
@@ -112,10 +121,26 @@ class WorkflowNotificationProtocol:
         self,
         command: ReportNotificationFailureCommand,
     ) -> NotificationDeliveryPacket:
+        now = self._clock()
         async with self._database.transaction() as session:
+            workflow_id = await session.scalar(
+                sa.select(NotificationRow.workflow_id).where(
+                    NotificationRow.id == command.notification_id
+                )
+            )
+            if workflow_id is None:
+                raise NotificationLifecycleError("Notification does not exist")
+            workflow = await session.scalar(
+                sa.select(WorkflowRow).where(WorkflowRow.id == workflow_id).with_for_update()
+            )
+            if workflow is None:
+                raise NotificationLifecycleError("Notification Workflow does not exist")
             notification = await session.scalar(
                 sa.select(NotificationRow)
-                .where(NotificationRow.id == command.notification_id)
+                .where(
+                    NotificationRow.id == command.notification_id,
+                    NotificationRow.workflow_id == workflow.id,
+                )
                 .with_for_update()
             )
             if notification is None:
@@ -130,9 +155,9 @@ class WorkflowNotificationProtocol:
             notification.last_error = command.error_code
             if notification.attempts < notification.max_attempts:
                 notification.status = "queued"
-                notification.available_at = self._clock() + self._backoff(notification.attempts)
+                notification.available_at = now + self._backoff(notification.attempts)
             else:
-                notification.status = "failed"
+                await self._fail_terminally(session, notification, now)
             await session.flush()
             return self._packet(notification)
 
@@ -490,21 +515,40 @@ class WorkflowNotificationProtocol:
         )
         return unresolved is None
 
-    @staticmethod
-    async def _recover_expired(session: AsyncSession, now: datetime) -> None:
+    async def _recover_expired(self, session: AsyncSession, now: datetime) -> None:
         expired = (
-            await session.scalars(
-                sa.select(NotificationRow)
+            await session.execute(
+                sa.select(NotificationRow.id, NotificationRow.workflow_id)
                 .where(
                     NotificationRow.status == "delivering",
                     NotificationRow.lease_expires_at <= now,
                 )
-                .order_by(NotificationRow.lease_expires_at, NotificationRow.id)
-                .with_for_update(skip_locked=True)
+                .order_by(
+                    NotificationRow.workflow_id,
+                    NotificationRow.lease_expires_at,
+                    NotificationRow.id,
+                )
                 .limit(20)
             )
         ).all()
-        for notification in expired:
+        for notification_id, workflow_id in expired:
+            workflow = await session.scalar(
+                sa.select(WorkflowRow).where(WorkflowRow.id == workflow_id).with_for_update()
+            )
+            if workflow is None:
+                continue
+            notification = await session.scalar(
+                sa.select(NotificationRow)
+                .where(
+                    NotificationRow.id == notification_id,
+                    NotificationRow.workflow_id == workflow.id,
+                    NotificationRow.status == "delivering",
+                    NotificationRow.lease_expires_at <= now,
+                )
+                .with_for_update(skip_locked=True)
+            )
+            if notification is None:
+                continue
             notification.claimed_by = None
             notification.lease_expires_at = None
             notification.last_error = "delivery_lease_expired"
@@ -514,7 +558,47 @@ class WorkflowNotificationProtocol:
                     notification.attempts
                 )
             else:
-                notification.status = "failed"
+                await self._fail_terminally(session, notification, now)
+
+    @staticmethod
+    async def _fail_terminally(
+        session: AsyncSession,
+        notification: NotificationRow,
+        now: datetime,
+    ) -> None:
+        notification.status = "failed"
+        if notification.kind != VERIFICATION_RESUME_NOTIFICATION_KIND:
+            return
+        event = WorkflowEventRow(
+            id=uuid4(),
+            workflow_id=notification.workflow_id,
+            event_type="verification_resume_delivery_failed",
+            actor_type="system",
+            actor_id="notification_control_plane",
+            cause_type="notification",
+            cause_id=str(notification.id),
+            data={
+                "notification_id": str(notification.id),
+                "notification_kind": notification.kind,
+                "error": notification.last_error,
+            },
+            occurred_at=now,
+        )
+        session.add(event)
+        await session.flush()
+        session.add(
+            NotificationRow(
+                workflow_id=notification.workflow_id,
+                workflow_event_id=event.id,
+                kind=VERIFICATION_RESUME_RECOVERY_NOTIFICATION_KIND,
+                destination_type=notification.destination_type,
+                destination_id=notification.destination_id,
+                status="queued",
+                attempts=0,
+                max_attempts=3,
+                available_at=now,
+            )
+        )
 
     def _require_current_lease(
         self,
@@ -537,7 +621,9 @@ class WorkflowNotificationProtocol:
             notification_id=notification.id,
             workflow_event_id=notification.workflow_event_id,
             workflow_id=notification.workflow_id,
+            kind=notification.kind,
             delivery_attempt=notification.attempts,
+            status=cast(NotificationDeliveryStatus, notification.status),
         )
 
     @staticmethod

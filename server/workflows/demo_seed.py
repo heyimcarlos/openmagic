@@ -23,6 +23,8 @@ DEMO_WORKFLOW_ID = UUID("40000000-0000-0000-0000-000000000001")
 DEMO_BROKER_IDENTIFIER_ID = UUID("51000000-0000-0000-0000-000000000001")
 DEMO_ORGANIZATION_IDENTIFIER_ID = UUID("51000000-0000-0000-0000-000000000002")
 DEMO_POLICYHOLDER_IDENTIFIER_ID = UUID("51000000-0000-0000-0000-000000000003")
+DEMO_BROKER_PHONE_IDENTIFIER_ID = UUID("51000000-0000-0000-0000-000000000004")
+DEMO_POLICYHOLDER_PHONE_IDENTIFIER_ID = UUID("51000000-0000-0000-0000-000000000005")
 DEMO_MEMBERSHIP_ID = UUID("52000000-0000-0000-0000-000000000001")
 DEMO_BROKER_ROLE_ID = UUID("53000000-0000-0000-0000-000000000001")
 DEMO_POLICYHOLDER_ROLE_ID = UUID("53000000-0000-0000-0000-000000000002")
@@ -54,6 +56,8 @@ async def seed_v0_demo(
     *,
     broker_party_id: UUID,
     organization_party_id: UUID,
+    policyholder_email: str = "john@example.com",
+    broker_email: str = "broker@acme.example",
 ) -> UUID:
     """Provision explicit trusted demo identity and one unplanned renewal Workflow."""
 
@@ -85,7 +89,7 @@ async def seed_v0_demo(
                 id=DEMO_BROKER_IDENTIFIER_ID,
                 party_id=broker_party_id,
                 kind="email",
-                value="broker@acme.example",
+                value=broker_email,
                 verified_at=now,
             ),
             PartyIdentifierRow(
@@ -99,7 +103,21 @@ async def seed_v0_demo(
                 id=DEMO_POLICYHOLDER_IDENTIFIER_ID,
                 party_id=DEMO_POLICYHOLDER_ID,
                 kind="email",
-                value="john@example.com",
+                value=policyholder_email,
+                verified_at=now,
+            ),
+            PartyIdentifierRow(
+                id=DEMO_BROKER_PHONE_IDENTIFIER_ID,
+                party_id=broker_party_id,
+                kind="phone",
+                value="+14165550101",
+                verified_at=now,
+            ),
+            PartyIdentifierRow(
+                id=DEMO_POLICYHOLDER_PHONE_IDENTIFIER_ID,
+                party_id=DEMO_POLICYHOLDER_ID,
+                kind="phone",
+                value="+14165550142",
                 verified_at=now,
             ),
             OrganizationMembershipRow(
@@ -116,7 +134,12 @@ async def seed_v0_demo(
             kind="renewal_outreach.v1",
             objective="2026 renewal outreach for John Smith",
             status="active",
-            input={"renewal_period": "2026"},
+            input={
+                "renewal_period": "2026",
+                "renewal_details": (
+                    "Your policy renews on January 1, 2026. The quoted annual premium is $1,284."
+                ),
+            },
             organization_party_id=organization_party_id,
         )
         await _add_if_missing(session, workflow, workflow.id)

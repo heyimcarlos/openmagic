@@ -9,6 +9,14 @@ from uuid import UUID
 from server.workflows import WorkflowPacket
 
 
+class ConversationRecorder(Protocol):
+    def record_reply(self, message: str) -> None: ...
+
+    def record_reply_once(self, delivery_id: str, message: str) -> bool: ...
+
+    def record_wait(self, reason: str) -> None: ...
+
+
 @dataclass
 class InteractionToolContext:
     """Trusted per-turn context that is never model-provided."""
@@ -16,6 +24,10 @@ class InteractionToolContext:
     actor_party_id: UUID
     organization_party_id: UUID
     cause_id: str
+    interaction_id: str | None = None
+    verification_challenge_id: UUID | None = None
+    delivery_id: str | None = None
+    conversation: ConversationRecorder | None = None
     trusted_workflow_id: UUID | None = None
     resolved_workflow_id: UUID | None = None
     loaded_packet: WorkflowPacket | None = None

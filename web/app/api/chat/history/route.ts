@@ -1,9 +1,13 @@
 const serverBase = process.env.PY_SERVER_URL || 'http://localhost:8001';
 const historyPath = `${serverBase.replace(/\/$/, '')}/api/v1/chat/history`;
 
-async function forward(method: 'GET' | 'DELETE') {
+async function forward(method: 'GET' | 'DELETE', request: Request) {
+  const requestUrl = new URL(request.url);
+  const upstreamUrl = new URL(historyPath);
+  const senderPhone = requestUrl.searchParams.get('sender_phone');
+  if (senderPhone) upstreamUrl.searchParams.set('sender_phone', senderPhone);
   try {
-    const res = await fetch(historyPath, {
+    const res = await fetch(upstreamUrl, {
       method,
       headers: { Accept: 'application/json' },
       cache: 'no-store',
@@ -21,10 +25,10 @@ async function forward(method: 'GET' | 'DELETE') {
   }
 }
 
-export async function GET() {
-  return forward('GET');
+export async function GET(request: Request) {
+  return forward('GET', request);
 }
 
-export async function DELETE() {
-  return forward('DELETE');
+export async function DELETE(request: Request) {
+  return forward('DELETE', request);
 }

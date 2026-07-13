@@ -22,6 +22,9 @@ from .errors import (
 RENEWAL_OUTREACH_KIND = "renewal_outreach.v1"
 DRAFT_RENEWAL_EMAIL_KIND = "renewal_email.draft.v1"
 GMAIL_SEND_EMAIL_KIND = "gmail.send_email.v1"
+VERIFICATION_EMAIL_JOB_KIND = "verification.email_code.v1"
+VERIFICATION_EMAIL_DELIVERY_WORKFLOW_KIND = "verification_email_delivery.v1"
+VERIFICATION_DELIVERY_ATTENTION_NOTIFICATION_KIND = "verification_delivery_attention_required"
 
 
 ContractT = TypeVar("ContractT")
@@ -33,6 +36,7 @@ class KindSchema(BaseModel):
 
 class RenewalOutreachInput(KindSchema):
     renewal_period: str = Field(pattern=r"^[0-9]{4}$")
+    renewal_details: str | None = Field(default=None, min_length=1, max_length=1000)
 
 
 class DraftRenewalEmailInput(KindSchema):
@@ -87,6 +91,19 @@ class GmailSendEmailOutput(KindSchema):
     thread_id: str | None = None
 
 
+class VerificationEmailInput(KindSchema):
+    challenge_id: UUID
+
+
+class VerificationEmailOutput(GmailSendEmailOutput):
+    pass
+
+
+class VerificationEmailDeliveryWorkflowInput(KindSchema):
+    protected_workflow_id: UUID
+    challenge_id: UUID
+
+
 class ExecutionStrategy(StrEnum):
     FRESH_EXECUTION_AGENT = "fresh_execution_agent"
     DETERMINISTIC_ADAPTER = "deterministic_adapter"
@@ -110,6 +127,7 @@ class JobKindContract:
     requires_approval: bool = False
     adapter_version: str | None = None
     provider_tool_version: str | None = None
+    system_authorized: bool = False
 
 
 def _never_complete(_view: object) -> bool:
@@ -231,7 +249,7 @@ class WorkflowKindRegistry:
         return ValidatedWorkflowProposal(
             kind=proposal.kind,
             objective=proposal.objective,
-            input=workflow_input.model_dump(mode="json"),
+            input=workflow_input.model_dump(mode="json", exclude_none=True),
             jobs=tuple(validated_jobs),
         )
 
@@ -256,6 +274,25 @@ class WorkflowKindRegistry:
         if contract is None:
             raise UnknownWorkflowJobKindError(job_kind)
         return contract
+
+    def validate_workflow_input(self, workflow_kind: str, value: dict[str, Any]) -> dict[str, Any]:
+        """Validate application-created Workflow input through the trusted registry."""
+
+        contract = self._workflow_kinds.get(workflow_kind)
+        if contract is None:
+            raise UnknownWorkflowKindError(workflow_kind)
+        try:
+            validated = contract.input_schema.model_validate(value)
+        except ValidationError as exc:
+            raise InvalidWorkflowProposalError("invalid Workflow input") from exc
+        return validated.model_dump(mode="json", exclude_none=True)
+
+    def system_job_kinds(self) -> frozenset[str]:
+        """Return trusted system-created Job Kinds excluded from model proposals."""
+
+        return frozenset(
+            contract.kind for contract in self._job_kinds.values() if contract.system_authorized
+        )
 
     def completion_satisfied(
         self,
@@ -376,7 +413,10 @@ def _materialize_gmail_input(
 
 
 def _renewal_completion_satisfied(view: WorkflowCompletionView) -> bool:
-    if view.uncertain_job_ids:
+    business_job_ids = {
+        job.id for job in view.jobs if job.kind in {DRAFT_RENEWAL_EMAIL_KIND, GMAIL_SEND_EMAIL_KIND}
+    }
+    if view.uncertain_job_ids.intersection(business_job_ids):
         return False
     revised_ids = {job.revises_job_id for job in view.jobs if job.revises_job_id is not None}
     effective_sends = [
@@ -390,7 +430,20 @@ def _renewal_completion_satisfied(view: WorkflowCompletionView) -> bool:
         or effective_send.id not in view.approved_dispatch_job_ids
     ):
         return False
-    return all(job.status in {"succeeded", "cancelled"} for job in view.jobs)
+    return all(
+        job.status in {"succeeded", "cancelled"}
+        for job in view.jobs
+        if job.kind in {DRAFT_RENEWAL_EMAIL_KIND, GMAIL_SEND_EMAIL_KIND}
+    )
+
+
+def _verification_email_delivery_completed(view: WorkflowCompletionView) -> bool:
+    deliveries = [job for job in view.jobs if job.kind == VERIFICATION_EMAIL_JOB_KIND]
+    return (
+        len(deliveries) == 1
+        and deliveries[0].status == "succeeded"
+        and deliveries[0].id not in view.uncertain_job_ids
+    )
 
 
 def default_workflow_registry() -> WorkflowKindRegistry:
@@ -429,10 +482,37 @@ def default_workflow_registry() -> WorkflowKindRegistry:
         adapter_version="openmagic.composio_gmail.v1",
         provider_tool_version="GMAIL_SEND_EMAIL@20260702_01",
     )
+    verification_email = JobKindContract(
+        kind=VERIFICATION_EMAIL_JOB_KIND,
+        input_schema=VerificationEmailInput,
+        proposal_input_schema=VerificationEmailInput,
+        output_schema=VerificationEmailOutput,
+        run_data_schema=VerificationEmailOutput,
+        materialize_input=_keep_validated_input,
+        execution_strategy=ExecutionStrategy.DETERMINISTIC_ADAPTER,
+        executor_key="composio_verification_email",
+        max_attempts=3,
+        success_event_type="verification_email_sent",
+        success_notification_kind=None,
+        retryable_error_codes=frozenset({"verification_delivery_not_ready"}),
+        retry_backoff=timedelta(seconds=2),
+        adapter_version="openmagic.composio_verification_email.v1",
+        provider_tool_version="GMAIL_SEND_EMAIL@20260702_01",
+        system_authorized=True,
+    )
     renewal = WorkflowKindContract(
         kind=RENEWAL_OUTREACH_KIND,
         input_schema=RenewalOutreachInput,
         allowed_job_kinds=frozenset({draft.kind, send.kind}),
         completion_predicate=_renewal_completion_satisfied,
     )
-    return WorkflowKindRegistry((renewal,), (draft, send))
+    verification_delivery = WorkflowKindContract(
+        kind=VERIFICATION_EMAIL_DELIVERY_WORKFLOW_KIND,
+        input_schema=VerificationEmailDeliveryWorkflowInput,
+        allowed_job_kinds=frozenset({verification_email.kind}),
+        completion_predicate=_verification_email_delivery_completed,
+    )
+    return WorkflowKindRegistry(
+        (renewal, verification_delivery),
+        (draft, send, verification_email),
+    )
