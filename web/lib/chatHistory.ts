@@ -40,6 +40,10 @@ export type ChatHistorySnapshot = {
   changed: boolean;
 };
 
+export type SequencedChatHistorySnapshot = ChatHistorySnapshot & {
+  requestSequence: number;
+};
+
 export function parseChatHistorySnapshot(
   raw: string,
   previousRaw?: string,
@@ -49,4 +53,28 @@ export function parseChatHistorySnapshot(
     messages: parseChatHistory(JSON.parse(raw)),
     changed: raw !== previousRaw,
   };
+}
+
+export function parseSequencedChatHistorySnapshot(
+  raw: string,
+  previousRaw: string | undefined,
+  requestSequence: number,
+  appliedSequence: number,
+): SequencedChatHistorySnapshot | undefined {
+  if (requestSequence < appliedSequence) return undefined;
+  return {
+    ...parseChatHistorySnapshot(raw, previousRaw),
+    requestSequence,
+  };
+}
+
+export function hasAssistantReplyForCause(
+  messages: ReadonlyArray<ChatBubble>,
+  causeId: string,
+): boolean {
+  const replyId = `reply:${causeId}`;
+  return messages.some(
+    (message) => message.role === 'assistant'
+      && (message.id === replyId || message.id.startsWith(`${replyId}:`)),
+  );
 }

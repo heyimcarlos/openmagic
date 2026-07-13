@@ -19,7 +19,10 @@ import {
   submitChatApproval,
 } from '@/lib/chatApproval';
 import { messageForDisplay } from '@/lib/chatDisplay';
-import { parseChatHistorySnapshot } from '@/lib/chatHistory';
+import {
+  hasAssistantReplyForCause,
+  parseSequencedChatHistorySnapshot,
+} from '@/lib/chatHistory';
 import { isWorkflowTelemetryDemoVariant } from '@/lib/workflowTelemetryDemo';
 import { parseChatTurnTelemetry, type ApprovalRequest, type ChatTurnTelemetry } from '@/lib/chatTelemetry';
 
@@ -43,6 +46,8 @@ export default function Page() {
   const [showTelemetryDemo, setShowTelemetryDemo] = useState(false);
   const [senderId, setSenderId] = useState<SimulatedSenderId>('policyholder');
   const senderGeneration = useRef(0);
+  const historyRequestSequence = useRef(0);
+  const historyAppliedSequence = useRef(0);
   const historySnapshot = useRef<string | undefined>(undefined);
   const approvalCauseBySubmission = useRef(new Map<string, string>());
   const sender =
@@ -55,20 +60,29 @@ export default function Page() {
   const readHistory = useCallback(async (
     response: Response,
     requestGeneration: number,
+    requestSequence: number,
   ) => {
     if (!response.ok) return undefined;
     const raw = await response.text();
     if (senderGeneration.current !== requestGeneration) return undefined;
-    const snapshot = parseChatHistorySnapshot(raw, historySnapshot.current);
+    const snapshot = parseSequencedChatHistorySnapshot(
+      raw,
+      historySnapshot.current,
+      requestSequence,
+      historyAppliedSequence.current,
+    );
+    if (!snapshot) return undefined;
+    historyAppliedSequence.current = requestSequence;
     if (snapshot.changed) historySnapshot.current = raw;
     return snapshot;
   }, []);
 
   const loadHistory = useCallback(async () => {
     const requestGeneration = senderGeneration.current;
+    const requestSequence = ++historyRequestSequence.current;
     try {
       const res = await fetch(historyUrl, { cache: 'no-store' });
-      const snapshot = await readHistory(res, requestGeneration);
+      const snapshot = await readHistory(res, requestGeneration, requestSequence);
       if (snapshot?.changed) setMessages(snapshot.messages);
     } catch (err: any) {
       if (err?.name === 'AbortError') return;
@@ -135,7 +149,6 @@ export default function Page() {
       if (!trimmed) return;
       const requestGeneration = senderGeneration.current;
 
-      const assistantCountBeforeSend = messages.filter((message) => message.role === 'assistant').length;
       setError(null);
       setIsWaitingForResponse(true);
       setPendingTelemetry(undefined);
@@ -180,6 +193,7 @@ export default function Page() {
 
         try {
           const telemetryUrl = `/api/chat/telemetry/latest?sender_phone=${encodeURIComponent(sender.phone)}&cause_id=${encodeURIComponent(sourceId)}`;
+          const requestSequence = ++historyRequestSequence.current;
           const [response, telemetryResponse] = await Promise.all([
             fetch(historyUrl, { cache: 'no-store' }),
             fetch(telemetryUrl, { cache: 'no-store' }),
@@ -188,13 +202,10 @@ export default function Page() {
             const telemetryPayload = await telemetryResponse.json();
             setPendingTelemetry(parseChatTurnTelemetry(telemetryPayload.telemetry));
           }
-          const snapshot = await readHistory(response, requestGeneration);
+          const snapshot = await readHistory(response, requestGeneration, requestSequence);
           if (!snapshot) continue;
-          const assistantCount = snapshot.messages.filter(
-            (message) => message.role === 'assistant',
-          ).length;
 
-          if (assistantCount > assistantCountBeforeSend) {
+          if (hasAssistantReplyForCause(snapshot.messages, sourceId)) {
             setMessages(snapshot.messages);
             setPendingTelemetry(undefined);
             setIsWaitingForResponse(false);
@@ -211,7 +222,7 @@ export default function Page() {
         await loadHistory();
       }
     },
-    [historyUrl, loadHistory, messages, readHistory, sender.phone],
+    [historyUrl, loadHistory, readHistory, sender.phone],
   );
 
   const handleClearHistory = useCallback(async () => {
