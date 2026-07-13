@@ -183,16 +183,18 @@ _LANES = (
 def run_v0_evidence(
     *,
     output_directory: Path,
-    application_build: str,
+    application_build: str | None,
     invocation: Sequence[str],
     run_model_diagnostics: bool,
     run_live_composio: bool,
     runner: Runner = subprocess.run,
     now: datetime | None = None,
     lane_timeout_seconds: float = 360,
+    build_verifier: Callable[[str | None], str] | None = None,
 ) -> tuple[V0EvidenceReport, Path, Path]:
     """Run every deterministic lane and optional external lanes, then write one index."""
 
+    application_build = (build_verifier or _verified_current_build)(application_build)
     _require_build_sha(application_build)
     run_at = now or datetime.now(UTC)
     run_id = f"v0-{run_at.strftime('%Y%m%dT%H%M%SZ')}-{application_build[:12]}"
@@ -241,13 +243,17 @@ def _run_lane(
 ) -> V0EvidenceLane:
     lane_directory = run_directory / spec.lane_id
     junit_path = lane_directory / "junit.xml"
+    live_evidence_path = lane_directory / "live-evidence.json"
+    pytest_evidence_arguments = (
+        () if spec.lane_id == "live_composio" else (f"--junitxml={junit_path}",)
+    )
     command = (
         sys.executable,
         "-m",
         "pytest",
         "-q",
         *spec.pytest_targets,
-        f"--junitxml={junit_path}",
+        *pytest_evidence_arguments,
     )
     public_environment = tuple(
         f"{name}={value}"
@@ -257,6 +263,7 @@ def _run_lane(
             ("OPENMAGIC_RECOVERY_EVAL_APPLICATION_BUILD", application_build),
             ("OPENMAGIC_RECOVERY_EVAL_OUTPUT_DIR", str(lane_directory)),
             ("OPENMAGIC_PAIRED_EVAL_OUTPUT_DIR", str(lane_directory)),
+            ("OPENMAGIC_LIVE_EVIDENCE_PATH", str(live_evidence_path)),
         )
     )
     lane_directory.mkdir()
@@ -280,6 +287,7 @@ def _run_lane(
     environment["OPENMAGIC_RECOVERY_EVAL_APPLICATION_BUILD"] = application_build
     environment["OPENMAGIC_RECOVERY_EVAL_OUTPUT_DIR"] = str(lane_directory)
     environment["OPENMAGIC_PAIRED_EVAL_OUTPUT_DIR"] = str(lane_directory)
+    environment["OPENMAGIC_LIVE_EVIDENCE_PATH"] = str(live_evidence_path)
     started = time.perf_counter()
     try:
         result = runner(
@@ -309,7 +317,10 @@ def _run_lane(
         sys.stderr.write(stderr)
     status: LaneStatus = "pass" if return_code == 0 else "fail"
     artifacts = _artifacts(lane_directory)
-    source = str(junit_path) if junit_path.exists() else "lane process outcome"
+    source = next(
+        (str(path) for path in (live_evidence_path, junit_path) if path.exists()),
+        "lane process outcome",
+    )
     return V0EvidenceLane(
         lane_id=spec.lane_id,
         classification=spec.classification,
@@ -397,11 +408,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--run-model-diagnostics", action="store_true")
     parser.add_argument("--run-live-composio", action="store_true")
     args = parser.parse_args(argv)
-    application_build = _verified_current_build(args.build)
     invocation = (sys.executable, "-m", "server.evals.v0_evidence", *(argv or sys.argv[1:]))
     report, json_path, markdown_path = run_v0_evidence(
         output_directory=args.output,
-        application_build=application_build,
+        application_build=args.build,
         invocation=invocation,
         run_model_diagnostics=args.run_model_diagnostics,
         run_live_composio=args.run_live_composio,

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
@@ -407,10 +408,41 @@ async def _run_live_email_acceptance(
         assert send_job.output.get("message_id")
         assert trace.workflow.status == "completed"
         assert send_notification.status == "delivered"
-        assert await recipient.wait_for_exactly_one_message(
+        recipient_observed = await recipient.wait_for_exactly_one_message(
             effect=approved_effect,
             previous_ids=previous_message_ids,
             wait_limit=timedelta(seconds=90),
         )
+        assert recipient_observed
+        _write_live_evidence(
+            application_build=application_build,
+            workflow_id=created.workflow.id,
+            send_job_id=send_job.id,
+            notification_id=send_notification.id,
+        )
     finally:
         await database.dispose()
+
+
+def _write_live_evidence(
+    *,
+    application_build: str,
+    workflow_id: UUID,
+    send_job_id: UUID,
+    notification_id: UUID,
+) -> None:
+    configured_path = os.getenv("OPENMAGIC_LIVE_EVIDENCE_PATH")
+    if configured_path is None:
+        return
+    payload = {
+        "schema_version": 1,
+        "application_build": application_build,
+        "workflow_id": str(workflow_id),
+        "send_job_id": str(send_job_id),
+        "notification_id": str(notification_id),
+        "job_completed": True,
+        "notification_delivered": True,
+        "user_acknowledged": True,
+        "recipient_observed": True,
+    }
+    Path(configured_path).write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")

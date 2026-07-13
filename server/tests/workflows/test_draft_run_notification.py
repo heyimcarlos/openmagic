@@ -30,7 +30,7 @@ from server.workflows import (
     WorkflowDatabase,
     WorkflowRetrieval,
 )
-from server.workflows.identity_models import WorkflowParticipantRoleRow
+from server.workflows.identity_models import PartyIdentifierRow, WorkflowParticipantRoleRow
 from server.workflows.models import (
     NotificationRow,
     WorkflowEventRow,
@@ -921,6 +921,64 @@ async def test_committed_presentation_is_rejected_after_later_job_replacement(
                 depends_on_job_id=claimed.job_id,
             )
         )
+
+    with pytest.raises(NotificationLifecycleError, match="no longer actionable"):
+        await control_plane.resolve_notification_presentation(
+            delivery.notification_id,
+            delivery.workflow_event_id,
+            delivery.workflow_id,
+            "notification-worker",
+            delivery.delivery_attempt,
+        )
+
+    trace = await control_plane.read_workflow_trace(created.workflow.id, create_command().context)
+    assert [event.event_type for event in trace.events].count(
+        "approval_presentation_committed"
+    ) == 1
+    await database.dispose()
+
+
+async def test_committed_presentation_is_rejected_after_sender_mailbox_revocation(
+    control_plane: WorkflowControlPlane,
+    migrated_postgres_url: str,
+):
+    created = await control_plane.create_workflow(create_command())
+    claimed = await control_plane.claim_job(claim_command())
+    assert claimed is not None
+    await control_plane.report_run_result(
+        ReportRunResultCommand(run_id=claimed.run_id, result=successful_draft())
+    )
+    delivery = await control_plane.claim_notification(
+        ClaimNotificationCommand(
+            worker_id="notification-worker",
+            lease_duration=timedelta(minutes=5),
+        )
+    )
+    assert delivery is not None
+    first = await control_plane.resolve_notification_presentation(
+        delivery.notification_id,
+        delivery.workflow_event_id,
+        delivery.workflow_id,
+        "notification-worker",
+        delivery.delivery_attempt,
+    )
+
+    database = WorkflowDatabase(migrated_postgres_url)
+    async with database.transaction() as session:
+        session.add(
+            PartyIdentifierRow(
+                party_id=create_command().context.actor_party_id,
+                kind="email",
+                value="broker-identity@acme.example",
+                verified_at=datetime.now(UTC),
+            )
+        )
+        mailbox = await session.get(
+            PartyIdentifierRow,
+            UUID(str(first.effect["sender_mailbox_id"])),
+        )
+        assert mailbox is not None
+        mailbox.revoked_at = datetime.now(UTC)
 
     with pytest.raises(NotificationLifecycleError, match="no longer actionable"):
         await control_plane.resolve_notification_presentation(

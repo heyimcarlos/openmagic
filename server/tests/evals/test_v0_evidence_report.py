@@ -6,7 +6,12 @@ from datetime import UTC, datetime
 
 import pytest
 
-from server.evals.v0_evidence import run_v0_evidence
+from server.evals.v0_evidence import _verified_current_build, run_v0_evidence
+
+
+def _accept_requested_build(requested: str | None) -> str:
+    assert requested is not None
+    return requested
 
 
 class _SuccessfulRunner:
@@ -27,6 +32,7 @@ def test_report_separates_deterministic_diagnostic_and_live_evidence(tmp_path) -
         run_model_diagnostics=False,
         run_live_composio=False,
         runner=runner,
+        build_verifier=_accept_requested_build,
         now=datetime(2026, 7, 13, tzinfo=UTC),
     )
 
@@ -53,6 +59,8 @@ def test_report_separates_deterministic_diagnostic_and_live_evidence(tmp_path) -
     assert "Send Job completed" in live_observation_names
     assert "Notification delivered" in live_observation_names
     assert "User-visible acknowledgement recorded" in live_observation_names
+    assert not any(argument.startswith("--junitxml=") for argument in live.command)
+    assert any(item.startswith("OPENMAGIC_LIVE_EVIDENCE_PATH=") for item in live.environment)
     payload = json.loads(json_path.read_text())
     assert payload["application_build"] == "0123456789abcdef0123456789abcdef01234567"
     assert "Deterministic V0 verdict: PASS" in markdown_path.read_text()
@@ -81,6 +89,7 @@ def test_failed_deterministic_lane_fails_only_the_strict_gate(tmp_path) -> None:
         run_model_diagnostics=True,
         run_live_composio=True,
         runner=runner,
+        build_verifier=_accept_requested_build,
         now=datetime(2026, 7, 13, 0, 0, 1, tzinfo=UTC),
     )
 
@@ -102,6 +111,7 @@ def test_timed_out_lane_is_bounded_failure_evidence(tmp_path) -> None:
         run_model_diagnostics=False,
         run_live_composio=False,
         runner=runner,
+        build_verifier=_accept_requested_build,
         now=datetime(2026, 7, 13, 0, 0, 2, tzinfo=UTC),
         lane_timeout_seconds=1,
     )
@@ -125,6 +135,7 @@ def test_unstartable_lane_is_bounded_failure_evidence(tmp_path) -> None:
         run_model_diagnostics=False,
         run_live_composio=False,
         runner=runner,
+        build_verifier=_accept_requested_build,
         now=datetime(2026, 7, 13, 0, 0, 3, tzinfo=UTC),
     )
 
@@ -139,6 +150,42 @@ def test_invalid_build_is_rejected_before_creating_output(tmp_path) -> None:
             invocation=("evidence",),
             run_model_diagnostics=False,
             run_live_composio=False,
+            build_verifier=_accept_requested_build,
         )
 
     assert list(tmp_path.iterdir()) == []
+
+
+def test_report_verifier_failure_prevents_output(tmp_path) -> None:
+    def reject_build(_requested: str | None) -> str:
+        raise RuntimeError("V0 evidence requires a clean worktree")
+
+    with pytest.raises(RuntimeError, match="clean worktree"):
+        run_v0_evidence(
+            output_directory=tmp_path,
+            application_build="5" * 40,
+            invocation=("evidence",),
+            run_model_diagnostics=False,
+            run_live_composio=False,
+            build_verifier=reject_build,
+        )
+
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_current_build_verifier_rejects_dirty_or_mismatched_checkout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    head = "6" * 40
+    outputs = iter((head + "\n", " M server/file.py\n"))
+
+    def dirty_run(*_args, **_kwargs):
+        return subprocess.CompletedProcess((), 0, stdout=next(outputs), stderr="")
+
+    monkeypatch.setattr("server.evals.v0_evidence.subprocess.run", dirty_run)
+    with pytest.raises(RuntimeError, match="clean worktree"):
+        _verified_current_build(head)
+
+    outputs = iter((head + "\n", ""))
+    with pytest.raises(RuntimeError, match="does not match"):
+        _verified_current_build("7" * 40)

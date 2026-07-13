@@ -22,7 +22,7 @@ from .contracts import (
 )
 from .database import WorkflowDatabase
 from .email_effects import fingerprint_email_effect, resolve_email_effect
-from .errors import NotificationLifecycleError
+from .errors import NotificationLifecycleError, WorkflowLifecycleError
 from .models import (
     NotificationRow,
     WorkflowEventRow,
@@ -445,13 +445,17 @@ class WorkflowNotificationProtocol:
         ):
             raise NotificationLifecycleError("Committed presentation is no longer actionable")
         sender_mailbox_id = event.data.get("sender_mailbox_id")
-        effect = await resolve_email_effect(
-            session,
-            event.workflow_id,
-            send,
-            sender_mailbox_id=UUID(str(sender_mailbox_id)) if sender_mailbox_id else None,
-            require_current_sender=False,
-        )
+        try:
+            effect = await resolve_email_effect(
+                session,
+                event.workflow_id,
+                send,
+                sender_mailbox_id=UUID(str(sender_mailbox_id)) if sender_mailbox_id else None,
+            )
+        except WorkflowLifecycleError as exc:
+            raise NotificationLifecycleError(
+                "Committed presentation is no longer actionable"
+            ) from exc
         if fingerprint_email_effect(effect) != fingerprint:
             raise NotificationLifecycleError("Committed presentation fingerprint is invalid")
         return NotificationPresentationContext(

@@ -31,8 +31,8 @@ uv run python -m server.evals.v0_evidence \
 
 Every run requires a clean Git worktree and verifies the supplied build against
 the checked-out commit. It creates one exclusive directory containing
-`report.json`, `report.md`, JUnit evidence for every executed lane, and the
-existing typed recovery or paired reports produced by those suites. The report
+`report.json`, `report.md`, JUnit evidence for non-provider lanes, one bounded
+live-smoke result, and the existing typed recovery or paired reports produced by those suites. The report
 distinguishes four deterministic safety lanes, the
 real-model diagnostic lane, and the live-provider lane. The strict V0 verdict
 is derived only from deterministic gates. Optional external lanes remain
