@@ -296,6 +296,14 @@ class WorkflowTraceNotification(WorkflowContract):
     workflow_event_id: UUID
     kind: str
     status: str
+    attempts: int
+    max_attempts: int
+    available_at: datetime
+    claimed_by: str | None
+    lease_expires_at: datetime | None
+    delivered_at: datetime | None
+    delivered_by: str | None
+    last_error: str | None
 
 
 class WorkflowTrace(WorkflowContract):

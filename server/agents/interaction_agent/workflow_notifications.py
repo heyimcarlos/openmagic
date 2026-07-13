@@ -18,7 +18,7 @@ from server.workflows import (
     WorkflowRetrieval,
 )
 
-from .runtime import InteractionAgentRuntime
+from .runtime import Completion, InteractionAgentRuntime
 from .toolbox import InteractionToolContext, ToolResult
 
 
@@ -237,6 +237,7 @@ class FreshWorkflowInteraction:
         delivery_attempt: int,
         settings: Settings,
         organization_party_id: UUID,
+        completion: Completion | None = None,
     ) -> None:
         self.runtime_instance_id = uuid4()
         self._control_plane = control_plane
@@ -246,6 +247,7 @@ class FreshWorkflowInteraction:
         self._delivery_attempt = delivery_attempt
         self._settings = settings
         self._organization_party_id = organization_party_id
+        self._completion = completion
         self._used = False
 
     async def handle(
@@ -280,6 +282,7 @@ class FreshWorkflowInteraction:
             toolbox=toolbox,
             system_prompt_builder=lambda: _build_notification_prompt(audience.kind),
             message_builder=_prepare_notification_message,
+            completion=self._completion,
             settings=self._settings,
         )
         result = await runtime.execute_fresh_notification(
@@ -337,12 +340,14 @@ class FreshWorkflowInteractionFactory:
         presenter: ApprovalPresenter,
         settings: Settings,
         organization_party_id: UUID,
+        completion: Completion | None = None,
     ) -> None:
         self._control_plane = control_plane
         self._retrieval = retrieval
         self._presenter = presenter
         self._settings = settings
         self._organization_party_id = organization_party_id
+        self._completion = completion
 
     @asynccontextmanager
     async def create(self, worker_id: str, delivery_attempt: int):
@@ -354,6 +359,7 @@ class FreshWorkflowInteractionFactory:
             delivery_attempt=delivery_attempt,
             settings=self._settings,
             organization_party_id=self._organization_party_id,
+            completion=self._completion,
         )
         try:
             yield runtime

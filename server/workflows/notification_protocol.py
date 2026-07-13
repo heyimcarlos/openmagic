@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
@@ -38,15 +39,17 @@ class WorkflowNotificationProtocol:
         self,
         database: WorkflowDatabase,
         has_current_broker_authority: CurrentBrokerAuthority,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._database = database
         self._has_current_broker_authority = has_current_broker_authority
+        self._clock = clock or self._utc_now
 
     async def claim_notification(
         self,
         command: ClaimNotificationCommand,
     ) -> NotificationDeliveryPacket | None:
-        now = datetime.now(UTC)
+        now = self._clock()
         async with self._database.transaction() as session:
             await self._recover_expired(session, now)
             notification = await session.scalar(
@@ -100,7 +103,7 @@ class WorkflowNotificationProtocol:
             notification.status = "delivered"
             notification.claimed_by = None
             notification.lease_expires_at = None
-            notification.delivered_at = datetime.now(UTC)
+            notification.delivered_at = self._clock()
             notification.delivered_by = command.worker_id
             await session.flush()
             return self._packet(notification)
@@ -127,7 +130,7 @@ class WorkflowNotificationProtocol:
             notification.last_error = command.error_code
             if notification.attempts < notification.max_attempts:
                 notification.status = "queued"
-                notification.available_at = datetime.now(UTC) + self._backoff(notification.attempts)
+                notification.available_at = self._clock() + self._backoff(notification.attempts)
             else:
                 notification.status = "failed"
             await session.flush()
@@ -481,8 +484,8 @@ class WorkflowNotificationProtocol:
             else:
                 notification.status = "failed"
 
-    @staticmethod
     def _require_current_lease(
+        self,
         notification: NotificationRow,
         worker_id: str,
         delivery_attempt: int,
@@ -492,7 +495,7 @@ class WorkflowNotificationProtocol:
             or notification.claimed_by != worker_id
             or notification.attempts != delivery_attempt
             or notification.lease_expires_at is None
-            or notification.lease_expires_at < datetime.now(UTC)
+            or notification.lease_expires_at < self._clock()
         ):
             raise NotificationLifecycleError("Notification delivery lease is stale")
 
@@ -508,3 +511,7 @@ class WorkflowNotificationProtocol:
     @staticmethod
     def _backoff(attempt: int) -> timedelta:
         return timedelta(seconds=min(2 ** max(attempt - 1, 0), 30))
+
+    @staticmethod
+    def _utc_now() -> datetime:
+        return datetime.now(UTC)

@@ -177,6 +177,7 @@ async def test_exact_approved_email_reaches_the_authorized_recipient(
             recipient=recipient,
             database_url=migrated_postgres_url,
             monkeypatch=monkeypatch,
+            application_build=os.getenv("OPENMAGIC_EVAL_APPLICATION_BUILD", "live-email-smoke"),
         )
 
 
@@ -187,6 +188,7 @@ async def _run_live_email_acceptance(
     recipient: AgentMailRecipient,
     database_url: str,
     monkeypatch: pytest.MonkeyPatch,
+    application_build: str,
 ) -> None:
     previous_message_ids = await recipient.message_ids()
     broker_id, organization_id, mailbox_id = uuid4(), uuid4(), uuid4()
@@ -253,7 +255,7 @@ async def _run_live_email_acceptance(
         draft_run = await control_plane.claim_job(
             ClaimWorkflowJobCommand(
                 worker_id="live-draft-worker",
-                application_build="live-email-smoke",
+                application_build=application_build,
                 lease_duration=timedelta(minutes=5),
                 executor_keys=("renewal_email_drafter",),
             )
@@ -326,7 +328,7 @@ async def _run_live_email_acceptance(
             executors={},
             email_adapters={"composio_gmail_send": adapter},
             worker_id="live-send-worker",
-            application_build="live-email-smoke",
+            application_build=application_build,
         ).run_once()
         assert execution is not None
 
