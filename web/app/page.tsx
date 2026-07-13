@@ -13,10 +13,18 @@ import {
 } from '@/components/chat/SmsContactHeader';
 import type { ChatBubble } from '@/components/chat/types';
 import { workflowTelemetryDemoMessages } from '@/components/chat/workflow-telemetry/demo';
+import {
+  approvalCauseFor,
+  approvalSubmissionKey,
+  submitChatApproval,
+} from '@/lib/chatApproval';
 import { messageForDisplay } from '@/lib/chatDisplay';
-import { parseChatHistory } from '@/lib/chatHistory';
+import {
+  hasAssistantReplyForCause,
+  parseSequencedChatHistorySnapshot,
+} from '@/lib/chatHistory';
 import { isWorkflowTelemetryDemoVariant } from '@/lib/workflowTelemetryDemo';
-import type { ApprovalRequest } from '@/lib/chatTelemetry';
+import { parseChatTurnTelemetry, type ApprovalRequest, type ChatTurnTelemetry } from '@/lib/chatTelemetry';
 
 const POLL_INTERVAL_MS = 1500;
 const RESPONSE_POLL_INTERVAL_MS = 1000;
@@ -34,9 +42,14 @@ export default function Page() {
   const [messages, setMessages] = useState<ChatBubble[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [isWaitingForResponse, setIsWaitingForResponse] = useState(false);
+  const [pendingTelemetry, setPendingTelemetry] = useState<ChatTurnTelemetry>();
   const [showTelemetryDemo, setShowTelemetryDemo] = useState(false);
   const [senderId, setSenderId] = useState<SimulatedSenderId>('policyholder');
   const senderGeneration = useRef(0);
+  const historyRequestSequence = useRef(0);
+  const historyAppliedSequence = useRef(0);
+  const historySnapshot = useRef<string | undefined>(undefined);
+  const approvalCauseBySubmission = useRef(new Map<string, string>());
   const sender =
     SIMULATED_SMS_SENDERS.find((candidate) => candidate.id === senderId) ??
     SIMULATED_SMS_SENDERS[0];
@@ -44,20 +57,38 @@ export default function Page() {
   const openSettings = useCallback(() => setOpen(true), [setOpen]);
   const closeSettings = useCallback(() => setOpen(false), [setOpen]);
 
+  const readHistory = useCallback(async (
+    response: Response,
+    requestGeneration: number,
+    requestSequence: number,
+  ) => {
+    if (!response.ok) return undefined;
+    const raw = await response.text();
+    if (senderGeneration.current !== requestGeneration) return undefined;
+    const snapshot = parseSequencedChatHistorySnapshot(
+      raw,
+      historySnapshot.current,
+      requestSequence,
+      historyAppliedSequence.current,
+    );
+    if (!snapshot) return undefined;
+    historyAppliedSequence.current = requestSequence;
+    if (snapshot.changed) historySnapshot.current = raw;
+    return snapshot;
+  }, []);
+
   const loadHistory = useCallback(async () => {
     const requestGeneration = senderGeneration.current;
+    const requestSequence = ++historyRequestSequence.current;
     try {
       const res = await fetch(historyUrl, { cache: 'no-store' });
-      if (!res.ok) return;
-      const data = await res.json();
-      if (senderGeneration.current === requestGeneration) {
-        setMessages(parseChatHistory(data));
-      }
+      const snapshot = await readHistory(res, requestGeneration, requestSequence);
+      if (snapshot?.changed) setMessages(snapshot.messages);
     } catch (err: any) {
       if (err?.name === 'AbortError') return;
       console.error('Failed to load chat history', err);
     }
-  }, [historyUrl]);
+  }, [historyUrl, readHistory]);
 
   useEffect(() => {
     void loadHistory();
@@ -118,9 +149,9 @@ export default function Page() {
       if (!trimmed) return;
       const requestGeneration = senderGeneration.current;
 
-      const assistantCountBeforeSend = messages.filter((message) => message.role === 'assistant').length;
       setError(null);
       setIsWaitingForResponse(true);
+      setPendingTelemetry(undefined);
 
       const sourceId = crypto.randomUUID();
       const userMessage: ChatBubble = {
@@ -161,17 +192,22 @@ export default function Page() {
         await wait(RESPONSE_POLL_INTERVAL_MS);
 
         try {
-          const response = await fetch(historyUrl, { cache: 'no-store' });
-          if (!response.ok) continue;
+          const telemetryUrl = `/api/chat/telemetry/latest?sender_phone=${encodeURIComponent(sender.phone)}&cause_id=${encodeURIComponent(sourceId)}`;
+          const requestSequence = ++historyRequestSequence.current;
+          const [response, telemetryResponse] = await Promise.all([
+            fetch(historyUrl, { cache: 'no-store' }),
+            fetch(telemetryUrl, { cache: 'no-store' }),
+          ]);
+          if (telemetryResponse.ok && senderGeneration.current === requestGeneration) {
+            const telemetryPayload = await telemetryResponse.json();
+            setPendingTelemetry(parseChatTurnTelemetry(telemetryPayload.telemetry));
+          }
+          const snapshot = await readHistory(response, requestGeneration, requestSequence);
+          if (!snapshot) continue;
 
-          const currentMessages = parseChatHistory(await response.json());
-          const assistantCount = currentMessages.filter((message) => message.role === 'assistant').length;
-
-          if (
-            senderGeneration.current === requestGeneration &&
-            assistantCount > assistantCountBeforeSend
-          ) {
-            setMessages(currentMessages);
+          if (hasAssistantReplyForCause(snapshot.messages, sourceId)) {
+            setMessages(snapshot.messages);
+            setPendingTelemetry(undefined);
             setIsWaitingForResponse(false);
             return;
           }
@@ -181,30 +217,44 @@ export default function Page() {
       }
 
       if (senderGeneration.current === requestGeneration) {
+        setPendingTelemetry(undefined);
         setIsWaitingForResponse(false);
         await loadHistory();
       }
     },
-    [historyUrl, loadHistory, messages, sender],
+    [historyUrl, loadHistory, readHistory, sender.phone],
   );
 
   const handleClearHistory = useCallback(async () => {
+    if (isWaitingForResponse) return;
     try {
-      const res = await fetch(historyUrl, { method: 'DELETE' });
+      const res = await fetch('/api/chat/demo/reset', { method: 'POST' });
       if (!res.ok) {
-        console.error('Failed to clear chat history', res.statusText);
-        return;
+        const payload = await res.json().catch(() => ({}));
+        throw new Error(
+          typeof payload.detail === 'string' ? payload.detail : 'Failed to reset the demo',
+        );
       }
+      historySnapshot.current = undefined;
+      approvalCauseBySubmission.current.clear();
+      senderGeneration.current += 1;
       setMessages([]);
+      setPendingTelemetry(undefined);
+      setIsWaitingForResponse(false);
+      setError(null);
     } catch (err) {
       console.error('Failed to clear chat history', err);
+      setError(err instanceof Error ? err.message : 'Failed to reset the demo');
     }
-  }, [historyUrl, setMessages]);
+  }, [isWaitingForResponse]);
 
   const handleSenderChange = useCallback((id: SimulatedSenderId) => {
     senderGeneration.current += 1;
     setSenderId(id);
     setMessages([]);
+    historySnapshot.current = undefined;
+    approvalCauseBySubmission.current.clear();
+    setPendingTelemetry(undefined);
     setError(null);
     setIsWaitingForResponse(false);
   }, []);
@@ -235,32 +285,37 @@ export default function Page() {
     revision?: ApprovalEmail,
   ) => {
     setError(null);
-    const response = await fetch('/api/chat/approval', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+    const revisedEmail = revision ? {
+      to: parseAddresses(revision.to),
+      cc: parseAddresses(revision.cc),
+      bcc: parseAddresses(revision.bcc),
+      subject: revision.subject.trim(),
+      body: revision.body,
+    } : undefined;
+    const submissionKey = approvalSubmissionKey({
+      senderPhone: sender.phone,
+      workflowId: approval.workflowId,
+      jobId: approval.jobId,
+      draftRevisionId: approval.draftRevisionId,
+      revisedEmail,
+    });
+    const causeId = approvalCauseFor(approvalCauseBySubmission.current, submissionKey);
+    let payload: Record<string, unknown>;
+    try {
+      payload = await submitChatApproval({
         sender_phone: sender.phone,
-        cause_id: `ui-approval:${approval.jobId}:${approval.draftRevisionId}`,
+        cause_id: causeId,
         workflow_id: approval.workflowId,
         job_id: approval.jobId,
         expected_draft_revision_id: approval.draftRevisionId,
-        ...(revision ? {
-          revised_email: {
-            to: parseAddresses(revision.to),
-            cc: parseAddresses(revision.cc),
-            bcc: parseAddresses(revision.bcc),
-            subject: revision.subject.trim(),
-            body: revision.body,
-          },
-        } : {}),
-      }),
-    });
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      const message = typeof payload.detail === 'string'
-        ? payload.detail
+        ...(revisedEmail ? { revised_email: revisedEmail } : {}),
+      });
+    } catch (approvalError) {
+      const message = approvalError instanceof Error
+        ? approvalError.message
         : 'I could not record that approval. Please review the latest email and try again.';
       setError(message);
+      await loadHistory();
       throw new Error(message);
     }
     if (payload.status === 'verification_required') {
@@ -281,12 +336,14 @@ export default function Page() {
           onSenderChange={handleSenderChange}
           onOpenSettings={openSettings}
           onClearHistory={triggerClearHistory}
+          resetDisabled={isWaitingForResponse}
         />
 
         <div className="flex-1 overflow-hidden">
           <ChatMessages
             messages={showTelemetryDemo ? workflowTelemetryDemoMessages : messages}
             isWaitingForResponse={showTelemetryDemo ? false : isWaitingForResponse}
+            pendingTelemetry={showTelemetryDemo ? undefined : pendingTelemetry}
             onApprove={approveExactEmail}
           />
 

@@ -13,9 +13,34 @@ export const workflowTelemetryDemoMessages: ReadonlyArray<ChatBubble> = [
     telemetry: {
       activitySummary: 'Found context for 2 Workflows',
       activity: [
-        { id: 'search', label: 'Searched authorized Workflows', status: 'succeeded' },
-        { id: 'packets', label: 'Read 2 Workflow Packets', status: 'succeeded' },
-        { id: 'proposal', label: 'Proposed 2 Job graphs', status: 'succeeded' },
+        {
+          id: 'search',
+          tool: 'search_workflows',
+          label: 'Searched authorized Workflows',
+          status: 'succeeded',
+          inputSummary: 'query "John Smith and Acme Bakery renewals" · status active',
+          resultSummary: '2 authorized matches, showing 2',
+          resultItems: [
+            'John Smith renewal outreach · active · Acme Brokerage',
+            'Acme Bakery renewal outreach · active · Acme Brokerage',
+          ],
+        },
+        {
+          id: 'packets',
+          tool: 'read_workflow_packet',
+          label: 'Read bounded Workflow context',
+          status: 'succeeded',
+          resultSummary: 'Loaded bounded Workflow Packet',
+          resultItems: [],
+        },
+        {
+          id: 'proposal',
+          tool: 'propose_workflow_work',
+          label: 'Proposed business work',
+          status: 'succeeded',
+          resultSummary: 'Added typed work to the Workflow',
+          resultItems: [],
+        },
       ],
       workflows: [
         {

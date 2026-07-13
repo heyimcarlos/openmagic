@@ -61,6 +61,18 @@ class ConversationSessionStore:
             self._sessions[normalized] = session
             return session
 
+    def clear_all(self) -> None:
+        """Delete every transcript owned by the local SMS simulator."""
+
+        with self._lock:
+            sessions = tuple(self._sessions.values())
+            self._sessions.clear()
+            paths = tuple(self._root.glob("*.log")) if self._root.exists() else ()
+        for session in sessions:
+            session.log.clear()
+        for path in paths:
+            path.unlink(missing_ok=True)
+
 
 _conversation_sessions = ConversationSessionStore()
 
@@ -69,9 +81,14 @@ def get_conversation_session(interaction_id: str) -> ConversationSession:
     return _conversation_sessions.get(interaction_id)
 
 
+def clear_conversation_sessions() -> None:
+    _conversation_sessions.clear_all()
+
+
 __all__ = [
     "ConversationSession",
     "ConversationSessionStore",
     "SessionWorkingMemory",
+    "clear_conversation_sessions",
     "get_conversation_session",
 ]

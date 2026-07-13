@@ -17,8 +17,12 @@ export type WorkflowCheckpointStatus = (typeof workflowCheckpointStatuses)[numbe
 
 export interface AgentActivity {
   id: string;
+  tool: string;
   label: string;
   status: AgentActivityStatus;
+  inputSummary?: string;
+  resultSummary?: string;
+  resultItems: ReadonlyArray<string>;
 }
 
 export interface WorkflowJobStage {
@@ -117,9 +121,24 @@ function readStatus<T extends string>(value: unknown, allowed: ReadonlySet<strin
 function parseActivity(value: unknown): AgentActivity | undefined {
   if (!isRecord(value)) return undefined;
   const id = readText(value.id);
+  const tool = readText(value.tool);
   const label = readText(value.label);
   const status = readStatus<AgentActivityStatus>(value.status, activityStatusSet);
-  return id && label && status ? { id, label, status } : undefined;
+  const inputSummary = value.input_summary == null ? undefined : readText(value.input_summary);
+  const resultSummary = value.result_summary == null ? undefined : readText(value.result_summary);
+  const resultItems = value.result_items == null ? [] : readTextArray(value.result_items);
+  if (!id || !tool || !label || !status || !resultItems
+    || (value.input_summary != null && !inputSummary)
+    || (value.result_summary != null && !resultSummary)) return undefined;
+  return {
+    id,
+    tool,
+    label,
+    status,
+    ...(inputSummary ? { inputSummary } : {}),
+    ...(resultSummary ? { resultSummary } : {}),
+    resultItems,
+  };
 }
 
 function parseStage(value: unknown): WorkflowStage | undefined {

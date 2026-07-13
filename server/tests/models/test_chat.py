@@ -16,8 +16,12 @@ def test_history_message_carries_sanitized_workflow_telemetry():
                 "activity": [
                     {
                         "id": "search",
+                        "tool": "search_workflows",
                         "label": "Searched authorized Workflows",
                         "status": "succeeded",
+                        "input_summary": 'query "John Smith"',
+                        "result_summary": "1 authorized match, showing 1",
+                        "result_items": ["John Smith renewal · active · Acme Brokerage"],
                     }
                 ],
                 "workflows": [
@@ -44,7 +48,15 @@ def test_history_message_carries_sanitized_workflow_telemetry():
     assert payload["telemetry"] == {
         "activity_summary": "Found context, advanced 1 Workflow",
         "activity": [
-            {"id": "search", "label": "Searched authorized Workflows", "status": "succeeded"}
+            {
+                "id": "search",
+                "tool": "search_workflows",
+                "label": "Searched authorized Workflows",
+                "status": "succeeded",
+                "input_summary": 'query "John Smith"',
+                "result_summary": "1 authorized match, showing 1",
+                "result_items": ["John Smith renewal · active · Acme Brokerage"],
+            }
         ],
         "workflows": [
             {

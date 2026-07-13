@@ -11,7 +11,10 @@ from server.tests.workflows.retrieval_fixtures import ACME_ID, BROKER_ID
 from server.workflows import WorkflowDatabase, WorkflowInspectionContext, WorkflowRetrieval
 from server.workflows.demo_seed import (
     DEMO_BROKER_IDENTIFIER_ID,
+    DEMO_POLICYHOLDER_ID,
     DEMO_WORKFLOW_ID,
+    DemoResetBlockedError,
+    reset_v0_demo,
     seed_v0_demo,
 )
 from server.workflows.retrieval_contracts import WorkflowSearchRequest
@@ -92,3 +95,140 @@ async def test_demo_seed_rejects_changed_identity_configuration(
             broker_party_id=uuid4(),
             organization_party_id=ACME_ID,
         )
+
+
+async def test_demo_reset_deletes_runtime_state_and_restores_only_the_seed(
+    migrated_postgres_url: str,
+    clean_workflow_database,
+):
+    await seed_v0_demo(
+        migrated_postgres_url,
+        broker_party_id=BROKER_ID,
+        organization_party_id=ACME_ID,
+    )
+    engine = create_async_engine(migrated_postgres_url)
+    async with engine.begin() as connection:
+        await connection.execute(
+            sa.text(
+                "INSERT INTO workflows "
+                "(id, kind, objective, status, input, organization_party_id) "
+                "VALUES (:id, 'renewal_outreach.v1', 'Disposable demo run', "
+                "'active', '{\"renewal_period\": \"2027\"}'::jsonb, :organization_id)"
+            ),
+            {"id": uuid4(), "organization_id": ACME_ID},
+        )
+        await connection.execute(
+            sa.text(
+                "INSERT INTO interaction_causes "
+                "(id, cause_type, actor_party_id, content_digest) "
+                "VALUES ('disposable-demo-cause', 'message', :actor_id, 'digest')"
+            ),
+            {"actor_id": BROKER_ID},
+        )
+
+    await reset_v0_demo(
+        migrated_postgres_url,
+        broker_party_id=BROKER_ID,
+        organization_party_id=ACME_ID,
+    )
+
+    async with engine.connect() as connection:
+        workflows = (
+            await connection.execute(sa.text("SELECT id, objective FROM workflows ORDER BY id"))
+        ).all()
+        cause_count = await connection.scalar(sa.text("SELECT count(*) FROM interaction_causes"))
+        party_count = await connection.scalar(sa.text("SELECT count(*) FROM parties"))
+    await engine.dispose()
+
+    assert workflows == [(DEMO_WORKFLOW_ID, "2026 renewal outreach for John Smith")]
+    assert cause_count == 0
+    assert party_count == 3
+
+
+async def test_demo_reset_replaces_only_fixed_demo_identity_configuration(
+    migrated_postgres_url: str,
+    clean_workflow_database,
+):
+    await seed_v0_demo(
+        migrated_postgres_url,
+        broker_party_id=BROKER_ID,
+        organization_party_id=ACME_ID,
+    )
+
+    await reset_v0_demo(
+        migrated_postgres_url,
+        broker_party_id=BROKER_ID,
+        organization_party_id=ACME_ID,
+        broker_email="broker@updated.example",
+        policyholder_email="john@updated.example",
+    )
+
+    engine = create_async_engine(migrated_postgres_url)
+    async with engine.connect() as connection:
+        identifier_rows = (
+            await connection.execute(
+                sa.text(
+                    "SELECT party_id, value FROM party_identifiers "
+                    "WHERE party_id IN (:broker_id, :policyholder_id) "
+                    "AND kind = 'email'"
+                ),
+                {
+                    "broker_id": BROKER_ID,
+                    "policyholder_id": DEMO_POLICYHOLDER_ID,
+                },
+            )
+        ).all()
+        party_count = await connection.scalar(sa.text("SELECT count(*) FROM parties"))
+    await engine.dispose()
+
+    assert dict(identifier_rows) == {
+        BROKER_ID: "broker@updated.example",
+        DEMO_POLICYHOLDER_ID: "john@updated.example",
+    }
+    assert party_count == 3
+
+
+async def test_demo_reset_refuses_to_delete_current_execution_authority(
+    migrated_postgres_url: str,
+    clean_workflow_database,
+):
+    await seed_v0_demo(
+        migrated_postgres_url,
+        broker_party_id=BROKER_ID,
+        organization_party_id=ACME_ID,
+    )
+    job_id = uuid4()
+    engine = create_async_engine(migrated_postgres_url)
+    async with engine.begin() as connection:
+        await connection.execute(
+            sa.text(
+                "INSERT INTO workflow_jobs "
+                "(id, workflow_id, kind, status, attempts, max_attempts, input) "
+                "VALUES (:id, :workflow_id, 'renewal_email.draft.v1', 'running', 1, 3, "
+                '\'{"recipient_name": "John Smith", "renewal_period": "2026", '
+                '"renewal_details": "Details"}\'::jsonb)'
+            ),
+            {"id": job_id, "workflow_id": DEMO_WORKFLOW_ID},
+        )
+        await connection.execute(
+            sa.text(
+                "INSERT INTO workflow_job_runs "
+                "(id, workflow_id, job_id, status, worker_id, lease_expires_at, "
+                "application_build) VALUES "
+                "(:id, :workflow_id, :job_id, 'running', 'qa-worker', now() + interval "
+                "'5 minutes', 'qa-build')"
+            ),
+            {"id": uuid4(), "workflow_id": DEMO_WORKFLOW_ID, "job_id": job_id},
+        )
+
+    with pytest.raises(DemoResetBlockedError):
+        await reset_v0_demo(
+            migrated_postgres_url,
+            broker_party_id=BROKER_ID,
+            organization_party_id=ACME_ID,
+        )
+
+    async with engine.connect() as connection:
+        assert await connection.scalar(sa.text("SELECT count(*) FROM workflows")) == 1
+        assert await connection.scalar(sa.text("SELECT count(*) FROM workflow_job_runs")) == 1
+    await engine.dispose()

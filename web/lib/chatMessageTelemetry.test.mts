@@ -20,8 +20,12 @@ test('renders tool activity and exact approval together in assistant chat', () =
         activity: [
           {
             id: 'search',
+            tool: 'search_workflows',
             label: 'Searched authorized Workflows',
             status: 'succeeded',
+            inputSummary: 'query "John Smith"',
+            resultSummary: '1 authorized match, showing 1',
+            resultItems: ['John Smith renewal · active · Acme Brokerage'],
           },
         ],
         workflows: [
@@ -61,5 +65,8 @@ test('renders tool activity and exact approval together in assistant chat', () =
   assert.match(html, />Approve</);
   assert.doesNotMatch(html, /Approve exact email/);
   assert.match(html, /Found context for 1 Workflow/);
+  assert.match(html, /search_workflows/);
+  assert.match(html, /1 authorized match, showing 1/);
+  assert.match(html, /John Smith renewal · active · Acme Brokerage/);
   assert.match(html, /John Smith renewal outreach/);
 });

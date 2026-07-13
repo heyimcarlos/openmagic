@@ -1,5 +1,7 @@
 import asyncio
 import re
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 from fastapi import status
 from fastapi.responses import JSONResponse, PlainTextResponse
@@ -18,6 +20,7 @@ from ...workflows import (
 from .sessions import get_conversation_session
 
 _BACKGROUND_TASKS: set[asyncio.Task[None]] = set()
+_CHAT_REQUEST_BARRIER = asyncio.Lock()
 _VERIFICATION_CODE = re.compile(r"(?<!\d)(\d{3})[\s-]?(\d{3})(?!\d)")
 
 
@@ -31,6 +34,13 @@ def _extract_latest_user_message(payload: ChatRequest) -> ChatMessage | None:
 
 # Process incoming chat requests by routing them to the interaction agent runtime
 async def handle_chat_request(payload: ChatRequest) -> PlainTextResponse | JSONResponse:
+    """Schedule one chat request unless the local demo is being reset."""
+
+    async with _CHAT_REQUEST_BARRIER:
+        return await _schedule_chat_request(payload)
+
+
+async def _schedule_chat_request(payload: ChatRequest) -> PlainTextResponse | JSONResponse:
     """Handle a chat request using the InteractionAgentRuntime."""
 
     # Extract user message
@@ -107,6 +117,10 @@ async def handle_chat_request(payload: ChatRequest) -> PlainTextResponse | JSONR
                     cause_id=user_message.id,
                 )
                 if verified.status == "verified" and verified.challenge_id is not None:
+                    session.log.record_reply(
+                        "Your identity is verified. I'm continuing your request.",
+                        cause_id=user_message.id,
+                    )
                     return
                 if verified.status == "no_active_challenge":
                     session.log.record_reply(
@@ -142,3 +156,16 @@ async def handle_chat_request(payload: ChatRequest) -> PlainTextResponse | JSONR
     task.add_done_callback(_BACKGROUND_TASKS.discard)
 
     return PlainTextResponse("", status_code=status.HTTP_202_ACCEPTED)
+
+
+@asynccontextmanager
+async def pause_chat_requests() -> AsyncIterator[None]:
+    """Fence new chat work and cancel every local in-flight Interaction turn."""
+
+    async with _CHAT_REQUEST_BARRIER:
+        tasks = tuple(_BACKGROUND_TASKS)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        yield

@@ -4,6 +4,7 @@
 from . import identity_models as _identity_models  # noqa: F401
 from .activity import (
     InteractionActivityAction,
+    InteractionActivityPresentation,
     InteractionActivityReceipt,
     InteractionActivityStatus,
     InteractionActivityStore,
@@ -60,7 +61,7 @@ from .contracts import (
 )
 from .control_plane import WorkflowControlPlane
 from .database import WorkflowDatabase
-from .demo_seed import seed_v0_demo
+from .demo_seed import DemoResetBlockedError, reset_v0_demo, seed_v0_demo
 from .email_adapter import (
     COMPOSIO_GMAIL_TOOLKIT_VERSION,
     ComposioGmailSendAdapter,
@@ -175,6 +176,7 @@ __all__ = [
     "ComposioMailboxBinding",
     "ComposioVerificationEmailSender",
     "CreateWorkflowCommand",
+    "DemoResetBlockedError",
     "DeterministicEmailSendAdapter",
     "DeterministicVerificationEmailSender",
     "DraftRenewalEmailOutput",
@@ -186,6 +188,7 @@ __all__ = [
     "ExecutionStrategy",
     "InsuranceTaskOutput",
     "InteractionActivityAction",
+    "InteractionActivityPresentation",
     "InteractionActivityReceipt",
     "InteractionActivityStatus",
     "InteractionActivityStore",
@@ -268,6 +271,7 @@ __all__ = [
     "find_sms_party",
     "find_sms_party_by_id",
     "normalize_sms_phone",
+    "reset_v0_demo",
     "resolve_sms_party",
     "resolve_verified_mailbox",
     "seed_v0_demo",
