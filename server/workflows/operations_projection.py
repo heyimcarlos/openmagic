@@ -28,6 +28,7 @@ class WorkflowOperationalJob:
     status: str
     attempts: int
     max_attempts: int
+    revises_job_id: UUID | None
     created_at: datetime
 
 
@@ -338,6 +339,7 @@ class WorkflowOperationsProjection:
                     status=job.status,
                     attempts=job.attempts,
                     max_attempts=job.max_attempts,
+                    revises_job_id=job.revises_job_id,
                     created_at=job.created_at,
                 )
                 for job in jobs

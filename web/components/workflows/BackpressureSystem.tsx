@@ -5,6 +5,7 @@ import { LoaderCircleIcon } from 'lucide-react';
 
 import { AppViewNav } from '@/components/app/AppViewNav';
 import { SIMULATED_SMS_SENDERS } from '@/components/chat/SmsContactHeader';
+import type { ApprovalEmail } from '@/components/workflows/ApprovalRequestCard';
 import { BackpressureFlow } from '@/components/workflows/BackpressureFlow';
 import { BackpressureTimeline } from '@/components/workflows/BackpressureTimeline';
 import { backpressureTimelineReducer } from '@/lib/backpressureTimeline';
@@ -13,6 +14,9 @@ import type { ApprovalRequest } from '@/lib/chatTelemetry';
 
 const endpoint = '/api/demo/backpressure';
 const broker = SIMULATED_SMS_SENDERS.find((sender) => sender.id === 'broker');
+const parseAddresses = (value?: string) => (
+  value?.split(',').map((item) => item.trim()).filter(Boolean) ?? []
+);
 
 export function BackpressureSystem() {
   const [timeline, dispatchTimeline] = useReducer(backpressureTimelineReducer, {
@@ -111,7 +115,10 @@ export function BackpressureSystem() {
     }
   }, []);
 
-  const approveExactEmail = useCallback(async (approval: ApprovalRequest) => {
+  const approveExactEmail = useCallback(async (
+    approval: ApprovalRequest,
+    revision?: ApprovalEmail,
+  ) => {
     if (!broker) {
       setError('The demo Broker identity is unavailable');
       return;
@@ -127,6 +134,15 @@ export function BackpressureSystem() {
           workflow_id: approval.workflowId,
           job_id: approval.jobId,
           expected_draft_revision_id: approval.draftRevisionId,
+          ...(revision ? {
+            revised_email: {
+              to: parseAddresses(revision.to),
+              cc: parseAddresses(revision.cc),
+              bcc: parseAddresses(revision.bcc),
+              subject: revision.subject.trim(),
+              body: revision.body,
+            },
+          } : {}),
         }),
       });
       const payload: unknown = await response.json().catch(() => ({}));

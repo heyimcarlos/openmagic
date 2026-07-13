@@ -30,6 +30,10 @@ import {
 
 import { Button } from '@/components/ui/button';
 import {
+  ApprovalRequestCard,
+  type ApprovalEmail,
+} from '@/components/workflows/ApprovalRequestCard';
+import {
   buildBackpressureLabScene,
   type BackpressureLabJob,
   type BackpressureLabScene,
@@ -163,7 +167,7 @@ export function BackpressureFlow({
   onAddWorkflows: (workflowCount: number) => void;
   onAddWorker: () => void;
   onRemoveWorker: (workerId: string) => void;
-  onApprove: (approval: ApprovalRequest) => void;
+  onApprove: (approval: ApprovalRequest, revision?: ApprovalEmail) => void;
 }) {
   return (
     <ReactFlowProvider>
@@ -201,7 +205,7 @@ function BackpressureLabCanvas({
   onAddWorkflows: (workflowCount: number) => void;
   onAddWorker: () => void;
   onRemoveWorker: (workerId: string) => void;
-  onApprove: (approval: ApprovalRequest) => void;
+  onApprove: (approval: ApprovalRequest, revision?: ApprovalEmail) => void;
 }) {
   const [selection, setSelection] = useState<LabSelection>();
   const [reviewingJobId, setReviewingJobId] = useState<string>();
@@ -535,6 +539,11 @@ function QueueNode({ data }: { data: QueueData }) {
             </Button>
           ))}
         </div>
+        {data.scene.latestBoundary && (
+          <p className="mt-2 truncate text-[0.58rem] text-muted-foreground">
+            boundary <code className="text-primary">{data.scene.latestBoundary}</code>
+          </p>
+        )}
       </header>
       <div className="min-h-0 flex-1 space-y-1.5 px-3 py-2.5">
         {data.scene.jobs.map((job) => (
@@ -584,6 +593,11 @@ function QueueJob({
             job.status === 'queued' ? 'bg-amber-500' : 'bg-slate-300',
         )} />
         <span className="min-w-0 flex-1 truncate text-[0.68rem] font-medium">{job.taskSummary}</span>
+        {job.revision > 1 && (
+          <code className="shrink-0 rounded bg-primary/10 px-1 text-[0.5rem] text-primary">
+            R{job.revision}
+          </code>
+        )}
         <code className="shrink-0 text-[0.55rem] uppercase text-muted-foreground">
           {displayJobStatus(job.status)}
         </code>
@@ -860,47 +874,36 @@ function ApprovalReview({
 }: {
   approval: ApprovalRequest;
   approving: boolean;
-  onApprove: (approval: ApprovalRequest) => void;
+  onApprove: (approval: ApprovalRequest, revision?: ApprovalEmail) => void;
   onClose: () => void;
 }) {
   return (
     <aside className="absolute inset-y-3 right-3 z-20 flex w-[min(25rem,calc(100%-1.5rem))] flex-col overflow-hidden rounded-2xl border bg-card shadow-xl">
       <header className="flex items-center justify-between gap-3 border-b px-4 py-3">
-        <div>
-          <h2 className="flex items-center gap-2 text-sm font-medium">
-            <UserCheckIcon className="size-4 text-primary" />
-            Review exact email
-          </h2>
-          <p className="mt-0.5 text-[0.6rem] text-muted-foreground">Revision {approval.revision}</p>
-        </div>
+        <p className="text-[0.65rem] text-muted-foreground">
+          Interaction Agent approval request
+        </p>
         <Button size="icon" variant="ghost" onClick={onClose} aria-label="Close approval review">
           <XIcon />
         </Button>
       </header>
-      <div className="min-h-0 flex-1 space-y-2 overflow-y-auto px-4 py-3 text-xs">
-        <ApprovalField label="From" value={approval.sender} />
-        <ApprovalField label="To" value={approval.to.join(', ')} />
-        <ApprovalField label="Cc" value={approval.cc.join(', ') || 'None'} />
-        <ApprovalField label="Bcc" value={approval.bcc.join(', ') || 'None'} />
-        <ApprovalField label="Subject" value={approval.subject} />
-        <div className="whitespace-pre-wrap rounded-lg bg-muted/60 p-3 leading-5">{approval.body}</div>
+      <div className="min-h-0 flex-1 overflow-y-auto p-3">
+        <ApprovalRequestCard
+          revision={approval.revision}
+          email={{
+            from: approval.sender,
+            to: approval.to.join(', '),
+            cc: approval.cc.join(', '),
+            bcc: approval.bcc.join(', '),
+            subject: approval.subject,
+            body: approval.body,
+          }}
+          disabled={approving}
+          statusMessage={approving ? 'Recording the exact revision…' : undefined}
+          onApprove={(revision) => onApprove(approval, revision)}
+        />
       </div>
-      <footer className="border-t p-3">
-        <Button className="w-full" disabled={approving} onClick={() => onApprove(approval)}>
-          {approving ? <LoaderCircleIcon className="animate-spin" /> : <UserCheckIcon />}
-          Approve exact email
-        </Button>
-      </footer>
     </aside>
-  );
-}
-
-function ApprovalField({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="grid grid-cols-[3.5rem_1fr] gap-2">
-      <span className="text-muted-foreground">{label}</span>
-      <span className="break-words font-medium">{value}</span>
-    </div>
   );
 }
 

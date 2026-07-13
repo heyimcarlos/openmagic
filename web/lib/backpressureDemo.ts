@@ -62,6 +62,7 @@ export interface BackpressureJob {
   status: BackpressureJobStatus;
   attempts: number;
   maxAttempts: number;
+  revision: number;
   createdAt: string;
 }
 
@@ -95,6 +96,7 @@ export interface BackpressureActivity {
   workflowId: string;
   jobId?: string;
   runId?: string;
+  boundary?: string;
   occurredAt: string;
 }
 
@@ -140,6 +142,7 @@ export interface BackpressureLabScene {
   notifications: ReadonlyArray<BackpressureNotification>;
   interactions: ReadonlyArray<BackpressureNotification>;
   latestActivity?: BackpressureActivity;
+  latestBoundary?: string;
 }
 
 const jobStatusSet = new Set<string>(jobStatuses);
@@ -268,10 +271,22 @@ function parseJob(value: unknown): BackpressureJob | undefined {
   const jobStatus = status<BackpressureJobStatus>(value.status, jobStatusSet);
   const attempts = count(value.attempts);
   const maxAttempts = count(value.max_attempts);
+  const revision = count(value.revision);
   const createdAt = date(value.created_at);
   return id && workflowId && kind && label && taskSummary && jobStatus && attempts !== undefined &&
-    maxAttempts !== undefined && createdAt
-    ? { id, workflowId, kind, label, taskSummary, status: jobStatus, attempts, maxAttempts, createdAt }
+    maxAttempts !== undefined && revision !== undefined && revision > 0 && createdAt
+    ? {
+        id,
+        workflowId,
+        kind,
+        label,
+        taskSummary,
+        status: jobStatus,
+        attempts,
+        maxAttempts,
+        revision,
+        createdAt,
+      }
     : undefined;
 }
 
@@ -333,9 +348,11 @@ function parseActivity(value: unknown): BackpressureActivity | undefined {
   const workflowId = text(value.workflow_id);
   const jobId = optionalText(value.job_id);
   const runId = optionalText(value.run_id);
+  const boundary = optionalText(value.boundary);
   const occurredAt = date(value.occurred_at);
-  return id && type && source && workflowId && jobId !== false && runId !== false && occurredAt
-    ? { id, type, source, workflowId, jobId, runId, occurredAt }
+  return id && type && source && workflowId && jobId !== false && runId !== false &&
+    boundary !== false && occurredAt
+    ? { id, type, source, workflowId, jobId, runId, boundary, occurredAt }
     : undefined;
 }
 
@@ -476,5 +493,6 @@ export function buildBackpressureLabScene(
     notifications: [...pendingNotifications, ...recentDelivered].slice(0, 5),
     interactions: delivered.slice(0, 5),
     latestActivity: snapshot.activity[0],
+    latestBoundary: snapshot.activity.find((item) => item.boundary)?.boundary,
   };
 }

@@ -103,6 +103,7 @@ class BackpressureJobView(DemoModel):
     status: JobStatus
     attempts: int
     max_attempts: int
+    revision: int
     created_at: datetime
 
 
@@ -149,6 +150,7 @@ class BackpressureActivityView(DemoModel):
     workflow_id: UUID
     job_id: UUID | None = None
     run_id: UUID | None = None
+    boundary: str | None = None
     occurred_at: datetime
 
 
@@ -271,6 +273,7 @@ class BackpressureDemoService:
         run_counts = Counter(dict(projected.totals.run_status_counts))
         notification_counts = Counter(dict(projected.totals.notification_status_counts))
         jobs_by_id = {job.id: job for job in jobs}
+        revision_by_job_id = self._job_revisions(jobs)
         approved_job_ids: set[UUID] = {
             event.job_id
             for event in projected.events
@@ -315,6 +318,7 @@ class BackpressureDemoService:
                 workflow_id=event.workflow_id,
                 job_id=event.job_id,
                 run_id=event.run_id,
+                boundary=self._activity_boundary(event),
                 occurred_at=event.occurred_at,
             )
             for event in projected.events
@@ -403,6 +407,7 @@ class BackpressureDemoService:
                     status=cast(JobStatus, job.status),
                     attempts=job.attempts,
                     max_attempts=job.max_attempts,
+                    revision=revision_by_job_id[job.id],
                     created_at=job.created_at,
                 )
                 for job in jobs
@@ -442,6 +447,48 @@ class BackpressureDemoService:
 
     async def dispose(self) -> None:
         await self._database.dispose()
+
+    @staticmethod
+    def _job_revisions(
+        jobs: tuple[WorkflowOperationalJob, ...],
+    ) -> dict[UUID, int]:
+        jobs_by_id = {job.id: job for job in jobs}
+        revisions: dict[UUID, int] = {}
+
+        def resolve(job: WorkflowOperationalJob, seen: frozenset[UUID] = frozenset()) -> int:
+            if job.id in revisions:
+                return revisions[job.id]
+            if job.id in seen or job.revises_job_id is None:
+                revisions[job.id] = 1
+                return 1
+            parent = jobs_by_id.get(job.revises_job_id)
+            if parent is None or parent.kind != job.kind:
+                revisions[job.id] = 1
+                return 1
+            revisions[job.id] = resolve(parent, seen | {job.id}) + 1
+            return revisions[job.id]
+
+        for job in jobs:
+            resolve(job)
+        return revisions
+
+    @staticmethod
+    def _activity_boundary(event: WorkflowOperationalEvent) -> str | None:
+        if event.event_type == "workflow_work_revised":
+            return (
+                "revise_and_approve_email"
+                if event.data.get("approved") is True
+                else "revise_workflow_work"
+            )
+        if event.event_type == "workflow_jobs_proposed":
+            if "source_workflow_id" in event.data:
+                return "propose_workflow"
+            if event.cause_id.startswith(_CAUSE_PREFIX):
+                return "create_workflow"
+            return "propose_workflow_work"
+        if event.event_type == "approval_granted":
+            return "approve_job"
+        return None
 
     @staticmethod
     def _job_label(job: WorkflowOperationalJob) -> str:

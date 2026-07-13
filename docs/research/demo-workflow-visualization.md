@@ -89,9 +89,9 @@ The implemented projection is bounded to the latest 50 demo Workflows and 200 du
 
 ## Product command boundary
 
-The Interaction Agent now exposes `propose_workflow_work`, with a closed, registry-owned business operation schema. The current `prepare_renewal_email` operation compiles inside the Control Plane to its trusted Draft and Send Job graph. The model cannot supply executor keys, prompts, dependency graphs, retry policy, private addresses, or notification routing. Old stored verification operations are upgraded on read for durable compatibility, but the renewal-specific tool is no longer exposed to the model.
+The Interaction Agent exposes `propose_workflow_work`, with a closed, registry-owned business operation schema. It also exposes `propose_workflow` for a new business objective derived from one authorized source Workflow. Both paths compile inside the Control Plane to a trusted Job graph. The model cannot supply executor keys, prompts, dependency graphs, retry policy, private addresses, or notification routing.
 
-The `/system` load controls call the typed `create_workflow` Control Plane command directly because they are engineering controls, not chat tools. Business-facing chat calls `propose_workflow_work`, which targets the same registry and durable proposal protocol without exposing orchestration vocabulary.
+The `/system` load controls call the typed `create_workflow` Control Plane command directly because they are engineering controls, not chat tools. Business-facing chat uses `propose_workflow_work` for an existing objective and `propose_workflow` for a new objective. The playground names the observed command boundary. Its approval editor uses the shared deterministic `revise_and_approve_email` path, which replaces safely cancelable Draft and Send Jobs with an immutable approved revision. A conversational edit without approval uses `revise_workflow_work` and presents the replacement again.
 
 ## GAN Lab interaction model
 
@@ -109,4 +109,4 @@ The timeline is observational. It never rolls the database backward and never in
 
 ## Branch compatibility audit
 
-The `codex/issue-13-verification` work is integrated through PR 38 and commit `57c1241`. PR 42 is merged into this branch from `main` at commit `4d97bd3`, including the user-facing chat and live Workflow telemetry work. The `/system` route remains an interviewer-only engineering surface while sharing the current Workflow runtime and public package interfaces.
+The `codex/issue-13-verification` work is integrated through PR 38 and commit `57c1241`. PR 42 adds the user-facing chat and live Workflow telemetry work. PR 45 adds generalized Workflow creation and immutable email revision. The `/system` route remains an interviewer-only engineering surface while sharing the current Workflow runtime and public package interfaces.

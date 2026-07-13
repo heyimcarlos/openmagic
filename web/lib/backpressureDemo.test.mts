@@ -55,6 +55,7 @@ const payload = {
       status: 'queued',
       attempts: 0,
       max_attempts: 2,
+      revision: 1,
       created_at: '2026-07-13T14:00:00Z',
     },
     {
@@ -66,6 +67,7 @@ const payload = {
       status: 'running',
       attempts: 1,
       max_attempts: 2,
+      revision: 1,
       created_at: '2026-07-13T14:00:01Z',
     },
   ],
@@ -128,6 +130,7 @@ const payload = {
       workflow_id: 'workflow-1',
       job_id: null,
       run_id: null,
+      boundary: 'create_workflow',
       occurred_at: '2026-07-13T14:00:05Z',
     },
     {
@@ -137,6 +140,7 @@ const payload = {
       workflow_id: 'workflow-2',
       job_id: null,
       run_id: null,
+      boundary: null,
       occurred_at: '2026-07-13T14:00:04Z',
     },
     {
@@ -146,6 +150,7 @@ const payload = {
       workflow_id: 'workflow-2',
       job_id: 'job-running',
       run_id: 'run-1',
+      boundary: null,
       occurred_at: '2026-07-13T14:00:04Z',
     },
     {
@@ -155,6 +160,7 @@ const payload = {
       workflow_id: 'workflow-3',
       job_id: null,
       run_id: null,
+      boundary: null,
       occurred_at: '2026-07-13T14:00:03Z',
     },
   ],
@@ -186,6 +192,7 @@ test('parses the live projection and derives explicit Job-to-Worker assignments'
     runtimeInstanceId: 'runtime-fresh-1',
   });
   assert.equal(scene.runs[0]?.taskSummary, 'Draft the 2026 renewal for Demo Policyholder 2');
+  assert.equal(scene.jobs[0]?.revision, 1);
   assert.deepEqual(
     scene.notifications.map((item) => item.id),
     ['notification-queued', 'notification-delivered'],
@@ -197,6 +204,7 @@ test('parses the live projection and derives explicit Job-to-Worker assignments'
   );
   assert.equal(snapshot.approvalRequests[0]?.jobId, 'send-job-3');
   assert.equal(scene.latestActivity?.type, 'workflow_jobs_proposed');
+  assert.equal(scene.latestBoundary, 'create_workflow');
 });
 
 test('rejects malformed operational projections instead of animating invented state', () => {

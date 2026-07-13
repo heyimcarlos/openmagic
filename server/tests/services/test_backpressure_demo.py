@@ -10,9 +10,13 @@ from server.workflows import (
     AcknowledgeNotificationCommand,
     ClaimNotificationCommand,
     ClaimWorkflowJobCommand,
+    RecordInteractionCauseCommand,
     ReportRunResultCommand,
+    ReviseAndApproveWorkflowEmailCommand,
+    RevisedEmailContent,
     RunResult,
     StaticWorkflowAuthority,
+    WorkflowCommandContext,
     WorkflowControlPlane,
     WorkflowDatabase,
     default_workflow_registry,
@@ -234,6 +238,84 @@ async def test_snapshot_projects_exact_approval_and_fresh_interaction_identity(
     assert snapshot.approval_requests[0].draft_revision_id == presentation.draft_job_id
     assert snapshot.approval_requests[0].subject == "2026 renewal"
     assert snapshot.approval_requests[0].body == "Hello John"
+
+    await database.dispose()
+    await service.dispose()
+
+
+async def test_snapshot_projects_immutable_email_revision_boundary(
+    migrated_postgres_url: str,
+    seeded_workflow_identity,
+):
+    service = _service(migrated_postgres_url)
+    await service.enqueue_workflows(1, "renewal")
+    database = WorkflowDatabase(migrated_postgres_url)
+    control_plane = WorkflowControlPlane(
+        database=database,
+        registry=default_workflow_registry(),
+        authority=StaticWorkflowAuthority(grants=set()),
+    )
+    draft = await control_plane.claim_job(
+        ClaimWorkflowJobCommand(
+            worker_id="demo-worker",
+            application_build="test-build",
+            lease_duration=timedelta(minutes=5),
+            executor_keys=("renewal_email_drafter",),
+        )
+    )
+    assert draft is not None
+    await control_plane.report_run_result(
+        ReportRunResultCommand(
+            run_id=draft.run_id,
+            result=RunResult(
+                outcome="succeeded",
+                data={"subject": "Original renewal", "body": "Original body"},
+                evidence=({"type": "deterministic-test"},),
+            ),
+        )
+    )
+    before_revision = await service.snapshot()
+    send = next(job for job in before_revision.jobs if job.status == "waiting")
+    context = WorkflowCommandContext(
+        actor_party_id=BROKER_ID,
+        organization_party_id=ORGANIZATION_ID,
+        cause_type="ui_action",
+        cause_id=f"revision-test:{send.id}",
+    )
+    await control_plane.record_interaction_cause(
+        RecordInteractionCauseCommand(
+            context=context,
+            content="Revise the reviewable renewal email",
+        )
+    )
+
+    approval = await control_plane.revise_and_approve_email(
+        ReviseAndApproveWorkflowEmailCommand(
+            context=context,
+            workflow_id=send.workflow_id,
+            job_id=send.id,
+            expected_draft_revision_id=draft.job_id,
+            email=RevisedEmailContent(
+                to=("john@example.com",),
+                subject="Revised renewal",
+                body="Revised body",
+            ),
+        )
+    )
+
+    snapshot = await service.snapshot()
+
+    assert any(
+        item.type == "workflow_work_revised"
+        and item.boundary == "revise_and_approve_email"
+        for item in snapshot.activity
+    )
+    revised_draft = next(job for job in snapshot.jobs if job.id == approval.draft_job_id)
+    revised_send = next(job for job in snapshot.jobs if job.id == approval.job_id)
+    assert revised_draft.revision == 2
+    assert revised_send.revision == 2
+    assert revised_send.status == "queued"
+    assert next(job for job in snapshot.jobs if job.id == send.id).status == "cancelled"
 
     await database.dispose()
     await service.dispose()
