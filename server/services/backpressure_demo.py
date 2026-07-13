@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections import Counter
 from collections.abc import Callable, Iterable
-from datetime import datetime, timedelta
+from datetime import datetime
 from functools import lru_cache
 from statistics import median
 from typing import Literal, cast
@@ -15,8 +15,10 @@ from pydantic import BaseModel, ConfigDict
 
 from server.config import Settings
 from server.workflows import (
+    CLAIM_INTAKE_REVIEW_KIND,
     DRAFT_RENEWAL_EMAIL_KIND,
     GMAIL_SEND_EMAIL_KIND,
+    POLICY_COVERAGE_REVIEW_KIND,
     RENEWAL_OUTREACH_KIND,
     CreateWorkflowCommand,
     RecordInteractionCauseCommand,
@@ -24,11 +26,17 @@ from server.workflows import (
     WorkflowCommandContext,
     WorkflowControlPlane,
     WorkflowDatabase,
-    WorkflowJobProposal,
+    WorkflowOperationalEvent,
     WorkflowOperationalJob,
     WorkflowOperationsProjection,
-    WorkflowProposal,
     default_workflow_registry,
+)
+
+from .backpressure_workload import (
+    MIXED_WORKFLOW_SCENARIOS,
+    DemoWorkflowScenario,
+    DemoWorkflowSelection,
+    build_demo_workflow_proposal,
 )
 
 _CAUSE_PREFIX = "demo-backpressure:"
@@ -95,6 +103,7 @@ class BackpressureJobView(DemoModel):
     status: JobStatus
     attempts: int
     max_attempts: int
+    revision: int
     created_at: datetime
 
 
@@ -116,8 +125,22 @@ class BackpressureNotificationView(DemoModel):
     attempts: int
     claimed_by: str | None
     delivered_by: str | None
+    interaction_runtime_instance_id: UUID | None = None
     created_at: datetime
     delivered_at: datetime | None
+
+
+class BackpressureApprovalView(DemoModel):
+    workflow_id: UUID
+    job_id: UUID
+    draft_revision_id: UUID
+    revision: int
+    sender: str
+    to: tuple[str, ...]
+    cc: tuple[str, ...] = ()
+    bcc: tuple[str, ...] = ()
+    subject: str
+    body: str
 
 
 class BackpressureActivityView(DemoModel):
@@ -127,6 +150,7 @@ class BackpressureActivityView(DemoModel):
     workflow_id: UUID
     job_id: UUID | None = None
     run_id: UUID | None = None
+    boundary: str | None = None
     occurred_at: datetime
 
 
@@ -139,6 +163,7 @@ class BackpressureSnapshot(DemoModel):
     jobs: tuple[BackpressureJobView, ...]
     runs: tuple[BackpressureRunView, ...]
     notifications: tuple[BackpressureNotificationView, ...]
+    approval_requests: tuple[BackpressureApprovalView, ...]
     activity: tuple[BackpressureActivityView, ...]
 
 
@@ -168,26 +193,49 @@ class BackpressureDemoService:
             registry=default_workflow_registry(),
             authority=StaticWorkflowAuthority(
                 grants={
-                    (
-                        self._broker_party_id,
-                        self._organization_party_id,
+                    (self._broker_party_id, self._organization_party_id, workflow_kind)
+                    for workflow_kind in (
                         RENEWAL_OUTREACH_KIND,
+                        CLAIM_INTAKE_REVIEW_KIND,
+                        POLICY_COVERAGE_REVIEW_KIND,
                     )
                 }
             ),
         )
 
-    async def enqueue_jobs(self, job_count: int) -> BackpressureSnapshot:
-        """Create complete two-Job renewal graphs through atomic Control Plane commands."""
+    async def enqueue_workflows(
+        self,
+        workflow_count: int,
+        scenario: DemoWorkflowSelection = "mixed",
+    ) -> BackpressureSnapshot:
+        """Create varied, complete Workflow graphs through Control Plane commands."""
 
-        if job_count < 2 or job_count > 100 or job_count % 2 != 0:
-            raise ValueError("job_count must be an even number from 2 through 100")
+        if workflow_count < 1 or workflow_count > 50:
+            raise ValueError("workflow_count must be from 1 through 50")
+        if scenario not in {"mixed", "renewal", "claim", "policy"}:
+            raise ValueError("scenario is not recognized")
+        start = uuid4().int % len(MIXED_WORKFLOW_SCENARIOS)
+        scenarios: tuple[DemoWorkflowScenario, ...] = tuple(
+            MIXED_WORKFLOW_SCENARIOS[
+                (start + index) % len(MIXED_WORKFLOW_SCENARIOS)
+            ]
+            if scenario == "mixed"
+            else scenario
+            for index in range(workflow_count)
+        )
         await asyncio.gather(
-            *(self._create_workflow(index) for index in range(1, job_count // 2 + 1))
+            *(
+                self._create_workflow(index, workflow_scenario)
+                for index, workflow_scenario in enumerate(scenarios, start=1)
+            )
         )
         return await self.snapshot()
 
-    async def _create_workflow(self, index: int) -> None:
+    async def _create_workflow(
+        self,
+        index: int,
+        scenario: DemoWorkflowScenario,
+    ) -> None:
         request_id = uuid4()
         cause_id = f"{_CAUSE_PREFIX}{request_id}"
         context = WorkflowCommandContext(
@@ -199,37 +247,18 @@ class BackpressureDemoService:
         await self._control_plane.record_interaction_cause(
             RecordInteractionCauseCommand(
                 context=context,
-                content=f"Queue backpressure demo Workflow {index}",
+                content=f"Queue {scenario} backpressure demo Workflow {index}",
             )
         )
         await self._control_plane.create_workflow(
             CreateWorkflowCommand(
                 context=context,
-                proposal=WorkflowProposal(
-                    kind=RENEWAL_OUTREACH_KIND,
-                    objective=f"Backpressure demo renewal {request_id.hex[:8]}",
-                    input={"renewal_period": "2026"},
-                    jobs=(
-                        WorkflowJobProposal(
-                            key="draft",
-                            kind=DRAFT_RENEWAL_EMAIL_KIND,
-                            input={
-                                "recipient_name": f"Demo Policyholder {index}",
-                                "renewal_period": "2026",
-                            },
-                        ),
-                        WorkflowJobProposal(
-                            key="send",
-                            kind=GMAIL_SEND_EMAIL_KIND,
-                            input={
-                                "sender_mailbox": self._settings.demo_broker_email,
-                                "to": [self._settings.demo_policyholder_email],
-                                "subject": {"job_output": "draft", "field": "subject"},
-                                "body": {"job_output": "draft", "field": "body"},
-                            },
-                            depends_on=("draft",),
-                        ),
-                    ),
+                proposal=build_demo_workflow_proposal(
+                    scenario,
+                    index=index,
+                    request_id=request_id,
+                    broker_email=self._settings.demo_broker_email,
+                    policyholder_email=self._settings.demo_policyholder_email,
                 ),
             )
         )
@@ -240,19 +269,46 @@ class BackpressureDemoService:
         jobs = projected.jobs
         runs = projected.job_runs
         notifications = projected.notifications
-        job_counts = Counter(job.status for job in jobs)
-        run_counts = Counter(run.status for run in runs)
-        notification_counts = Counter(item.status for item in notifications)
+        job_counts = Counter(dict(projected.totals.job_status_counts))
+        run_counts = Counter(dict(projected.totals.run_status_counts))
+        notification_counts = Counter(dict(projected.totals.notification_status_counts))
         jobs_by_id = {job.id: job for job in jobs}
+        revision_by_job_id = self._job_revisions(jobs)
+        approved_job_ids: set[UUID] = {
+            event.job_id
+            for event in projected.events
+            if event.event_type == "approval_granted" and event.job_id is not None
+        }
+        presentation_by_job = {
+            event.job_id: event
+            for event in projected.events
+            if event.event_type == "approval_presentation_committed"
+            and event.job_id is not None
+        }
+        interaction_runtime_by_notification: dict[UUID, UUID] = {}
+        for event in presentation_by_job.values():
+            runtime_id = event.data.get("interaction_runtime_instance_id")
+            if event.cause_type != "notification" or not isinstance(runtime_id, str):
+                continue
+            try:
+                interaction_runtime_by_notification[UUID(event.cause_id)] = UUID(runtime_id)
+            except ValueError:
+                continue
+        approval_requests = self._approval_requests(
+            jobs,
+            presentation_by_job,
+            approved_job_ids,
+        )
         first_job_at_by_workflow: dict[UUID, datetime] = {}
         for job in jobs:
             first_job_at_by_workflow[job.workflow_id] = min(
                 job.created_at,
                 first_job_at_by_workflow.get(job.workflow_id, job.created_at),
             )
-        queued_at = [job.created_at for job in jobs if job.status == "queued"]
         oldest_queued_seconds = (
-            max(0, int((now - min(queued_at)).total_seconds())) if queued_at else 0
+            max(0, int((now - projected.totals.oldest_queued_at).total_seconds()))
+            if projected.totals.oldest_queued_at is not None
+            else 0
         )
         activity = [
             BackpressureActivityView(
@@ -262,6 +318,7 @@ class BackpressureDemoService:
                 workflow_id=event.workflow_id,
                 job_id=event.job_id,
                 run_id=event.run_id,
+                boundary=self._activity_boundary(event),
                 occurred_at=event.occurred_at,
             )
             for event in projected.events
@@ -322,8 +379,8 @@ class BackpressureDemoService:
                 ),
             ),
             counts=BackpressureCounts(
-                workflows=projected.workflow_count,
-                jobs=len(jobs),
+                workflows=projected.total_workflow_count,
+                jobs=sum(job_counts.values()),
                 waiting=job_counts["waiting"],
                 queued=job_counts["queued"],
                 running=job_counts["running"],
@@ -337,13 +394,7 @@ class BackpressureDemoService:
                 notifications_delivering=notification_counts["delivering"],
                 notifications_delivered=notification_counts["delivered"],
                 notifications_failed=notification_counts["failed"],
-                completed_last_minute=sum(
-                    1
-                    for run in runs
-                    if run.status == "succeeded"
-                    and run.finished_at is not None
-                    and run.finished_at >= now - timedelta(minutes=1)
-                ),
+                completed_last_minute=projected.totals.completed_last_minute,
                 oldest_queued_seconds=oldest_queued_seconds,
             ),
             jobs=tuple(
@@ -351,15 +402,12 @@ class BackpressureDemoService:
                     id=job.id,
                     workflow_id=job.workflow_id,
                     kind=job.kind,
-                    label=(
-                        "Draft renewal email"
-                        if job.kind == DRAFT_RENEWAL_EMAIL_KIND
-                        else "Send approved email"
-                    ),
+                    label=self._job_label(job),
                     task_summary=self._task_summary(job),
                     status=cast(JobStatus, job.status),
                     attempts=job.attempts,
                     max_attempts=job.max_attempts,
+                    revision=revision_by_job_id[job.id],
                     created_at=job.created_at,
                 )
                 for job in jobs
@@ -385,16 +433,75 @@ class BackpressureDemoService:
                     attempts=item.attempts,
                     claimed_by=item.claimed_by,
                     delivered_by=item.delivered_by,
+                    interaction_runtime_instance_id=(
+                        interaction_runtime_by_notification.get(item.id)
+                    ),
                     created_at=item.created_at,
                     delivered_at=item.delivered_at,
                 )
                 for item in notifications
             ),
+            approval_requests=approval_requests,
             activity=tuple(activity[:80]),
         )
 
     async def dispose(self) -> None:
         await self._database.dispose()
+
+    @staticmethod
+    def _job_revisions(
+        jobs: tuple[WorkflowOperationalJob, ...],
+    ) -> dict[UUID, int]:
+        jobs_by_id = {job.id: job for job in jobs}
+        revisions: dict[UUID, int] = {}
+
+        def resolve(job: WorkflowOperationalJob, seen: frozenset[UUID] = frozenset()) -> int:
+            if job.id in revisions:
+                return revisions[job.id]
+            if job.id in seen or job.revises_job_id is None:
+                revisions[job.id] = 1
+                return 1
+            parent = jobs_by_id.get(job.revises_job_id)
+            if parent is None or parent.kind != job.kind:
+                revisions[job.id] = 1
+                return 1
+            revisions[job.id] = resolve(parent, seen | {job.id}) + 1
+            return revisions[job.id]
+
+        for job in jobs:
+            resolve(job)
+        return revisions
+
+    @staticmethod
+    def _activity_boundary(event: WorkflowOperationalEvent) -> str | None:
+        if event.event_type == "workflow_work_revised":
+            return (
+                "revise_and_approve_email"
+                if event.data.get("approved") is True
+                else "revise_workflow_work"
+            )
+        if event.event_type == "workflow_jobs_proposed":
+            if "source_workflow_id" in event.data:
+                return "propose_workflow"
+            if event.cause_id.startswith(_CAUSE_PREFIX):
+                return "create_workflow"
+            return "propose_workflow_work"
+        if event.event_type == "approval_granted":
+            return "approve_job"
+        return None
+
+    @staticmethod
+    def _job_label(job: WorkflowOperationalJob) -> str:
+        if job.kind == DRAFT_RENEWAL_EMAIL_KIND:
+            return "Draft renewal email"
+        if job.kind == GMAIL_SEND_EMAIL_KIND:
+            return "Send approved email"
+        task_type = job.input.get("task_type")
+        return {
+            "extract_claim_facts": "Extract claim facts",
+            "triage_claim": "Assess claim routing",
+            "review_policy_coverage": "Review policy coverage",
+        }.get(str(task_type), "Execute insurance task")
 
     @staticmethod
     def _task_summary(job: WorkflowOperationalJob) -> str:
@@ -404,7 +511,110 @@ class BackpressureDemoService:
             if isinstance(recipient, str) and isinstance(period, str):
                 return f"Draft the {period} renewal for {recipient}"
             return "Draft one renewal email from bounded Workflow input"
-        return "Wait for exact approval, then send the frozen Draft Revision"
+        if job.kind == GMAIL_SEND_EMAIL_KIND:
+            return "Wait for exact approval, then send the frozen Draft Revision"
+        subject = job.input.get("subject")
+        task_type = job.input.get("task_type")
+        action = {
+            "extract_claim_facts": "Extract reported facts for",
+            "triage_claim": "Assess the next review queue for",
+            "review_policy_coverage": "Review open coverage questions for",
+        }.get(str(task_type), "Complete bounded work for")
+        return f"{action} {subject}" if isinstance(subject, str) else action
+
+    @staticmethod
+    def _approval_requests(
+        jobs: tuple[WorkflowOperationalJob, ...],
+        presentation_by_job: dict[UUID, WorkflowOperationalEvent],
+        approved_job_ids: set[UUID],
+    ) -> tuple[BackpressureApprovalView, ...]:
+        jobs_by_id = {job.id: job for job in jobs}
+        drafts_by_workflow: dict[UUID, list[WorkflowOperationalJob]] = {}
+        for job in jobs:
+            if job.kind == DRAFT_RENEWAL_EMAIL_KIND:
+                drafts_by_workflow.setdefault(job.workflow_id, []).append(job)
+        for drafts in drafts_by_workflow.values():
+            drafts.sort(key=lambda item: (item.created_at, item.id))
+
+        collected: list[tuple[datetime, BackpressureApprovalView]] = []
+        for send in jobs:
+            presentation = presentation_by_job.get(send.id)
+            if (
+                send.kind != GMAIL_SEND_EMAIL_KIND
+                or send.status != "waiting"
+                or send.id in approved_job_ids
+                or presentation is None
+            ):
+                continue
+            draft_value = presentation.data.get("draft_job_id")
+            try:
+                draft_id = UUID(str(draft_value))
+            except (TypeError, ValueError):
+                continue
+            draft = jobs_by_id.get(draft_id)
+            if draft is None or draft.output is None or draft.status != "succeeded":
+                continue
+            sender = send.input.get("sender_mailbox")
+            to = send.input.get("to")
+            cc = send.input.get("cc", ())
+            bcc = send.input.get("bcc", ())
+            subject = BackpressureDemoService._resolved_input_value(send, draft, "subject")
+            body = BackpressureDemoService._resolved_input_value(send, draft, "body")
+            if (
+                not isinstance(sender, str)
+                or not isinstance(to, list | tuple)
+                or not to
+                or not all(isinstance(address, str) for address in to)
+                or not isinstance(cc, list | tuple)
+                or not all(isinstance(address, str) for address in cc)
+                or not isinstance(bcc, list | tuple)
+                or not all(isinstance(address, str) for address in bcc)
+                or not isinstance(subject, str)
+                or not subject
+                or not isinstance(body, str)
+                or not body
+            ):
+                continue
+            drafts = drafts_by_workflow.get(send.workflow_id, [])
+            try:
+                revision = drafts.index(draft) + 1
+            except ValueError:
+                continue
+            collected.append(
+                (
+                    presentation.occurred_at,
+                    BackpressureApprovalView(
+                        workflow_id=send.workflow_id,
+                        job_id=send.id,
+                        draft_revision_id=draft.id,
+                        revision=revision,
+                        sender=sender,
+                        to=tuple(cast(str, address) for address in to),
+                        cc=tuple(cast(str, address) for address in cc),
+                        bcc=tuple(cast(str, address) for address in bcc),
+                        subject=subject,
+                        body=body,
+                    ),
+                )
+            )
+        collected.sort(key=lambda item: item[0], reverse=True)
+        return tuple(item for _, item in collected[:5])
+
+    @staticmethod
+    def _resolved_input_value(
+        send: WorkflowOperationalJob,
+        draft: WorkflowOperationalJob,
+        field: str,
+    ) -> object:
+        if draft.output is None:
+            return None
+        value = send.input.get(field)
+        if not isinstance(value, dict) or set(value) != {"job_output", "field"}:
+            return value
+        if str(value.get("job_output")) != str(draft.id):
+            return None
+        source_field = value.get("field")
+        return draft.output.get(source_field) if isinstance(source_field, str) else None
 
     @staticmethod
     def _p50(values: Iterable[int]) -> int | None:

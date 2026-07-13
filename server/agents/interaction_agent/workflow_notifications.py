@@ -122,9 +122,10 @@ present_approval_request. Do not approve, edit, summarize, select a Job, or
 paraphrase the email. You have no previous conversation context."""
 
 _STATUS_PROMPT = """You handle one Workflow Notification in a fresh context.
-Read the supplied Workflow Packet, verify that the renewal email Send Job and
-Workflow succeeded, then call present_status_update. Do not claim recipient
-delivery or add provider details. You have no previous conversation context."""
+Read the supplied Workflow Packet, then call present_status_update so the
+Control Plane can resolve the exact completed work or external-effect status.
+Do not invent business facts, recipient delivery, or provider details. You have
+no previous conversation context."""
 
 
 class _NotificationToolbox:
@@ -141,6 +142,7 @@ class _NotificationToolbox:
         notification_kind: str,
         worker_id: str,
         delivery_attempt: int,
+        runtime_instance_id: UUID,
         conversation: NotificationConversation | None = None,
     ) -> None:
         self._retrieval = retrieval
@@ -153,6 +155,7 @@ class _NotificationToolbox:
         self._notification_kind = notification_kind
         self._worker_id = worker_id
         self._delivery_attempt = delivery_attempt
+        self._runtime_instance_id = runtime_instance_id
         self._conversation = conversation or get_conversation_log()
 
     @property
@@ -195,6 +198,7 @@ class _NotificationToolbox:
                 self._workflow_id,
                 self._worker_id,
                 self._delivery_attempt,
+                self._runtime_instance_id,
             )
             if presentation.destination_party_id != self._destination_party_id:
                 return ToolResult(success=False, payload={"code": "destination_changed"})
@@ -303,6 +307,7 @@ class FreshWorkflowInteraction:
             notification_kind=audience.kind,
             worker_id=self._worker_id,
             delivery_attempt=self._delivery_attempt,
+            runtime_instance_id=self.runtime_instance_id,
             conversation=self._conversation,
         )
         runtime = InteractionAgentRuntime(

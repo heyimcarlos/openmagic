@@ -45,6 +45,13 @@ class InProcessWorkflowWorkerFleet:
         self._workers[worker_id] = self._worker_factory(worker_id)
         return worker_id
 
+    def remove_worker(self, worker_id: str) -> None:
+        if worker_id not in self._workers:
+            raise ValueError("Worker is not part of this fleet")
+        if len(self._workers) == 1:
+            raise ValueError("The fleet must keep at least one Worker")
+        del self._workers[worker_id]
+
     async def run_once(self) -> tuple[object, ...]:
         return tuple(
             await asyncio.gather(*(worker.run_once() for worker in self._workers.values()))

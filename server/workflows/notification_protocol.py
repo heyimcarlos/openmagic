@@ -168,6 +168,7 @@ class WorkflowNotificationProtocol:
         workflow_id: UUID,
         worker_id: str,
         delivery_attempt: int,
+        interaction_runtime_instance_id: UUID | None = None,
     ) -> NotificationPresentationContext:
         async with self._database.transaction() as session:
             workflow = await session.scalar(
@@ -297,6 +298,15 @@ class WorkflowNotificationProtocol:
                         "draft_job_id": str(draft.id),
                         "effect_fingerprint": fingerprint,
                         "sender_mailbox_id": str(effect.sender_mailbox_id),
+                        **(
+                            {
+                                "interaction_runtime_instance_id": str(
+                                    interaction_runtime_instance_id
+                                )
+                            }
+                            if interaction_runtime_instance_id is not None
+                            else {}
+                        ),
                     },
                 )
             )
@@ -342,6 +352,7 @@ class WorkflowNotificationProtocol:
         expected_event = {
             "approval_required": "draft_ready",
             "send_confirmed": "email_send_succeeded",
+            "work_completed": "workflow_work_completed",
         }.get(notification.kind)
         if (
             notification.destination_type != "party"
@@ -373,8 +384,8 @@ class WorkflowNotificationProtocol:
             worker_id,
             delivery_attempt,
         )
-        if audience.kind != "send_confirmed":
-            raise NotificationLifecycleError("Notification is not a send confirmation")
+        if audience.kind not in {"send_confirmed", "work_completed"}:
+            raise NotificationLifecycleError("Notification is not a status update")
         async with self._database.transaction() as session:
             workflow = await session.scalar(
                 sa.select(WorkflowRow).where(WorkflowRow.id == workflow_id).with_for_update()
@@ -391,8 +402,8 @@ class WorkflowNotificationProtocol:
             if workflow is None or notification is None or event is None:
                 raise NotificationLifecycleError("Notification aggregate does not exist")
             self._require_current_lease(notification, worker_id, delivery_attempt)
-            if workflow.status != "completed" or event.job_id is None:
-                raise NotificationLifecycleError("Workflow send is not completed")
+            if event.job_id is None:
+                raise NotificationLifecycleError("Notification status has no Job")
             job = await session.scalar(
                 sa.select(WorkflowJobRow).where(
                     WorkflowJobRow.workflow_id == workflow_id,
@@ -400,8 +411,14 @@ class WorkflowNotificationProtocol:
                     WorkflowJobRow.status == "succeeded",
                 )
             )
-            if job is None or event.event_type != "email_send_succeeded":
-                raise NotificationLifecycleError("Send confirmation evidence is invalid")
+            expected_event = {
+                "send_confirmed": "email_send_succeeded",
+                "work_completed": "workflow_work_completed",
+            }[audience.kind]
+            if job is None or event.event_type != expected_event:
+                raise NotificationLifecycleError("Status update evidence is invalid")
+            if audience.kind == "send_confirmed" and workflow.status != "completed":
+                raise NotificationLifecycleError("Workflow send is not completed")
             authority_context = WorkflowCommandContext(
                 actor_party_id=audience.destination_party_id,
                 organization_party_id=workflow.organization_party_id,
@@ -416,9 +433,17 @@ class WorkflowNotificationProtocol:
                 raise NotificationLifecycleError(
                     "Notification destination no longer has Broker authority"
                 )
+            message = "The renewal email was sent successfully."
+            if audience.kind == "work_completed":
+                output = job.output if isinstance(job.output, dict) else {}
+                title = output.get("title")
+                summary = output.get("summary")
+                if not isinstance(title, str) or not isinstance(summary, str):
+                    raise NotificationLifecycleError("Work result is not presentable")
+                message = f"{title}: {summary}"
             return NotificationStatusContext(
                 destination_party_id=audience.destination_party_id,
-                message="The renewal email was sent successfully.",
+                message=message,
             )
 
     @classmethod

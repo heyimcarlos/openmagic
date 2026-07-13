@@ -47,3 +47,22 @@ def test_worker_fleet_adds_distinct_workers_up_to_its_limit() -> None:
     assert fleet.worker_ids[1] == added
     with pytest.raises(ValueError, match="limit of 2"):
         fleet.add_worker()
+
+
+def test_worker_fleet_removes_exact_worker_but_preserves_minimum_capacity() -> None:
+    class Worker:
+        def __init__(self, worker_id: str) -> None:
+            self.worker_id = worker_id
+
+        async def run_once(self) -> str:
+            return self.worker_id
+
+    fleet = InProcessWorkflowWorkerFleet(Worker, initial_capacity=2)
+    removed = fleet.worker_ids[0]
+    remaining = fleet.worker_ids[1]
+
+    fleet.remove_worker(removed)
+
+    assert fleet.worker_ids == (remaining,)
+    with pytest.raises(ValueError, match="at least one Worker"):
+        fleet.remove_worker(fleet.worker_ids[0])

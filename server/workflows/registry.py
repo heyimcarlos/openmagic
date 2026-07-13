@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from enum import StrEnum
 from types import MappingProxyType
-from typing import Any, TypeVar
+from typing import Any, Literal, TypeVar
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, ValidationError, field_validator
@@ -29,6 +29,10 @@ GMAIL_SEND_EMAIL_KIND = "gmail.send_email.v1"
 VERIFICATION_EMAIL_JOB_KIND = "verification.email_code.v1"
 VERIFICATION_EMAIL_DELIVERY_WORKFLOW_KIND = "verification_email_delivery.v1"
 VERIFICATION_DELIVERY_ATTENTION_NOTIFICATION_KIND = "verification_delivery_attention_required"
+CLAIM_INTAKE_REVIEW_KIND = "claim_intake_review.v1"
+POLICY_COVERAGE_REVIEW_KIND = "policy_coverage_review.v1"
+INSURANCE_TASK_KIND = "insurance_task.execute.v1"
+WORK_COMPLETED_NOTIFICATION_KIND = "work_completed"
 
 
 ContractT = TypeVar("ContractT")
@@ -113,6 +117,27 @@ class VerificationEmailOutput(GmailSendEmailOutput):
 class VerificationEmailDeliveryWorkflowInput(KindSchema):
     protected_workflow_id: UUID
     challenge_id: UUID
+
+
+class ClaimIntakeReviewInput(KindSchema):
+    claim_reference: str = Field(min_length=1, max_length=100)
+    claimant_name: str = Field(min_length=1, max_length=200)
+
+
+class PolicyCoverageReviewInput(KindSchema):
+    policy_reference: str = Field(min_length=1, max_length=100)
+    review_focus: str = Field(min_length=1, max_length=500)
+
+
+class InsuranceTaskInput(KindSchema):
+    task_type: Literal["extract_claim_facts", "triage_claim", "review_policy_coverage"]
+    subject: str = Field(min_length=1, max_length=200)
+    context: str = Field(min_length=1, max_length=2000)
+
+
+class InsuranceTaskOutput(KindSchema):
+    title: str = Field(min_length=1, max_length=200)
+    summary: str = Field(min_length=1, max_length=2000)
 
 
 class ExecutionStrategy(StrEnum):
@@ -492,6 +517,16 @@ def _verification_email_delivery_completed(view: WorkflowCompletionView) -> bool
     )
 
 
+def _insurance_analysis_completed(view: WorkflowCompletionView) -> bool:
+    tasks = [job for job in view.jobs if job.kind == INSURANCE_TASK_KIND]
+    task_ids = {job.id for job in tasks}
+    return (
+        bool(tasks)
+        and not view.uncertain_job_ids.intersection(task_ids)
+        and all(job.status == "succeeded" for job in tasks)
+    )
+
+
 def default_workflow_registry() -> WorkflowKindRegistry:
     """Build the V0 registry without exposing mutable global state."""
 
@@ -546,6 +581,21 @@ def default_workflow_registry() -> WorkflowKindRegistry:
         provider_tool_version="GMAIL_SEND_EMAIL@20260702_01",
         system_authorized=True,
     )
+    insurance_task = JobKindContract(
+        kind=INSURANCE_TASK_KIND,
+        input_schema=InsuranceTaskInput,
+        proposal_input_schema=InsuranceTaskInput,
+        output_schema=InsuranceTaskOutput,
+        run_data_schema=InsuranceTaskOutput,
+        materialize_input=_keep_validated_input,
+        execution_strategy=ExecutionStrategy.FRESH_EXECUTION_AGENT,
+        executor_key="insurance_work_agent",
+        max_attempts=2,
+        success_event_type="workflow_work_completed",
+        success_notification_kind=WORK_COMPLETED_NOTIFICATION_KIND,
+        retryable_error_codes=frozenset({"executor_unavailable", "invalid_work_output"}),
+        retry_backoff=timedelta(seconds=2),
+    )
     renewal = WorkflowKindContract(
         kind=RENEWAL_OUTREACH_KIND,
         input_schema=RenewalOutreachInput,
@@ -558,7 +608,19 @@ def default_workflow_registry() -> WorkflowKindRegistry:
         allowed_job_kinds=frozenset({verification_email.kind}),
         completion_predicate=_verification_email_delivery_completed,
     )
+    claim_intake_review = WorkflowKindContract(
+        kind=CLAIM_INTAKE_REVIEW_KIND,
+        input_schema=ClaimIntakeReviewInput,
+        allowed_job_kinds=frozenset({insurance_task.kind}),
+        completion_predicate=_insurance_analysis_completed,
+    )
+    policy_coverage_review = WorkflowKindContract(
+        kind=POLICY_COVERAGE_REVIEW_KIND,
+        input_schema=PolicyCoverageReviewInput,
+        allowed_job_kinds=frozenset({insurance_task.kind}),
+        completion_predicate=_insurance_analysis_completed,
+    )
     return WorkflowKindRegistry(
-        (renewal, verification_delivery),
-        (draft, send, verification_email),
+        (renewal, verification_delivery, claim_intake_review, policy_coverage_review),
+        (draft, send, verification_email, insurance_task),
     )

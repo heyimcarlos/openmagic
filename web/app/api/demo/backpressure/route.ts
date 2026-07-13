@@ -1,6 +1,7 @@
 const serverBase = process.env.PY_SERVER_URL || 'http://localhost:8001';
 const snapshotUrl = `${serverBase.replace(/\/$/, '')}/api/v1/demo/backpressure`;
 const jobsUrl = `${snapshotUrl}/jobs`;
+const workflowsUrl = `${snapshotUrl}/workflows`;
 
 async function forward(response: Response): Promise<Response> {
   const body = await response.text();
@@ -29,8 +30,11 @@ export async function POST(request: Request) {
   } catch {
     return Response.json({ error: 'Invalid JSON' }, { status: 400 });
   }
+  const enqueueUrl = body && typeof body === 'object' && 'workflow_count' in body
+    ? workflowsUrl
+    : jobsUrl;
   try {
-    return forward(await fetch(jobsUrl, {
+    return forward(await fetch(enqueueUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
       body: JSON.stringify(body),
