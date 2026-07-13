@@ -1,0 +1,51 @@
+:root {
+  color-scheme: light dark;
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  line-height: 1.55;
+}
+
+body {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 3rem 1.5rem 5rem;
+}
+
+h1,
+h2 {
+  line-height: 1.15;
+}
+
+.lede {
+  font-size: 1.2rem;
+}
+
+.card {
+  border: 1px solid color-mix(in srgb, CanvasText 20%, transparent);
+  border-radius: 12px;
+  margin: 1rem 0;
+  padding: 1rem 1.2rem;
+}
+
+code {
+  background: color-mix(in srgb, CanvasText 10%, transparent);
+  border-radius: 4px;
+  padding: 0.1rem 0.3rem;
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+th,
+td {
+  border-bottom: 1px solid color-mix(in srgb, CanvasText 20%, transparent);
+  padding: 0.6rem;
+  text-align: left;
+  vertical-align: top;
+}
+
+.exercise {
+  border-left: 4px solid #7c3aed;
+  padding-left: 1rem;
+}

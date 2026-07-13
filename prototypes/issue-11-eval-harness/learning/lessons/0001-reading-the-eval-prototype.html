@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Reading the OpenMagic eval prototype</title>
+    <link rel="stylesheet" href="../assets/lesson.css" />
+  </head>
+  <body>
+    <h1>Reading the OpenMagic eval prototype</h1>
+    <p class="lede">The screen is a catalog of proposed evidence, not a test execution dashboard.</p>
+
+    <h2>Read one scenario from top to bottom</h2>
+    <div class="card">
+      <p><strong>Name:</strong> the behavior under examination.</p>
+      <p><strong>Systems:</strong> which architecture is exercised.</p>
+      <p><strong>Verdict:</strong> whether failure blocks delivery or only informs us.</p>
+      <p><strong>Perturbation:</strong> the pressure applied to the system.</p>
+      <p><strong>Evidence:</strong> the concrete observations required afterward.</p>
+    </div>
+
+    <h2>The three verdicts</h2>
+    <table>
+      <tr><th>Marker</th><th>Question answered</th><th>Example</th></tr>
+      <tr><td><code>[g]</code></td><td>Must V0 behave this way?</td><td>No duplicate send after uncertain dispatch.</td></tr>
+      <tr><td><code>[d]</code></td><td>What did we measure?</td><td>Workflow mode loaded fewer context tokens.</td></tr>
+      <tr><td><code>[s]</code></td><td>Does the real integration work now?</td><td>One exact Gmail message reached AgentMail.</td></tr>
+    </table>
+
+    <h2>Navigate with a purpose</h2>
+    <ol>
+      <li>Press <code>l</code> until the lane is <strong>paired journey</strong>.</li>
+      <li>Press <code>n</code> through its four scenarios. Ask whether each comparison is fair.</li>
+      <li>Press <code>l</code> for <strong>protocol recovery</strong>. Ask whether every safety invariant is represented.</li>
+      <li>Press <code>l</code> for <strong>live provider</strong>. Notice that it proves only the normal happy path.</li>
+    </ol>
+
+    <div class="exercise">
+      <h2>Retrieval exercise</h2>
+      <p>Find <strong>Stop after uncertain dispatch</strong>. Before reading its verdict, decide whether it should be a gate, diagnostic, or smoke proof. Then explain why in one sentence.</p>
+    </div>
+
+    <p>Primary source: <a href="https://docs.pytest.org/en/stable/how-to/parametrize.html">pytest parametrization</a>. See also the <a href="../reference/eval-glossary.html">eval glossary</a>. Ask your Codex teacher about anything that remains unclear.</p>
+  </body>
+</html>
