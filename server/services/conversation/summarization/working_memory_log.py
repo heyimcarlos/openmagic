@@ -30,7 +30,7 @@ def _decode_payload(payload: str) -> str:
 def _format_line(tag: str, payload: str, timestamp: Optional[str] = None) -> str:
     encoded = _encode_payload(payload)
     if timestamp:
-        return f"<{tag} timestamp=\"{timestamp}\">{encoded}</{tag}>\n"
+        return f'<{tag} timestamp="{timestamp}">{encoded}</{tag}>\n'
     return f"<{tag}>{encoded}</{tag}>\n"
 
 
@@ -134,9 +134,7 @@ class WorkingMemoryLog:
             elif tag == "conversation_summary":
                 summary_text = payload
             else:
-                entries.append(
-                    LogEntry(tag=tag, payload=payload, timestamp=timestamp or None)
-                )
+                entries.append(LogEntry(tag=tag, payload=payload, timestamp=timestamp or None))
 
         state = SummaryState(
             summary_text=summary_text,
@@ -194,9 +192,9 @@ class WorkingMemoryLog:
                     f'<{entry.tag} timestamp="{entry.timestamp}">{safe_payload}</{entry.tag}>'
                 )
             else:
-                parts.append(f'<{entry.tag}>{safe_payload}</{entry.tag}>')
+                parts.append(f"<{entry.tag}>{safe_payload}</{entry.tag}>")
 
-        return '\n'.join(parts)
+        return "\n".join(parts)
 
     def clear(self) -> None:
         with self._lock:

@@ -17,6 +17,8 @@ from server.workflows import (
     DRAFT_RENEWAL_EMAIL_KIND,
     GMAIL_SEND_EMAIL_KIND,
     RENEWAL_OUTREACH_KIND,
+    VERIFICATION_EMAIL_DELIVERY_WORKFLOW_KIND,
+    VERIFICATION_EMAIL_JOB_KIND,
     ExecutionStrategy,
     InvalidWorkflowProposalError,
     StaticWorkflowAuthority,
@@ -30,6 +32,7 @@ from server.workflows import (
     WorkflowKindContract,
     WorkflowKindRegistry,
     WorkflowNotFoundError,
+    WorkflowProposal,
     default_workflow_registry,
 )
 
@@ -67,6 +70,49 @@ async def test_rejects_unknown_job_kind_without_mutation(
         await control_plane.create_workflow(create_command(proposal))
 
     assert await workflow_count(migrated_postgres_url) == 0
+
+
+async def test_party_cannot_create_a_system_authorized_job_graph(
+    migrated_postgres_url: str,
+    clean_workflow_database,
+):
+    database = WorkflowDatabase(migrated_postgres_url)
+    control_plane = WorkflowControlPlane(
+        database=database,
+        registry=default_workflow_registry(),
+        authority=StaticWorkflowAuthority(
+            grants={
+                (
+                    BROKER_ID,
+                    ORGANIZATION_ID,
+                    VERIFICATION_EMAIL_DELIVERY_WORKFLOW_KIND,
+                )
+            }
+        ),
+    )
+    challenge_id = uuid4()
+    protected_workflow_id = uuid4()
+    proposal = WorkflowProposal(
+        kind=VERIFICATION_EMAIL_DELIVERY_WORKFLOW_KIND,
+        objective="Deliver a verification code",
+        input={
+            "protected_workflow_id": str(protected_workflow_id),
+            "challenge_id": str(challenge_id),
+        },
+        jobs=(
+            WorkflowJobProposal(
+                key="delivery",
+                kind=VERIFICATION_EMAIL_JOB_KIND,
+                input={"challenge_id": str(challenge_id)},
+            ),
+        ),
+    )
+
+    with pytest.raises(WorkflowAuthorizationError, match="system-authorized"):
+        await control_plane.create_workflow(create_command(proposal))
+
+    assert await workflow_count(migrated_postgres_url) == 0
+    await database.dispose()
 
 
 async def test_rejects_invalid_workflow_input_without_mutation(

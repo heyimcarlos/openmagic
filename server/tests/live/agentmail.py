@@ -104,6 +104,42 @@ class AgentMailRecipient:
         except TimeoutError:
             return False
 
+    async def wait_for_one_new_subject(
+        self,
+        *,
+        subject: str,
+        previous_ids: set[str],
+        wait_limit: timedelta,
+        settlement_period: timedelta = timedelta(seconds=6),
+    ) -> AgentMailMessageDetail:
+        """Return one newly received message without logging its content."""
+
+        candidate_id: str | None = None
+        first_match_at: float | None = None
+        try:
+            async with asyncio.timeout(wait_limit.total_seconds()):
+                while True:
+                    candidates = [
+                        message
+                        for message in await self._message_summaries()
+                        if message.message_id not in previous_ids and message.subject == subject
+                    ]
+                    if len(candidates) == 1:
+                        now = asyncio.get_running_loop().time()
+                        if candidate_id != candidates[0].message_id:
+                            candidate_id = candidates[0].message_id
+                            first_match_at = now
+                        if (
+                            first_match_at is not None
+                            and now - first_match_at >= settlement_period.total_seconds()
+                        ):
+                            return await self._message_detail(candidates[0].message_id)
+                    if len(candidates) > 1:
+                        raise RuntimeError("More than one correlated AgentMail message arrived")
+                    await asyncio.sleep(2)
+        except TimeoutError:
+            raise RuntimeError("Correlated AgentMail message did not arrive") from None
+
     @classmethod
     def contains_exactly_one_effect(
         cls,

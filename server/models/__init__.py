@@ -9,6 +9,7 @@ from .chat import (
     ChatWorkflowJobStage,
     ChatWorkflowStage,
     ChatWorkflowTelemetry,
+    SmsInteractionEnvelope,
 )
 from .gmail import GmailConnectPayload, GmailDisconnectPayload, GmailStatusPayload
 from .meta import HealthResponse, RootResponse, SetTimezoneRequest, SetTimezoneResponse
@@ -31,4 +32,5 @@ __all__ = [
     "RootResponse",
     "SetTimezoneRequest",
     "SetTimezoneResponse",
+    "SmsInteractionEnvelope",
 ]

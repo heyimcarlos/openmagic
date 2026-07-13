@@ -9,6 +9,7 @@ import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .authority import CurrentBrokerAuthority
+from .completion import WorkflowCompletionEvaluator
 from .contracts import (
     ClaimWorkflowJobCommand,
     CommittedRunResult,
@@ -25,6 +26,7 @@ from .errors import (
 )
 from .models import (
     NotificationRow,
+    VerificationChallengeRow,
     WorkflowEventRow,
     WorkflowJobDependencyRow,
     WorkflowJobRow,
@@ -32,9 +34,10 @@ from .models import (
     WorkflowRow,
 )
 from .registry import (
+    GMAIL_SEND_EMAIL_KIND,
+    VERIFICATION_DELIVERY_ATTENTION_NOTIFICATION_KIND,
+    VERIFICATION_EMAIL_JOB_KIND,
     ExecutionStrategy,
-    WorkflowCompletionJob,
-    WorkflowCompletionView,
     WorkflowKindRegistry,
 )
 
@@ -51,6 +54,7 @@ class WorkflowExecutionProtocol:
     ) -> None:
         self._database = database
         self._registry = registry
+        self._completion = WorkflowCompletionEvaluator(registry)
         self._has_current_broker_authority = has_current_broker_authority
 
     async def claim_job(
@@ -104,7 +108,7 @@ class WorkflowExecutionProtocol:
 
                 execution_input = (
                     (await resolve_email_effect(session, workflow.id, job)).model_dump(mode="json")
-                    if contract.execution_strategy == ExecutionStrategy.DETERMINISTIC_ADAPTER
+                    if job.kind == GMAIL_SEND_EMAIL_KIND
                     else self._registry.validate_job_input(job.kind, job.input)
                 )
                 runtime_instance_id = (
@@ -154,8 +158,11 @@ class WorkflowExecutionProtocol:
                 )
         return None
 
-    @staticmethod
-    async def _recover_expired_runs(session: AsyncSession, now: datetime) -> None:
+    async def _recover_expired_runs(
+        self,
+        session: AsyncSession,
+        now: datetime,
+    ) -> None:
         expired = (
             await session.execute(
                 sa.select(
@@ -217,14 +224,19 @@ class WorkflowExecutionProtocol:
                 job.available_at = now
             else:
                 job.status = "failed"
-            WorkflowExecutionProtocol._append_run_event(
+            event = await WorkflowExecutionProtocol._append_run_event(
                 session,
                 workflow,
                 job,
                 run,
                 "run_abandoned",
-                {"reason": "lease_expired"},
+                {
+                    "reason": "lease_expired",
+                    "dispatch_started": dispatch_started is not None,
+                },
             )
+            if job.status in {"waiting", "failed"}:
+                await self._notify_verification_delivery_attention(session, job, event)
         await session.flush()
 
     async def report_run_result(
@@ -304,7 +316,15 @@ class WorkflowExecutionProtocol:
             elif command.result.outcome == "uncertain":
                 run.status = "failed"
                 job.status = "waiting"
-                self._append_run_event(session, workflow, job, run, "run_outcome_uncertain", {})
+                event = await self._append_run_event(
+                    session,
+                    workflow,
+                    job,
+                    run,
+                    "run_outcome_uncertain",
+                    {},
+                )
+                await self._notify_verification_delivery_attention(session, job, event)
             else:
                 run.status = "failed"
                 error_code = (
@@ -323,14 +343,19 @@ class WorkflowExecutionProtocol:
                     job.available_at = now + contract.retry_backoff * job.attempts
                 else:
                     job.status = "failed"
-                self._append_run_event(
+                event = await self._append_run_event(
                     session,
                     workflow,
                     job,
                     run,
                     "run_failed",
-                    {"retry_scheduled": retry_scheduled},
+                    {
+                        "retry_scheduled": retry_scheduled,
+                        "dispatch_started": dispatch is not None,
+                    },
                 )
+                if job.status in {"waiting", "failed"}:
+                    await self._notify_verification_delivery_attention(session, job, event)
             await session.flush()
             return self._committed_result(workflow, job, run)
 
@@ -401,6 +426,8 @@ class WorkflowExecutionProtocol:
         workflow: WorkflowRow,
         job: WorkflowJobRow,
     ) -> bool:
+        if self._registry.job_contract(job.kind).system_authorized:
+            return True
         actor_party_id = await self._proposal_actor(session, workflow.id)
         if actor_party_id is None:
             return False
@@ -461,62 +488,14 @@ class WorkflowExecutionProtocol:
         completed_job: WorkflowJobRow,
         run: WorkflowJobRunRow,
     ) -> None:
-        jobs = (
-            await session.scalars(
-                sa.select(WorkflowJobRow).where(WorkflowJobRow.workflow_id == workflow.id)
-            )
-        ).all()
-        runs = (
-            await session.scalars(
-                sa.select(WorkflowJobRunRow).where(WorkflowJobRunRow.workflow_id == workflow.id)
-            )
-        ).all()
-        dispatched_job_ids = (
-            await session.scalars(
-                sa.select(WorkflowEventRow.job_id).where(
-                    WorkflowEventRow.workflow_id == workflow.id,
-                    WorkflowEventRow.event_type == "external_effect_dispatch_started",
-                    WorkflowEventRow.approval_grant_id.is_not(None),
-                    WorkflowEventRow.job_id.is_not(None),
-                )
-            )
-        ).all()
-        view = WorkflowCompletionView(
-            jobs=tuple(
-                WorkflowCompletionJob(
-                    id=item.id,
-                    kind=item.kind,
-                    status=item.status,
-                    revises_job_id=item.revises_job_id,
-                )
-                for item in jobs
-            ),
-            uncertain_job_ids=frozenset(
-                item.job_id
-                for item in runs
-                if item.result is not None and item.result.get("outcome") == "uncertain"
-            ),
-            approved_dispatch_job_ids=frozenset(
-                item for item in dispatched_job_ids if item is not None
-            ),
+        await self._completion.complete_if_satisfied(
+            session,
+            workflow=workflow,
+            completed_job=completed_job,
+            run_id=run.id,
+            cause_type="job",
+            cause_id=str(completed_job.id),
         )
-        if not self._registry.completion_satisfied(workflow.kind, view):
-            return
-        workflow.status = "completed"
-        session.add(
-            WorkflowEventRow(
-                workflow_id=workflow.id,
-                job_id=completed_job.id,
-                run_id=run.id,
-                event_type="workflow_completed",
-                actor_type="system",
-                actor_id="workflow_control_plane",
-                cause_type="job",
-                cause_id=str(completed_job.id),
-                data={"objective_satisfied": True},
-            )
-        )
-        await session.flush()
 
     @staticmethod
     async def _proposal_actor(session: AsyncSession, workflow_id: UUID) -> UUID | None:
@@ -536,28 +515,60 @@ class WorkflowExecutionProtocol:
         except ValueError:
             return None
 
+    async def _notify_verification_delivery_attention(
+        self,
+        session: AsyncSession,
+        job: WorkflowJobRow,
+        event: WorkflowEventRow,
+    ) -> None:
+        if job.kind != VERIFICATION_EMAIL_JOB_KIND:
+            return
+        challenge = await session.scalar(
+            sa.select(VerificationChallengeRow).where(
+                VerificationChallengeRow.delivery_workflow_id == job.workflow_id,
+                VerificationChallengeRow.delivery_job_id == job.id,
+            )
+        )
+        if challenge is None:
+            return
+        session.add(
+            NotificationRow(
+                workflow_id=job.workflow_id,
+                workflow_event_id=event.id,
+                kind=VERIFICATION_DELIVERY_ATTENTION_NOTIFICATION_KIND,
+                destination_type="interaction",
+                destination_id=challenge.interaction_id,
+                status="queued",
+                attempts=0,
+                max_attempts=3,
+            )
+        )
+        await session.flush()
+
     @staticmethod
-    def _append_run_event(
+    async def _append_run_event(
         session: AsyncSession,
         workflow: WorkflowRow,
         job: WorkflowJobRow,
         run: WorkflowJobRunRow,
         event_type: str,
         data: dict[str, object],
-    ) -> None:
-        session.add(
-            WorkflowEventRow(
-                workflow_id=workflow.id,
-                job_id=job.id,
-                run_id=run.id,
-                event_type=event_type,
-                actor_type="run",
-                actor_id=str(run.id),
-                cause_type="job",
-                cause_id=str(job.id),
-                data=data,
-            )
+    ) -> WorkflowEventRow:
+        event = WorkflowEventRow(
+            id=uuid4(),
+            workflow_id=workflow.id,
+            job_id=job.id,
+            run_id=run.id,
+            event_type=event_type,
+            actor_type="run",
+            actor_id=str(run.id),
+            cause_type="job",
+            cause_id=str(job.id),
+            data=data,
         )
+        session.add(event)
+        await session.flush()
+        return event
 
     @staticmethod
     def _committed_result(

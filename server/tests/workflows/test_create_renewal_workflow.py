@@ -1,11 +1,20 @@
 from __future__ import annotations
 
+import asyncio
+from datetime import timedelta
+
+import pytest
+
 from server.tests.workflows.factories import BROKER_ID, create_command
 from server.workflows import (
     DRAFT_RENEWAL_EMAIL_KIND,
     GMAIL_SEND_EMAIL_KIND,
     RENEWAL_OUTREACH_KIND,
+    ClaimWorkflowJobCommand,
+    ReportRunResultCommand,
+    RunResult,
     WorkflowControlPlane,
+    WorkflowLifecycleError,
 )
 
 
@@ -51,3 +60,65 @@ async def test_creates_atomic_renewal_workflow_graph(control_plane: WorkflowCont
         await control_plane.read_workflow_trace(trace.workflow.id, create_command().context)
         == trace
     )
+
+
+async def test_create_workflow_replays_stable_receipt_after_lifecycle_progress(
+    control_plane: WorkflowControlPlane,
+):
+    command = create_command()
+    first = await control_plane.create_workflow(command)
+    claimed = await control_plane.claim_job(
+        ClaimWorkflowJobCommand(
+            worker_id="create-replay-worker",
+            application_build="test-build",
+            lease_duration=timedelta(minutes=5),
+            executor_keys=("renewal_email_drafter",),
+        )
+    )
+    assert claimed is not None
+    await control_plane.report_run_result(
+        ReportRunResultCommand(
+            run_id=claimed.run_id,
+            result=RunResult(
+                outcome="failed",
+                error={"code": "invalid_draft_output"},
+            ),
+        )
+    )
+
+    replay = await control_plane.create_workflow(command)
+
+    assert replay == first
+
+
+async def test_concurrent_create_delivery_replays_one_workflow(
+    control_plane: WorkflowControlPlane,
+):
+    command = create_command()
+
+    first, replay = await asyncio.gather(
+        control_plane.create_workflow(command),
+        control_plane.create_workflow(command),
+    )
+
+    assert replay == first
+    assert replay.workflow.id == first.workflow.id
+
+
+async def test_create_cause_rejects_a_conflicting_typed_workflow(
+    control_plane: WorkflowControlPlane,
+):
+    command = create_command()
+    accepted = await control_plane.create_workflow(command)
+    conflicting = command.model_copy(
+        update={
+            "proposal": command.proposal.model_copy(
+                update={"objective": "A conflicting renewal objective"}
+            )
+        }
+    )
+
+    with pytest.raises(WorkflowLifecycleError, match="Cause was already used"):
+        await control_plane.create_workflow(conflicting)
+
+    assert await control_plane.create_workflow(command) == accepted

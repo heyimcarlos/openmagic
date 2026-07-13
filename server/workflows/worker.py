@@ -65,6 +65,46 @@ class NotificationInteractionFactory(Protocol):
     ) -> AbstractAsyncContextManager[NotificationInteraction]: ...
 
 
+class DeterministicExecutionHandler(Protocol):
+    """One trusted handler for a versioned deterministic Job Kind."""
+
+    async def execute(self, packet: WorkflowExecutionPacket) -> RunResult: ...
+
+
+class _EmailSendExecutionHandler:
+    def __init__(
+        self,
+        control_plane: WorkflowControlPlane,
+        adapter: EmailSendAdapter,
+    ) -> None:
+        self._control_plane = control_plane
+        self._adapter = adapter
+
+    async def execute(self, packet: WorkflowExecutionPacket) -> RunResult:
+        effect = EmailSendEffectV1.model_validate(packet.input)
+        try:
+            self._adapter.validate_effect(effect)
+        except EmailAdapterValidationError as exc:
+            return RunResult(
+                outcome="failed",
+                evidence=({"type": "adapter_validation_failed_before_dispatch"},),
+                error={"code": "adapter_configuration_invalid", "detail": str(exc)},
+            )
+        dispatch = await self._control_plane.begin_external_effect_dispatch(
+            BeginExternalEffectDispatchCommand(run_id=packet.run_id)
+        )
+        if dispatch.effect != effect:
+            raise RuntimeError("Dispatch effect changed after claim")
+        try:
+            return await self._adapter.send_email(dispatch.effect, dispatch.context)
+        except Exception as exc:
+            return RunResult(
+                outcome="uncertain",
+                evidence=({"type": "adapter_outcome_uncertain"},),
+                error={"code": "adapter_outcome_uncertain", "detail": type(exc).__name__},
+            )
+
+
 class WorkflowWorker:
     """Claim and execute at most one Job per tick."""
 
@@ -74,14 +114,22 @@ class WorkflowWorker:
         control_plane: WorkflowControlPlane,
         executors: Mapping[str, DraftExecutionRuntimeFactory],
         email_adapters: Mapping[str, EmailSendAdapter] | None = None,
+        deterministic_handlers: Mapping[str, DeterministicExecutionHandler] | None = None,
         worker_id: str,
         application_build: str,
         lease_duration: timedelta = timedelta(minutes=5),
     ) -> None:
         self._control_plane = control_plane
         self._executors = dict(executors)
-        self._email_adapters = dict(email_adapters or {})
-        if not self._executors and not self._email_adapters:
+        self._deterministic_handlers = dict(deterministic_handlers or {})
+        for key, adapter in (email_adapters or {}).items():
+            if key in self._deterministic_handlers:
+                raise ValueError(f"Duplicate deterministic handler key {key!r}")
+            self._deterministic_handlers[key] = _EmailSendExecutionHandler(
+                control_plane,
+                adapter,
+            )
+        if not self._executors and not self._deterministic_handlers:
             raise ValueError("Workflow Worker requires at least one installed executor")
         self._worker_id = worker_id
         self._application_build = application_build
@@ -95,13 +143,16 @@ class WorkflowWorker:
                 worker_id=self._worker_id,
                 application_build=self._application_build,
                 lease_duration=self._lease_duration,
-                executor_keys=(*self._executors, *self._email_adapters),
+                executor_keys=(*self._executors, *self._deterministic_handlers),
             )
         )
         if packet is None:
             return None
         if packet.execution_strategy == "deterministic_adapter":
-            result = await self._execute_email_adapter(packet)
+            handler = self._deterministic_handlers.get(packet.executor_key)
+            if handler is None:
+                raise RuntimeError(f"No handler is installed for {packet.executor_key!r}")
+            result = await handler.execute(packet)
         else:
             result = await self._execute_draft(packet)
 
@@ -134,33 +185,6 @@ class WorkflowWorker:
                 error={"code": "executor_unavailable"},
             )
 
-    async def _execute_email_adapter(self, packet: WorkflowExecutionPacket) -> RunResult:
-        adapter = self._email_adapters.get(packet.executor_key)
-        if adapter is None:
-            raise RuntimeError(f"No adapter is installed for {packet.executor_key!r}")
-        effect = EmailSendEffectV1.model_validate(packet.input)
-        try:
-            adapter.validate_effect(effect)
-        except EmailAdapterValidationError as exc:
-            return RunResult(
-                outcome="failed",
-                evidence=({"type": "adapter_validation_failed_before_dispatch"},),
-                error={"code": "adapter_configuration_invalid", "detail": str(exc)},
-            )
-        dispatch = await self._control_plane.begin_external_effect_dispatch(
-            BeginExternalEffectDispatchCommand(run_id=packet.run_id)
-        )
-        if dispatch.effect != effect:
-            raise RuntimeError("Dispatch effect changed after claim")
-        try:
-            return await adapter.send_email(dispatch.effect, dispatch.context)
-        except Exception as exc:
-            return RunResult(
-                outcome="uncertain",
-                evidence=({"type": "adapter_outcome_uncertain"},),
-                error={"code": "adapter_outcome_uncertain", "detail": type(exc).__name__},
-            )
-
 
 class NotificationWorker:
     """Deliver one Notification, then acknowledge only completed handling."""
@@ -172,17 +196,20 @@ class NotificationWorker:
         interactions: NotificationInteractionFactory,
         worker_id: str,
         lease_duration: timedelta = timedelta(minutes=5),
+        notification_kinds: tuple[str, ...] = (),
     ) -> None:
         self._control_plane = control_plane
         self._interactions = interactions
         self._worker_id = worker_id
         self._lease_duration = lease_duration
+        self._notification_kinds = notification_kinds
 
     async def run_once(self) -> NotificationDeliveryPacket | None:
         packet = await self._control_plane.claim_notification(
             ClaimNotificationCommand(
                 worker_id=self._worker_id,
                 lease_duration=self._lease_duration,
+                kinds=self._notification_kinds,
             )
         )
         if packet is None:

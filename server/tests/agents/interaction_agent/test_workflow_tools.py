@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from types import SimpleNamespace
+from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
@@ -9,7 +10,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from server.agents.interaction_agent.factory import create_interaction_runtime
 from server.agents.interaction_agent.runtime import InteractionAgentRuntime
-from server.agents.interaction_agent.toolbox import InteractionToolContext
+from server.agents.interaction_agent.toolbox import InteractionToolContext, ToolResult
 from server.agents.interaction_agent.tools import LegacyInteractionToolbox
 from server.agents.interaction_agent.workflow_agent import (
     build_workflow_system_prompt,
@@ -20,15 +21,22 @@ from server.config import Settings
 from server.tests.workflows.retrieval_fixtures import (
     ACME_ID,
     BROKER_ID,
+    JOHN_ACME_ID,
     SAME_NAME_ID,
     TARGET_ID,
     seed_retrieval_landscape,
 )
 from server.workflows import (
+    DeterministicVerificationEmailSender,
+    ProtectedOperation,
     StaticWorkflowAuthority,
+    StepUpVerification,
+    SubmitVerificationCodeCommand,
+    VerificationEmailExecutionHandler,
     WorkflowControlPlane,
     WorkflowDatabase,
     WorkflowRetrieval,
+    WorkflowWorker,
     default_workflow_registry,
 )
 
@@ -45,6 +53,28 @@ async def workflow_toolbox(migrated_postgres_url: str, clean_workflow_database):
     )
     yield WorkflowInteractionToolbox(retrieval=retrieval, control_plane=control_plane)
     await database.dispose()
+
+
+async def _deliver_verification_code(
+    database: WorkflowDatabase,
+    control_plane: WorkflowControlPlane,
+    verification: StepUpVerification,
+) -> str:
+    sender = DeterministicVerificationEmailSender()
+    worker = WorkflowWorker(
+        control_plane=control_plane,
+        executors={},
+        deterministic_handlers={
+            "composio_verification_email": VerificationEmailExecutionHandler(
+                verification=verification,
+                sender=sender,
+            )
+        },
+        worker_id="verification-email-worker",
+        application_build="workflow-tool-test",
+    )
+    assert await worker.run_once() is not None
+    return sender.deliveries[0].code
 
 
 def test_workflow_tool_surface_omits_delegation_and_execution_configuration(
@@ -85,6 +115,9 @@ def test_runtime_factory_defaults_to_workflow_mode_and_keeps_legacy_explicit(
         "workflow_cursor_secret": "workflow-factory-test",
         "workflow_broker_party_id": str(BROKER_ID),
         "workflow_organization_party_id": str(ACME_ID),
+        "verification_code_secret": "workflow-factory-verification-secret",
+        "composio_api_key": "test-composio-key",
+        "workflow_composio_user_id": "test-composio-user",
     }
 
     workflow_runtime = create_interaction_runtime(Settings(**common))
@@ -110,6 +143,7 @@ async def test_workflow_tools_search_read_one_packet_then_propose(
         organization_party_id=ACME_ID,
         cause_id="message-issue-18",
     )
+    await workflow_toolbox.record_interaction_cause(context, "Prepare the selected renewal.")
 
     search = await workflow_toolbox.invoke(
         "search_workflows",
@@ -142,6 +176,355 @@ async def test_workflow_tools_search_read_one_packet_then_propose(
     assert proposal.success is True
     assert proposal.payload["workflow_id"] == str(TARGET_ID)
     assert len(proposal.payload["job_ids"]) == 2
+
+
+async def test_protected_packet_read_returns_verification_required_from_actual_tool(
+    migrated_postgres_url: str,
+    clean_workflow_database,
+):
+    await seed_retrieval_landscape(migrated_postgres_url)
+    database = WorkflowDatabase(migrated_postgres_url)
+    retrieval = WorkflowRetrieval(database=database, cursor_secret=b"protected-tool-test")
+    control_plane = WorkflowControlPlane(
+        database=database,
+        registry=default_workflow_registry(),
+        authority=StaticWorkflowAuthority(grants=set()),
+    )
+    verification = StepUpVerification(
+        database=database,
+        code_secret=b"protected-tool-verification-secret",
+    )
+    toolbox = WorkflowInteractionToolbox(
+        retrieval=retrieval,
+        control_plane=control_plane,
+        verification=verification,
+    )
+    context = InteractionToolContext(
+        actor_party_id=JOHN_ACME_ID,
+        organization_party_id=ACME_ID,
+        cause_id="private-packet-message",
+        interaction_id="sms-policyholder-demo",
+    )
+    await toolbox.record_interaction_cause(context, "Show me my renewal details.")
+    search = await toolbox.invoke(
+        "search_workflows",
+        {
+            "query": "John Smith renewal",
+            "workflow_kind": "renewal_outreach.v1",
+            "status": "active",
+            "organization": "Acme Brokerage",
+            "renewal_period": "2026",
+        },
+        context,
+    )
+    assert search.success is True
+    assert search.payload["results"][0]["workflow_id"] == str(TARGET_ID)
+    assert search.payload["total_matches"] == 1
+    assert search.payload["facets"]
+
+    packet = await toolbox.invoke(
+        "read_workflow_packet",
+        {"workflow_id": str(TARGET_ID)},
+        context,
+    )
+
+    assert packet.success is False
+    assert packet.payload["code"] == "verification_required"
+    assert packet.payload["delivery_method"] == "email_code"
+    assert packet.payload["destination"] == "j***@example.com"
+    assert packet.payload["challenge_id"]
+    assert context.loaded_packet is None
+    await database.dispose()
+
+
+async def test_verified_session_covers_later_sensitive_write(
+    migrated_postgres_url: str,
+    clean_workflow_database,
+):
+    await seed_retrieval_landscape(migrated_postgres_url)
+    database = WorkflowDatabase(migrated_postgres_url)
+    control_plane = WorkflowControlPlane(
+        database=database,
+        registry=default_workflow_registry(),
+        authority=StaticWorkflowAuthority(grants=set()),
+    )
+    verification = StepUpVerification(
+        database=database,
+        code_secret=b"protected-write-verification-secret",
+    )
+    toolbox = WorkflowInteractionToolbox(
+        retrieval=WorkflowRetrieval(
+            database=database,
+            cursor_secret=b"protected-write-test",
+        ),
+        control_plane=control_plane,
+        verification=verification,
+    )
+    context = InteractionToolContext(
+        actor_party_id=BROKER_ID,
+        organization_party_id=ACME_ID,
+        cause_id="propose-renewal-message",
+        interaction_id="sms-broker-demo",
+    )
+    await toolbox.record_interaction_cause(context, "Prepare John's renewal email.")
+    await toolbox.invoke(
+        "search_workflows",
+        {
+            "query": "John Smith renewal",
+            "workflow_kind": "renewal_outreach.v1",
+            "status": "active",
+            "organization": "Acme Brokerage",
+            "renewal_period": "2026",
+        },
+        context,
+    )
+    read = await toolbox.invoke(
+        "read_workflow_packet",
+        {"workflow_id": str(TARGET_ID)},
+        context,
+    )
+    assert read.success is False
+    assert read.payload["purpose"] == "sensitive_read"
+
+    code = await _deliver_verification_code(database, control_plane, verification)
+    verified = await verification.submit_code(
+        SubmitVerificationCodeCommand(
+            actor_party_id=BROKER_ID,
+            interaction_id="sms-broker-demo",
+            cause_id="read-verification-message",
+            code=code,
+        )
+    )
+    assert verified.status == "verified"
+
+    context.cause_id = "propose-after-read-verification"
+    await toolbox.record_interaction_cause(context, "Prepare the email now.")
+    loaded = await toolbox.invoke(
+        "read_workflow_packet",
+        {"workflow_id": str(TARGET_ID)},
+        context,
+    )
+    assert loaded.success is True
+    proposed = await toolbox.invoke(
+        "propose_renewal_email",
+        {"workflow_id": str(TARGET_ID)},
+        context,
+    )
+
+    assert proposed.success is True
+    await database.dispose()
+
+
+async def test_verified_resume_runs_exact_stored_packet_read_in_fresh_context(
+    migrated_postgres_url: str,
+    clean_workflow_database,
+):
+    await seed_retrieval_landscape(migrated_postgres_url)
+    database = WorkflowDatabase(migrated_postgres_url)
+    retrieval = WorkflowRetrieval(database=database, cursor_secret=b"verified-resume-test")
+    control_plane = WorkflowControlPlane(
+        database=database,
+        registry=default_workflow_registry(),
+        authority=StaticWorkflowAuthority(grants=set()),
+    )
+    verification = StepUpVerification(
+        database=database,
+        code_secret=b"verified-resume-secret",
+    )
+    toolbox = WorkflowInteractionToolbox(
+        retrieval=retrieval,
+        control_plane=control_plane,
+        verification=verification,
+    )
+    initial = InteractionToolContext(
+        actor_party_id=JOHN_ACME_ID,
+        organization_party_id=ACME_ID,
+        cause_id="private-read-message",
+        interaction_id="sms-policyholder-demo",
+    )
+    await toolbox.record_interaction_cause(initial, "Show my renewal details.")
+    search = await toolbox.invoke(
+        "search_workflows",
+        {
+            "query": "John Smith renewal",
+            "workflow_kind": "renewal_outreach.v1",
+            "status": "active",
+            "organization": "Acme Brokerage",
+            "renewal_period": "2026",
+        },
+        initial,
+    )
+    assert "renewal_details" not in json.dumps(search.payload)
+    required = await toolbox.invoke(
+        "read_workflow_packet",
+        {"workflow_id": str(TARGET_ID)},
+        initial,
+    )
+    assert required.payload["code"] == "verification_required"
+    code = await _deliver_verification_code(database, control_plane, verification)
+    verified = await verification.submit_code(
+        SubmitVerificationCodeCommand(
+            actor_party_id=JOHN_ACME_ID,
+            interaction_id="sms-policyholder-demo",
+            cause_id="verification-code-message",
+            code=code,
+        )
+    )
+    assert verified.challenge_id is not None
+    assert verified.workflow_id is not None
+    assert verified.request_cause_id == "private-read-message"
+    assert verified.operation is not None
+
+    class Conversation:
+        def __init__(self) -> None:
+            self.replies: list[str] = []
+
+        def load_transcript(self) -> str:
+            return ""
+
+        def record_user_message(self, _message: str) -> None:
+            return None
+
+        def record_agent_message(self, _message: str) -> None:
+            return None
+
+        def record_reply(self, message: str) -> None:
+            self.replies.append(message)
+
+        def record_reply_once(self, _delivery_id: str, message: str) -> bool:
+            if message in self.replies:
+                return False
+            self.replies.append(message)
+            return True
+
+        def record_wait(self, _reason: str) -> None:
+            return None
+
+    class WorkingMemory:
+        def render_transcript(self) -> str:
+            return ""
+
+    contexts: list[InteractionToolContext] = []
+
+    def context_factory(cause_id: str) -> InteractionToolContext:
+        context = InteractionToolContext(
+            actor_party_id=JOHN_ACME_ID,
+            organization_party_id=ACME_ID,
+            cause_id=cause_id,
+            interaction_id="sms-policyholder-demo",
+        )
+        contexts.append(context)
+        return context
+
+    async def completion(**kwargs):
+        assert str(TARGET_ID) in json.dumps(kwargs["messages"])
+        assert "$1,284" in json.dumps(kwargs["messages"])
+        assert kwargs["tools"] == []
+        return {"choices": [{"message": {"content": "Your renewal is active."}}]}
+
+    conversation = Conversation()
+    runtime = InteractionAgentRuntime(
+        toolbox=toolbox,
+        tool_context_factory=context_factory,
+        system_prompt_builder=build_workflow_system_prompt,
+        message_builder=prepare_workflow_message,
+        completion=completion,
+        conversation_state=conversation,
+        working_memory_state=WorkingMemory(),
+        settings=Settings(openrouter_api_key="test-key", conversation_summary_threshold=0),
+    )
+
+    result = await runtime.execute_verified_resume(
+        notification_id=uuid4(),
+        operation_cause_id=verified.request_cause_id,
+        challenge_id=verified.challenge_id,
+        workflow_id=verified.workflow_id,
+        operation=verified.operation,
+    )
+
+    assert result.success is True
+    assert result.response == "Your renewal is active."
+    assert contexts[0].cause_id == "private-read-message"
+    assert contexts[0].trusted_workflow_id == TARGET_ID
+    assert contexts[0].loaded_packet is not None
+    assert contexts[0].loaded_packet.workflow.workflow_id == TARGET_ID
+    await database.dispose()
+
+
+async def test_verified_resume_explains_revalidation_failure_to_the_user():
+    class RejectingToolbox:
+        @property
+        def schemas(self):
+            return ()
+
+        async def invoke(self, name, arguments, context):
+            del name, arguments, context
+            return ToolResult(success=False, payload={"code": "stale_approval_target"})
+
+    class Conversation:
+        def __init__(self) -> None:
+            self.replies: list[str] = []
+
+        def load_transcript(self) -> str:
+            return ""
+
+        def record_user_message(self, _message: str) -> None:
+            return None
+
+        def record_agent_message(self, _message: str) -> None:
+            return None
+
+        def record_reply(self, message: str) -> None:
+            self.replies.append(message)
+
+        def record_reply_once(self, _delivery_id: str, message: str) -> bool:
+            if message in self.replies:
+                return False
+            self.replies.append(message)
+            return True
+
+    class WorkingMemory:
+        def render_transcript(self) -> str:
+            return ""
+
+    async def completion(**_kwargs):
+        raise AssertionError("Rejected continuation must not invoke the model")
+
+    conversation = Conversation()
+    runtime = InteractionAgentRuntime(
+        toolbox=RejectingToolbox(),
+        tool_context_factory=lambda cause_id: InteractionToolContext(
+            actor_party_id=JOHN_ACME_ID,
+            organization_party_id=ACME_ID,
+            cause_id=cause_id,
+            interaction_id="sms-policyholder-demo",
+        ),
+        system_prompt_builder=lambda: "unused",
+        message_builder=lambda *_args, **_kwargs: [],
+        completion=completion,
+        conversation_state=conversation,
+        working_memory_state=WorkingMemory(),
+        settings=Settings(openrouter_api_key="test-key"),
+    )
+
+    result = await runtime.execute_verified_resume(
+        notification_id=uuid4(),
+        operation_cause_id="original-private-request",
+        challenge_id=UUID("70000000-0000-0000-0000-000000000001"),
+        workflow_id=TARGET_ID,
+        operation=ProtectedOperation(
+            name="approve_job",
+            arguments={
+                "job_id": "60000000-0000-0000-0000-000000000001",
+                "expected_draft_revision_id": "60000000-0000-0000-0000-000000000002",
+            },
+        ),
+    )
+
+    assert result.success is False
+    assert result.error == "stale_approval_target"
+    assert "Please start the request again" in result.response
+    assert conversation.replies == [result.response]
 
 
 async def test_proposal_requires_packet_in_same_interaction_turn(
@@ -217,6 +600,7 @@ async def test_selected_authorized_workflow_derives_its_organization_context(
         organization_party_id=ACME_ID,
         cause_id="message-cross-organization",
     )
+    await workflow_toolbox.record_interaction_cause(context, "Prepare the Northwind renewal.")
     search = await workflow_toolbox.invoke(
         "search_workflows",
         {
@@ -281,6 +665,7 @@ async def test_ambiguous_search_cannot_read_or_propose_the_first_candidate(
         organization_party_id=ACME_ID,
         cause_id="message-ambiguous-selection",
     )
+    await workflow_toolbox.record_interaction_cause(context, "Prepare John's renewal.")
     search = await workflow_toolbox.invoke(
         "search_workflows",
         {"query": "John renewal"},

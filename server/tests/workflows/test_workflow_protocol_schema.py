@@ -10,7 +10,11 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from server.tests.workflows.factories import create_command
-from server.workflows import WorkflowControlPlane, WorkflowDatabase
+from server.workflows import (
+    RecordInteractionCauseCommand,
+    WorkflowControlPlane,
+    WorkflowDatabase,
+)
 
 PROTOCOL_TABLES = {
     "parties",
@@ -24,6 +28,7 @@ PROTOCOL_TABLES = {
     "workflow_job_runs",
     "workflow_events",
     "notifications",
+    "verification_challenges",
 }
 
 EXPECTED_INDEXES = {
@@ -46,10 +51,29 @@ EXPECTED_INDEXES = {
         "uq_workflow_events_approval_cause",
         "uq_workflow_events_approval_invalidation",
         "uq_workflow_events_dispatch_job",
+        "uq_workflow_events_proposal_cause",
         "uq_workflow_events_workflow_proposed",
     },
     "notifications": {"ix_notifications_claim", "ix_notifications_lease"},
+    "verification_challenges": {
+        "ix_verification_challenges_authorization",
+        "uq_verification_challenges_pending_interaction",
+    },
 }
+
+
+async def create_additional_workflow(
+    control_plane: WorkflowControlPlane,
+    cause_id: str,
+):
+    base = create_command()
+    command = base.model_copy(
+        update={"context": base.context.model_copy(update={"cause_id": cause_id})}
+    )
+    await control_plane.record_interaction_cause(
+        RecordInteractionCauseCommand(context=command.context, content=f"Fixture {cause_id}")
+    )
+    return await control_plane.create_workflow(command)
 
 
 async def reflected_schema(database_url: str) -> tuple[set[str], dict[str, set[str]]]:
@@ -87,7 +111,7 @@ async def test_dependency_cannot_cross_workflow(
     migrated_postgres_url: str,
 ):
     first = await control_plane.create_workflow(create_command())
-    second = await control_plane.create_workflow(create_command())
+    second = await create_additional_workflow(control_plane, "cross-workflow-two")
     first_send = next(job for job in first.jobs if job.status == "waiting")
     second_draft = next(job for job in second.jobs if job.status == "queued")
 
@@ -227,7 +251,7 @@ async def test_approval_grant_reference_cannot_cross_workflow(
     migrated_postgres_url: str,
 ):
     first = await control_plane.create_workflow(create_command())
-    second = await control_plane.create_workflow(create_command())
+    second = await create_additional_workflow(control_plane, "approval-workflow-two")
     first_send = next(job for job in first.jobs if job.status == "waiting")
     second_send = next(job for job in second.jobs if job.status == "waiting")
     approval_grant_id = uuid4()

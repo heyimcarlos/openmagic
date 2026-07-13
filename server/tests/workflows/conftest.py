@@ -18,6 +18,7 @@ from server.workflows.identity_models import (
     PartyIdentifierRow,
     PartyRow,
 )
+from server.workflows.models import InteractionCauseRow
 
 
 @pytest.fixture
@@ -49,6 +50,12 @@ async def seeded_workflow_identity(migrated_postgres_url: str, clean_workflow_da
                     person_party_id=BROKER_ID,
                     organization_party_id=ORGANIZATION_ID,
                     granted_at=now,
+                ),
+                InteractionCauseRow(
+                    id="message-renewal-request",
+                    cause_type="message",
+                    actor_party_id=BROKER_ID,
+                    content_digest="fixture-authenticated-cause",
                 ),
             ]
         )

@@ -54,7 +54,7 @@ class Settings(BaseModel):
     app_version: str = Field(default=DEFAULT_APP_VERSION)
 
     # Server runtime
-    server_host: str = Field(default=os.getenv("OPENPOKE_HOST", "0.0.0.0"))
+    server_host: str = Field(default=os.getenv("OPENPOKE_HOST", "127.0.0.1"))
     server_port: int = Field(default=_env_int("OPENPOKE_PORT", 8001))
 
     # LLM model selection
@@ -83,13 +83,22 @@ class Settings(BaseModel):
     workflow_composio_user_id: str | None = Field(
         default=os.getenv("OPENMAGIC_WORKFLOW_COMPOSIO_USER_ID")
     )
-    workflow_interaction_token: str | None = Field(
-        default=os.getenv("OPENMAGIC_WORKFLOW_INTERACTION_TOKEN")
+    verification_code_secret: str | None = Field(
+        default=os.getenv("OPENMAGIC_VERIFICATION_CODE_SECRET")
+    )
+    demo_policyholder_email: str = Field(
+        default=os.getenv("OPENMAGIC_DEMO_POLICYHOLDER_EMAIL", "john@example.com")
+    )
+    demo_broker_email: str = Field(
+        default=os.getenv(
+            "OPENMAGIC_DEMO_BROKER_EMAIL",
+            os.getenv("OPENMAGIC_LIVE_EMAIL_SENDER", "broker@acme.example"),
+        )
     )
     interaction_mode: Literal["workflow", "legacy"] = Field(default_factory=_interaction_mode)
 
     # HTTP behaviour
-    cors_allow_origins_raw: str = Field(default=os.getenv("OPENPOKE_CORS_ALLOW_ORIGINS", "*"))
+    cors_allow_origins_raw: str = Field(default=os.getenv("OPENPOKE_CORS_ALLOW_ORIGINS", ""))
     enable_docs: bool = Field(default=os.getenv("OPENPOKE_ENABLE_DOCS", "1") != "0")
     docs_url: str | None = Field(default=os.getenv("OPENPOKE_DOCS_URL", "/docs"))
 
@@ -100,8 +109,10 @@ class Settings(BaseModel):
     @property
     def cors_allow_origins(self) -> list[str]:
         """Parse CORS origins from comma-separated string."""
-        if self.cors_allow_origins_raw.strip() in {"", "*"}:
+        if self.cors_allow_origins_raw.strip() == "*":
             return ["*"]
+        if not self.cors_allow_origins_raw.strip():
+            return []
         return [
             origin.strip() for origin in self.cors_allow_origins_raw.split(",") if origin.strip()
         ]

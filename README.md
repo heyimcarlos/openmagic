@@ -37,6 +37,13 @@ OpenMagic is a simplified, open-source take on [Interaction Company’s](https:/
    - Create an API key
    - Set up Gmail integration and get your auth config ID
    - Replace `your_composio_api_key_here` and `your_gmail_auth_config_id_here` in `.env`
+
+   **Workflow verification demo**
+   - Replace the Workflow cursor and verification secrets in `.env`
+   - Set `OPENMAGIC_DEMO_POLICYHOLDER_EMAIL` to an inbox you can read
+   - Set `OPENMAGIC_DEMO_BROKER_EMAIL` to the connected Broker mailbox
+   - Set `OPENMAGIC_WORKFLOW_COMPOSIO_USER_ID` to the connected Composio user that sends the code
+   - The browser SMS surface is a single-user localhost simulator, not an authenticated carrier channel. Do not expose it as a production identity boundary.
 4. **Start PostgreSQL.** For a disposable local database:
    ```bash
    docker run --name openmagic-postgres \
@@ -57,9 +64,12 @@ OpenMagic is a simplified, open-source take on [Interaction Company’s](https:/
    ```
    This explicit local seed creates the Broker, Organization Membership,
    Policyholder, active renewal Workflow, and verified identifiers referenced
-   by `.env.example`. Migrations never infer current authority from historical
-   Workflow Events. A production environment must provision these records from
-   its trusted identity source instead of using the demo seed.
+   by `.env.example`. The Policyholder can request private Workflow information
+   from the SMS simulator, receive a six-digit code by email, and reply with the
+   code to resume the exact protected operation. Migrations never infer current
+   authority from historical Workflow Events. A production environment must
+   provision these records from its trusted identity source instead of using
+   the demo seed.
 7. **Install frontend dependencies:**
    ```bash
    npm install --prefix web
@@ -74,7 +84,7 @@ OpenMagic is a simplified, open-source take on [Interaction Company’s](https:/
    ```
 10. **Connect Gmail for email workflows.** With both services running, open [http://localhost:3000](http://localhost:3000), head to *Settings → Gmail*, and complete the Composio OAuth flow. This step is required for email drafting, replies, and the important-email monitor.
 
-The web app proxies API calls to the Python server using the values in `.env`, so keeping both processes running is required for end-to-end flows.
+The web app proxies API calls to the Python server using the values in `.env`, so keeping both processes running is required for end-to-end flows. Both development servers bind to localhost by default because the SMS identity surface is intentionally unauthenticated demo infrastructure.
 
 ## Project Layout
 - `server/`: FastAPI application, agent runtimes, and durable Workflow services

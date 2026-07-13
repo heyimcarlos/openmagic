@@ -3,11 +3,11 @@
   "private": true,
   "version": "0.1.0",
   "scripts": {
-    "dev": "next dev",
-    "demo:workflow-telemetry": "next dev",
+    "dev": "next dev --hostname 127.0.0.1",
+    "demo:workflow-telemetry": "next dev --hostname 127.0.0.1",
     "build": "next build",
     "test": "tsx --test lib/*.test.mts",
-    "start": "next start",
+    "start": "next start --hostname 127.0.0.1",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit"
   },
