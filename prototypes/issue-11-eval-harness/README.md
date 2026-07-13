@@ -18,6 +18,9 @@ The proposed shape has three deliberately separate lanes:
    Workflow selection, duplicate input, context burden, and latency segments.
    V0 correctness is gated. The inherited baseline remains an observation, so
    demonstrating an inherited weakness does not make the harness itself fail.
+   Authorization and the one-Workflow-Packet cap are correctness gates. The
+   comparative context bytes, approximate tokens, and tool counts are
+   diagnostics because smaller context is useful only while it stays sufficient.
 2. **Protocol recovery:** exercise PostgreSQL, Workers, leases, approval,
    dispatch, and notification faults only against the durable path. These are
    deterministic correctness gates, not model benchmarks.
