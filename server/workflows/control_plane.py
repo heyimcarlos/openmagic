@@ -386,6 +386,7 @@ class WorkflowControlPlane:
         workflow_id: UUID,
         worker_id: str,
         delivery_attempt: int,
+        interaction_runtime_instance_id: UUID | None = None,
     ) -> NotificationPresentationContext:
         return await self._notification_delivery.resolve_presentation(
             notification_id,
@@ -393,6 +394,7 @@ class WorkflowControlPlane:
             workflow_id,
             worker_id,
             delivery_attempt,
+            interaction_runtime_instance_id,
         )
 
     async def resolve_notification_audience(

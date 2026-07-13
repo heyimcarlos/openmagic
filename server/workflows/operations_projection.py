@@ -24,6 +24,7 @@ class WorkflowOperationalJob:
     workflow_id: UUID
     kind: str
     input: dict[str, object]
+    output: dict[str, object] | None
     status: str
     attempts: int
     max_attempts: int
@@ -61,6 +62,9 @@ class WorkflowOperationalEvent:
     workflow_id: UUID
     job_id: UUID | None
     run_id: UUID | None
+    cause_type: str
+    cause_id: str
+    data: dict[str, object]
     occurred_at: datetime
 
 
@@ -157,6 +161,7 @@ class WorkflowOperationsProjection:
                     workflow_id=job.workflow_id,
                     kind=job.kind,
                     input=dict(job.input),
+                    output=dict(job.output) if job.output is not None else None,
                     status=job.status,
                     attempts=job.attempts,
                     max_attempts=job.max_attempts,
@@ -197,6 +202,9 @@ class WorkflowOperationsProjection:
                     workflow_id=event.workflow_id,
                     job_id=event.job_id,
                     run_id=event.run_id,
+                    cause_type=event.cause_type,
+                    cause_id=event.cause_id,
+                    data=dict(event.data),
                     occurred_at=event.occurred_at,
                 )
                 for event in events

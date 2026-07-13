@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import {
   Background,
   BaseEdge,
@@ -9,7 +9,6 @@ import {
   ReactFlow,
   ReactFlowProvider,
   getBezierPath,
-  useReactFlow,
   type Edge,
   type EdgeProps,
   type Node,
@@ -24,6 +23,7 @@ import {
   LoaderCircleIcon,
   PlusIcon,
   RadioTowerIcon,
+  UserCheckIcon,
   XIcon,
 } from 'lucide-react';
 
@@ -36,6 +36,7 @@ import {
   type BackpressureNotification,
   type BackpressureSnapshot,
 } from '@/lib/backpressureDemo';
+import type { ApprovalRequest } from '@/lib/chatTelemetry';
 import { cn } from '@/lib/utils';
 
 export interface LabSelection {
@@ -47,7 +48,12 @@ export interface LabSelection {
 
 interface LabDataBase {
   [key: string]: unknown;
-  kind: 'queue' | 'worker' | 'worker-add' | 'lane' | 'entity' | 'collection';
+  kind: 'bounds' | 'queue' | 'worker' | 'worker-add' | 'notification-worker' |
+    'lane' | 'entity' | 'collection' | 'interaction';
+}
+
+interface BoundsData extends LabDataBase {
+  kind: 'bounds';
 }
 
 interface QueueData extends LabDataBase {
@@ -78,7 +84,7 @@ interface LaneData extends LabDataBase {
   kind: 'lane';
   title: string;
   metric: string;
-  icon: 'worker' | 'run' | 'agent';
+  icon: 'worker' | 'run' | 'agent' | 'notification-worker';
 }
 
 interface EntityData extends LabDataBase {
@@ -94,7 +100,6 @@ interface EntityData extends LabDataBase {
 
 interface CollectionData extends LabDataBase {
   kind: 'collection';
-  collectionKind: 'notification' | 'interaction';
   title: string;
   metric: string;
   count: number;
@@ -103,7 +108,27 @@ interface CollectionData extends LabDataBase {
   onInspect: (selection: LabSelection) => void;
 }
 
-type LabNodeData = QueueData | WorkerData | WorkerAddData | LaneData | EntityData | CollectionData;
+interface NotificationWorkerData extends LabDataBase {
+  kind: 'notification-worker';
+  id: string;
+  status: 'active' | 'recent' | 'ready';
+  notificationId?: string;
+  selected: boolean;
+  onInspect: (selection: LabSelection) => void;
+}
+
+interface InteractionData extends LabDataBase {
+  kind: 'interaction';
+  count: number;
+  items: ReadonlyArray<BackpressureNotification>;
+  approval?: ApprovalRequest;
+  selectedId?: string;
+  onInspect: (selection: LabSelection) => void;
+  onReviewApproval: (approval: ApprovalRequest) => void;
+}
+
+type LabNodeData = BoundsData | QueueData | WorkerData | WorkerAddData |
+  NotificationWorkerData | LaneData | EntityData | CollectionData | InteractionData;
 type LabNode = Node<LabNodeData, 'lab'>;
 type LabEdge = Edge<{ active: boolean; latencyMs?: number }, 'signal'>;
 
@@ -119,14 +144,18 @@ export function BackpressureFlow({
   snapshot,
   addingWorkflows,
   addingWorker,
+  approving,
   onAddWorkflows,
   onAddWorker,
+  onApprove,
 }: {
   snapshot: BackpressureSnapshot;
   addingWorkflows: boolean;
   addingWorker: boolean;
+  approving: boolean;
   onAddWorkflows: (workflowCount: number) => void;
   onAddWorker: () => void;
+  onApprove: (approval: ApprovalRequest) => void;
 }) {
   return (
     <ReactFlowProvider>
@@ -134,8 +163,10 @@ export function BackpressureFlow({
         snapshot={snapshot}
         addingWorkflows={addingWorkflows}
         addingWorker={addingWorker}
+        approving={approving}
         onAddWorkflows={onAddWorkflows}
         onAddWorker={onAddWorker}
+        onApprove={onApprove}
       />
     </ReactFlowProvider>
   );
@@ -145,18 +176,25 @@ function BackpressureLabCanvas({
   snapshot,
   addingWorkflows,
   addingWorker,
+  approving,
   onAddWorkflows,
   onAddWorker,
+  onApprove,
 }: {
   snapshot: BackpressureSnapshot;
   addingWorkflows: boolean;
   addingWorker: boolean;
+  approving: boolean;
   onAddWorkflows: (workflowCount: number) => void;
   onAddWorker: () => void;
+  onApprove: (approval: ApprovalRequest) => void;
 }) {
   const [selection, setSelection] = useState<LabSelection>();
+  const [reviewingJobId, setReviewingJobId] = useState<string>();
   const scene = useMemo(() => buildBackpressureLabScene(snapshot), [snapshot]);
-  const { fitView, getViewport, setViewport } = useReactFlow<LabNode, LabEdge>();
+  const reviewingApproval = snapshot.approvalRequests.find(
+    (approval) => approval.jobId === reviewingJobId,
+  );
   const { nodes, edges } = useMemo(
     () => buildLabGraph({
       snapshot,
@@ -166,6 +204,7 @@ function BackpressureLabCanvas({
       addingWorker,
       onAddWorkflows,
       onAddWorker,
+      onReviewApproval: (approval) => setReviewingJobId(approval.jobId),
       onInspect: setSelection,
     }),
     [
@@ -178,17 +217,6 @@ function BackpressureLabCanvas({
       onAddWorker,
     ],
   );
-  const layoutKey = `${scene.jobs.length}:${scene.workers.length}:${scene.runs.length}:${scene.notifications.length}`;
-
-  useEffect(() => {
-    const frame = window.requestAnimationFrame(() => {
-      void fitView({ padding: 0.04, minZoom: 0.45, maxZoom: 0.96, duration: 300 }).then(() => {
-        const viewport = getViewport();
-        void setViewport({ ...viewport, y: 18 }, { duration: 200 });
-      });
-    });
-    return () => window.cancelAnimationFrame(frame);
-  }, [fitView, getViewport, layoutKey, setViewport]);
 
   return (
     <div className="relative min-h-0 flex-1 overflow-hidden bg-card">
@@ -224,6 +252,14 @@ function BackpressureLabCanvas({
           </Button>
         </div>
       )}
+      {reviewingApproval && (
+        <ApprovalReview
+          approval={reviewingApproval}
+          approving={approving}
+          onApprove={onApprove}
+          onClose={() => setReviewingJobId(undefined)}
+        />
+      )}
     </div>
   );
 }
@@ -236,6 +272,7 @@ function buildLabGraph({
   addingWorker,
   onAddWorkflows,
   onAddWorker,
+  onReviewApproval,
   onInspect,
 }: {
   snapshot: BackpressureSnapshot;
@@ -245,9 +282,21 @@ function buildLabGraph({
   addingWorker: boolean;
   onAddWorkflows: (workflowCount: number) => void;
   onAddWorker: () => void;
+  onReviewApproval: (approval: ApprovalRequest) => void;
   onInspect: (selection: LabSelection) => void;
 }): { nodes: LabNode[]; edges: LabEdge[] } {
   const nodes: LabNode[] = [
+    {
+      id: 'stable-bounds',
+      type: 'lab',
+      position: { x: 0, y: 36 },
+      width: 1320,
+      height: 640,
+      data: { kind: 'bounds' },
+      selectable: false,
+      draggable: false,
+      style: { pointerEvents: 'none' },
+    },
     labNode('queue', { x: 18, y: 72 }, 270, 386, {
       kind: 'queue',
       scene,
@@ -275,9 +324,8 @@ function buildLabGraph({
       metric: `${snapshot.counts.runsRunning} live contexts`,
       icon: 'agent',
     }),
-    labNode('notifications', { x: 790, y: 100 }, 210, 300, {
+    labNode('notifications', { x: 780, y: 100 }, 200, 300, {
       kind: 'collection',
-      collectionKind: 'notification',
       title: 'Notifications',
       metric: `${formatLatency(snapshot.latency.notificationDeliveryP50Ms)} p50 delivery`,
       count: snapshot.counts.notificationsQueued + snapshot.counts.notificationsDelivering,
@@ -285,17 +333,34 @@ function buildLabGraph({
       selectedId: selection?.id,
       onInspect,
     }),
-    labNode('interactions', { x: 1025, y: 100 }, 210, 300, {
-      kind: 'collection',
-      collectionKind: 'interaction',
-      title: 'Interaction turns',
-      metric: `${formatLatency(snapshot.latency.endToEndP50Ms)} p50 end to end`,
+    labNode('notification-worker-label', { x: 990, y: 72 }, 120, 48, {
+      kind: 'lane',
+      title: 'Notification Worker',
+      metric: `${snapshot.worker.configuredNotificationConcurrency} local · delivery ${formatLatency(snapshot.latency.notificationDeliveryP50Ms)}`,
+      icon: 'notification-worker',
+    }),
+    labNode('interactions', { x: 1100, y: 100 }, 210, 300, {
+      kind: 'interaction',
       count: snapshot.counts.notificationsDelivered,
       items: scene.interactions,
+      approval: snapshot.approvalRequests[0],
       selectedId: selection?.id,
       onInspect,
+      onReviewApproval,
     }),
   ];
+
+  const activeNotification = scene.notifications.find((item) => item.status === 'delivering');
+  const recentNotification = scene.interactions[0];
+  const notificationWorkerId = activeNotification?.claimedBy ?? recentNotification?.deliveredBy ?? 'notification-worker';
+  nodes.push(labNode('notification-worker', { x: 1010, y: rowStartY }, 72, 52, {
+    kind: 'notification-worker',
+    id: notificationWorkerId,
+    status: activeNotification ? 'active' : recentNotification ? 'recent' : 'ready',
+    notificationId: activeNotification?.id ?? recentNotification?.id,
+    selected: selection?.id === notificationWorkerId,
+    onInspect,
+  }));
 
   scene.workers.forEach((worker, index) => {
     nodes.push(labNode(`worker:${worker.id}`, { x: workerX, y: rowStartY + index * rowGap }, 72, 52, {
@@ -364,9 +429,15 @@ function buildLabGraph({
       }
     }
   }
-  if (scene.interactions.length > 0) {
-    edges.push(signalEdge('notification-interaction', 'notifications', 'interactions', {
-      active: scene.interactions.some((item) =>
+  if (scene.notifications.length > 0) {
+    edges.push(signalEdge('notification-worker-claim', 'notifications', 'notification-worker', {
+      active: Boolean(activeNotification),
+      latencyMs: snapshot.latency.notificationDeliveryP50Ms,
+    }));
+  }
+  if (scene.interactions.length > 0 || activeNotification) {
+    edges.push(signalEdge('worker-interaction', 'notification-worker', 'interactions', {
+      active: Boolean(activeNotification) || scene.interactions.some((item) =>
         item.deliveredAt && happenedRecently(snapshot.capturedAt, item.deliveredAt, 10)),
       latencyMs: snapshot.latency.notificationDeliveryP50Ms,
     }));
@@ -401,12 +472,15 @@ function signalEdge(
 }
 
 function LabNodeRenderer({ data }: NodeProps<LabNode>) {
+  if (data.kind === 'bounds') return <div aria-hidden="true" />;
   if (data.kind === 'queue') return <QueueNode data={data} />;
   if (data.kind === 'worker') return <WorkerNode data={data} />;
   if (data.kind === 'worker-add') return <WorkerAddNode data={data} />;
+  if (data.kind === 'notification-worker') return <NotificationWorkerNode data={data} />;
   if (data.kind === 'lane') return <LaneNode data={data} />;
   if (data.kind === 'entity') return <EntityNode data={data} />;
-  return <CollectionNode data={data} />;
+  if (data.kind === 'collection') return <CollectionNode data={data} />;
+  return <InteractionNode data={data} />;
 }
 
 function QueueNode({ data }: { data: QueueData }) {
@@ -551,8 +625,42 @@ function WorkerAddNode({ data }: { data: WorkerAddData }) {
   );
 }
 
+function NotificationWorkerNode({ data }: { data: NotificationWorkerData }) {
+  return (
+    <div className="relative flex w-[72px] flex-col items-center">
+      <Handle type="target" position={Position.Left} className="!size-2 !border-background !bg-primary" />
+      <button
+        type="button"
+        className={cn(
+          'nodrag nopan grid size-11 place-items-center rounded-full border-2 bg-card font-mono text-[0.65rem] font-medium shadow-sm transition hover:scale-105',
+          data.status === 'active' && 'animate-pulse border-violet-400 bg-violet-50 text-violet-800 motion-reduce:animate-none',
+          data.status === 'recent' && 'border-violet-300 bg-violet-50 text-violet-800',
+          data.status === 'ready' && 'border-border text-muted-foreground',
+          data.selected && 'ring-2 ring-primary ring-offset-2',
+        )}
+        onClick={() => data.onInspect({
+          id: data.id,
+          title: 'Notification Worker',
+          status: data.status,
+          detail: data.notificationId
+            ? `${shortId(data.id)} claimed Notification ${shortId(data.notificationId)}`
+            : 'Ready to claim one durable Notification.',
+        })}
+      >
+        N1
+      </button>
+      <span className="mt-0.5 text-[0.52rem] uppercase text-muted-foreground">{data.status}</span>
+      <Handle type="source" position={Position.Right} className="!size-2 !border-background !bg-primary" />
+    </div>
+  );
+}
+
 function LaneNode({ data }: { data: LaneData }) {
-  const Icon = data.icon === 'worker' ? RadioTowerIcon : data.icon === 'run' ? BoxesIcon : BotIcon;
+  const Icon = data.icon === 'worker' || data.icon === 'notification-worker'
+    ? RadioTowerIcon
+    : data.icon === 'run'
+      ? BoxesIcon
+      : BotIcon;
   return (
     <div className="w-full">
       <h3 className="flex items-center gap-1.5 text-xs font-medium">
@@ -589,14 +697,13 @@ function EntityNode({ data }: { data: EntityData }) {
 }
 
 function CollectionNode({ data }: { data: CollectionData }) {
-  const Icon = data.collectionKind === 'notification' ? BellRingIcon : BotIcon;
   return (
-    <section className="relative flex h-[300px] w-[210px] flex-col overflow-hidden rounded-2xl border bg-card shadow-sm">
+    <section className="relative flex h-[300px] w-[200px] flex-col overflow-hidden rounded-2xl border bg-card shadow-sm">
       <Handle type="target" position={Position.Left} className="!size-2 !border-background !bg-primary" />
       <header className="border-b px-3 py-3">
         <div className="flex items-center justify-between gap-2">
           <h3 className="flex items-center gap-1.5 text-xs font-medium">
-            <Icon className="size-3.5 text-primary" />
+            <BellRingIcon className="size-3.5 text-primary" />
             {data.title}
           </h3>
           <span className="font-mono text-base font-medium">{data.count}</span>
@@ -614,11 +721,9 @@ function CollectionNode({ data }: { data: CollectionData }) {
             )}
             onClick={() => data.onInspect({
               id: item.id,
-              title: data.collectionKind === 'notification' ? item.kind : `Turn ${shortId(item.id)}`,
+              title: item.kind,
               status: item.status,
-              detail: data.collectionKind === 'notification'
-                ? `Workflow ${shortId(item.workflowId)} · delivery attempt ${item.attempts}`
-                : `Delivered by ${shortId(item.deliveredBy ?? 'unknown')} for Workflow ${shortId(item.workflowId)}`,
+              detail: `Workflow ${shortId(item.workflowId)} · delivery attempt ${item.attempts}`,
             })}
           >
             <span className={cn(
@@ -626,7 +731,7 @@ function CollectionNode({ data }: { data: CollectionData }) {
               item.status === 'delivered' ? 'bg-emerald-500' : item.status === 'failed' ? 'bg-red-500' : 'bg-violet-500',
             )} />
             <span className="min-w-0 flex-1 truncate text-[0.63rem] font-medium">
-              {data.collectionKind === 'notification' ? item.kind : `Turn ${shortId(item.id)}`}
+              {item.kind}
             </span>
             <code className="text-[0.5rem] uppercase text-muted-foreground">{item.status}</code>
           </button>
@@ -635,10 +740,133 @@ function CollectionNode({ data }: { data: CollectionData }) {
           <div className="grid h-28 place-items-center text-xs text-muted-foreground">Idle</div>
         )}
       </div>
-      {data.collectionKind === 'notification' && (
-        <Handle type="source" position={Position.Right} className="!size-2 !border-background !bg-primary" />
-      )}
+      <Handle type="source" position={Position.Right} className="!size-2 !border-background !bg-primary" />
     </section>
+  );
+}
+
+function InteractionNode({ data }: { data: InteractionData }) {
+  return (
+    <section className="relative flex h-[300px] w-[210px] flex-col overflow-hidden rounded-2xl border bg-card shadow-sm">
+      <Handle type="target" position={Position.Left} className="!size-2 !border-background !bg-primary" />
+      <header className="border-b px-3 py-3">
+        <div className="flex items-center justify-between gap-2">
+          <h3 className="flex items-center gap-1.5 text-xs font-medium">
+            <BotIcon className="size-3.5 text-primary" />
+            Interaction Agents
+          </h3>
+          <span className="font-mono text-[0.62rem] text-muted-foreground">{data.count} turns</span>
+        </div>
+        <p className="mt-1 text-[0.58rem] text-muted-foreground">fresh context per Notification</p>
+      </header>
+      <div className="min-h-0 flex-1 space-y-1.5 px-2.5 py-2.5">
+        {data.items.slice(0, data.approval ? 3 : 5).map((item) => {
+          const runtimeId = item.interactionRuntimeInstanceId;
+          const interactionId = runtimeId ?? `interaction:${item.id}`;
+          const presentationTool = item.kind === 'approval_required'
+            ? 'present_approval_request'
+            : 'present_status_update';
+          return (
+            <button
+              key={item.id}
+              type="button"
+              className={cn(
+                'nodrag nopan flex h-11 w-full items-center gap-2 rounded-lg border px-2 text-left transition hover:bg-accent',
+                data.selectedId === interactionId && 'border-primary bg-accent',
+              )}
+              onClick={() => data.onInspect({
+                id: interactionId,
+                title: runtimeId ? `Interaction Agent ${shortId(runtimeId)}` : 'Fresh Interaction Agent',
+                status: 'presented',
+                detail: `read_workflow_packet → ${presentationTool} · Workflow ${shortId(item.workflowId)}`,
+              })}
+            >
+              <BotIcon className="size-3 shrink-0 text-primary" />
+              <span className="min-w-0 flex-1">
+                <strong className="block truncate text-[0.63rem] font-medium">
+                  {runtimeId ? `IA ${shortId(runtimeId)}` : 'Fresh IA'}
+                </strong>
+                <span className="block truncate text-[0.5rem] text-muted-foreground">
+                  {item.kind === 'approval_required'
+                    ? 'read packet → present approval'
+                    : 'read packet → present status'}
+                </span>
+              </span>
+            </button>
+          );
+        })}
+        {data.approval && (
+          <button
+            type="button"
+            className="nodrag nopan flex w-full items-center gap-2 rounded-lg border border-primary/30 bg-primary/5 px-2 py-2 text-left transition hover:bg-primary/10"
+            onClick={() => data.onReviewApproval(data.approval!)}
+          >
+            <UserCheckIcon className="size-3.5 shrink-0 text-primary" />
+            <span className="min-w-0 flex-1">
+              <strong className="block truncate text-[0.63rem] font-medium">Approval ready</strong>
+              <span className="block truncate text-[0.53rem] text-muted-foreground">
+                {data.approval.subject}
+              </span>
+            </span>
+          </button>
+        )}
+        {data.items.length === 0 && !data.approval && (
+          <div className="grid h-28 place-items-center text-xs text-muted-foreground">Idle</div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function ApprovalReview({
+  approval,
+  approving,
+  onApprove,
+  onClose,
+}: {
+  approval: ApprovalRequest;
+  approving: boolean;
+  onApprove: (approval: ApprovalRequest) => void;
+  onClose: () => void;
+}) {
+  return (
+    <aside className="absolute inset-y-3 right-3 z-20 flex w-[min(25rem,calc(100%-1.5rem))] flex-col overflow-hidden rounded-2xl border bg-card shadow-xl">
+      <header className="flex items-center justify-between gap-3 border-b px-4 py-3">
+        <div>
+          <h2 className="flex items-center gap-2 text-sm font-medium">
+            <UserCheckIcon className="size-4 text-primary" />
+            Review exact email
+          </h2>
+          <p className="mt-0.5 text-[0.6rem] text-muted-foreground">Revision {approval.revision}</p>
+        </div>
+        <Button size="icon" variant="ghost" onClick={onClose} aria-label="Close approval review">
+          <XIcon />
+        </Button>
+      </header>
+      <div className="min-h-0 flex-1 space-y-2 overflow-y-auto px-4 py-3 text-xs">
+        <ApprovalField label="From" value={approval.sender} />
+        <ApprovalField label="To" value={approval.to.join(', ')} />
+        <ApprovalField label="Cc" value={approval.cc.join(', ') || 'None'} />
+        <ApprovalField label="Bcc" value={approval.bcc.join(', ') || 'None'} />
+        <ApprovalField label="Subject" value={approval.subject} />
+        <div className="whitespace-pre-wrap rounded-lg bg-muted/60 p-3 leading-5">{approval.body}</div>
+      </div>
+      <footer className="border-t p-3">
+        <Button className="w-full" disabled={approving} onClick={() => onApprove(approval)}>
+          {approving ? <LoaderCircleIcon className="animate-spin" /> : <UserCheckIcon />}
+          Approve exact email
+        </Button>
+      </footer>
+    </aside>
+  );
+}
+
+function ApprovalField({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="grid grid-cols-[3.5rem_1fr] gap-2">
+      <span className="text-muted-foreground">{label}</span>
+      <span className="break-words font-medium">{value}</span>
+    </div>
   );
 }
 

@@ -89,6 +89,7 @@ const payload = {
       attempts: 0,
       claimed_by: null,
       delivered_by: null,
+      interaction_runtime_instance_id: null,
       created_at: '2026-07-13T14:00:04Z',
       delivered_at: null,
     },
@@ -100,8 +101,23 @@ const payload = {
       attempts: 1,
       claimed_by: null,
       delivered_by: 'notification-worker:12345678',
+      interaction_runtime_instance_id: 'interaction-runtime-fresh-1',
       created_at: '2026-07-13T13:59:57Z',
       delivered_at: '2026-07-13T14:00:03Z',
+    },
+  ],
+  approval_requests: [
+    {
+      workflow_id: 'workflow-3',
+      job_id: 'send-job-3',
+      draft_revision_id: 'draft-job-3',
+      revision: 1,
+      sender: 'broker@acme.example',
+      to: ['john@example.com'],
+      cc: [],
+      bcc: [],
+      subject: '2026 renewal',
+      body: 'Hello John',
     },
   ],
   activity: [
@@ -175,6 +191,11 @@ test('parses the live projection and derives explicit Job-to-Worker assignments'
     ['notification-queued', 'notification-delivered'],
   );
   assert.equal(scene.interactions[0]?.id, 'notification-delivered');
+  assert.equal(
+    scene.interactions[0]?.interactionRuntimeInstanceId,
+    'interaction-runtime-fresh-1',
+  );
+  assert.equal(snapshot.approvalRequests[0]?.jobId, 'send-job-3');
   assert.equal(scene.latestActivity?.type, 'workflow_jobs_proposed');
 });
 

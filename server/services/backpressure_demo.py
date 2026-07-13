@@ -25,6 +25,7 @@ from server.workflows import (
     WorkflowControlPlane,
     WorkflowDatabase,
     WorkflowJobProposal,
+    WorkflowOperationalEvent,
     WorkflowOperationalJob,
     WorkflowOperationsProjection,
     WorkflowProposal,
@@ -116,8 +117,22 @@ class BackpressureNotificationView(DemoModel):
     attempts: int
     claimed_by: str | None
     delivered_by: str | None
+    interaction_runtime_instance_id: UUID | None = None
     created_at: datetime
     delivered_at: datetime | None
+
+
+class BackpressureApprovalView(DemoModel):
+    workflow_id: UUID
+    job_id: UUID
+    draft_revision_id: UUID
+    revision: int
+    sender: str
+    to: tuple[str, ...]
+    cc: tuple[str, ...] = ()
+    bcc: tuple[str, ...] = ()
+    subject: str
+    body: str
 
 
 class BackpressureActivityView(DemoModel):
@@ -139,6 +154,7 @@ class BackpressureSnapshot(DemoModel):
     jobs: tuple[BackpressureJobView, ...]
     runs: tuple[BackpressureRunView, ...]
     notifications: tuple[BackpressureNotificationView, ...]
+    approval_requests: tuple[BackpressureApprovalView, ...]
     activity: tuple[BackpressureActivityView, ...]
 
 
@@ -244,6 +260,31 @@ class BackpressureDemoService:
         run_counts = Counter(run.status for run in runs)
         notification_counts = Counter(item.status for item in notifications)
         jobs_by_id = {job.id: job for job in jobs}
+        approved_job_ids: set[UUID] = {
+            event.job_id
+            for event in projected.events
+            if event.event_type == "approval_granted" and event.job_id is not None
+        }
+        presentation_by_job = {
+            event.job_id: event
+            for event in projected.events
+            if event.event_type == "approval_presentation_committed"
+            and event.job_id is not None
+        }
+        interaction_runtime_by_notification: dict[UUID, UUID] = {}
+        for event in presentation_by_job.values():
+            runtime_id = event.data.get("interaction_runtime_instance_id")
+            if event.cause_type != "notification" or not isinstance(runtime_id, str):
+                continue
+            try:
+                interaction_runtime_by_notification[UUID(event.cause_id)] = UUID(runtime_id)
+            except ValueError:
+                continue
+        approval_requests = self._approval_requests(
+            jobs,
+            presentation_by_job,
+            approved_job_ids,
+        )
         first_job_at_by_workflow: dict[UUID, datetime] = {}
         for job in jobs:
             first_job_at_by_workflow[job.workflow_id] = min(
@@ -385,11 +426,15 @@ class BackpressureDemoService:
                     attempts=item.attempts,
                     claimed_by=item.claimed_by,
                     delivered_by=item.delivered_by,
+                    interaction_runtime_instance_id=(
+                        interaction_runtime_by_notification.get(item.id)
+                    ),
                     created_at=item.created_at,
                     delivered_at=item.delivered_at,
                 )
                 for item in notifications
             ),
+            approval_requests=approval_requests,
             activity=tuple(activity[:80]),
         )
 
@@ -405,6 +450,98 @@ class BackpressureDemoService:
                 return f"Draft the {period} renewal for {recipient}"
             return "Draft one renewal email from bounded Workflow input"
         return "Wait for exact approval, then send the frozen Draft Revision"
+
+    @staticmethod
+    def _approval_requests(
+        jobs: tuple[WorkflowOperationalJob, ...],
+        presentation_by_job: dict[UUID, WorkflowOperationalEvent],
+        approved_job_ids: set[UUID],
+    ) -> tuple[BackpressureApprovalView, ...]:
+        jobs_by_id = {job.id: job for job in jobs}
+        drafts_by_workflow: dict[UUID, list[WorkflowOperationalJob]] = {}
+        for job in jobs:
+            if job.kind == DRAFT_RENEWAL_EMAIL_KIND:
+                drafts_by_workflow.setdefault(job.workflow_id, []).append(job)
+        for drafts in drafts_by_workflow.values():
+            drafts.sort(key=lambda item: (item.created_at, item.id))
+
+        collected: list[tuple[datetime, BackpressureApprovalView]] = []
+        for send in jobs:
+            presentation = presentation_by_job.get(send.id)
+            if (
+                send.kind != GMAIL_SEND_EMAIL_KIND
+                or send.status != "waiting"
+                or send.id in approved_job_ids
+                or presentation is None
+            ):
+                continue
+            draft_value = presentation.data.get("draft_job_id")
+            try:
+                draft_id = UUID(str(draft_value))
+            except (TypeError, ValueError):
+                continue
+            draft = jobs_by_id.get(draft_id)
+            if draft is None or draft.output is None or draft.status != "succeeded":
+                continue
+            sender = send.input.get("sender_mailbox")
+            to = send.input.get("to")
+            cc = send.input.get("cc", ())
+            bcc = send.input.get("bcc", ())
+            subject = BackpressureDemoService._resolved_input_value(send, draft, "subject")
+            body = BackpressureDemoService._resolved_input_value(send, draft, "body")
+            if (
+                not isinstance(sender, str)
+                or not isinstance(to, list | tuple)
+                or not to
+                or not all(isinstance(address, str) for address in to)
+                or not isinstance(cc, list | tuple)
+                or not all(isinstance(address, str) for address in cc)
+                or not isinstance(bcc, list | tuple)
+                or not all(isinstance(address, str) for address in bcc)
+                or not isinstance(subject, str)
+                or not subject
+                or not isinstance(body, str)
+                or not body
+            ):
+                continue
+            drafts = drafts_by_workflow.get(send.workflow_id, [])
+            try:
+                revision = drafts.index(draft) + 1
+            except ValueError:
+                continue
+            collected.append(
+                (
+                    presentation.occurred_at,
+                    BackpressureApprovalView(
+                        workflow_id=send.workflow_id,
+                        job_id=send.id,
+                        draft_revision_id=draft.id,
+                        revision=revision,
+                        sender=sender,
+                        to=tuple(to),
+                        cc=tuple(cc),
+                        bcc=tuple(bcc),
+                        subject=subject,
+                        body=body,
+                    ),
+                )
+            )
+        collected.sort(key=lambda item: item[0], reverse=True)
+        return tuple(item for _, item in collected[:5])
+
+    @staticmethod
+    def _resolved_input_value(
+        send: WorkflowOperationalJob,
+        draft: WorkflowOperationalJob,
+        field: str,
+    ) -> object:
+        value = send.input.get(field)
+        if not isinstance(value, dict) or set(value) != {"job_output", "field"}:
+            return value
+        if str(value.get("job_output")) != str(draft.id):
+            return None
+        source_field = value.get("field")
+        return draft.output.get(source_field) if isinstance(source_field, str) else None
 
     @staticmethod
     def _p50(values: Iterable[int]) -> int | None:

@@ -150,7 +150,7 @@ function parseWorkflow(value: unknown): WorkflowTelemetry | undefined {
   return { id, title, statusLabel, stages: stages as WorkflowStage[] };
 }
 
-function parseApprovalRequest(value: unknown): ApprovalRequest | undefined {
+export function parseApprovalRequest(value: unknown): ApprovalRequest | undefined {
   if (!isRecord(value)) return undefined;
   const workflowId = readText(value.workflow_id);
   const jobId = readText(value.job_id);

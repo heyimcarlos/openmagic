@@ -1,4 +1,5 @@
 import { isRecord } from './typeGuards';
+import { parseApprovalRequest, type ApprovalRequest } from './chatTelemetry';
 
 const jobStatuses = ['waiting', 'queued', 'running', 'succeeded', 'failed', 'cancelled'] as const;
 const runStatuses = ['running', 'succeeded', 'failed', 'cancelled', 'abandoned'] as const;
@@ -82,6 +83,7 @@ export interface BackpressureNotification {
   attempts: number;
   claimedBy?: string;
   deliveredBy?: string;
+  interactionRuntimeInstanceId?: string;
   createdAt: string;
   deliveredAt?: string;
 }
@@ -105,6 +107,7 @@ export interface BackpressureSnapshot {
   jobs: ReadonlyArray<BackpressureJob>;
   runs: ReadonlyArray<BackpressureRun>;
   notifications: ReadonlyArray<BackpressureNotification>;
+  approvalRequests: ReadonlyArray<ApprovalRequest>;
   activity: ReadonlyArray<BackpressureActivity>;
 }
 
@@ -298,10 +301,11 @@ function parseNotification(value: unknown): BackpressureNotification | undefined
   const attempts = count(value.attempts);
   const claimedBy = optionalText(value.claimed_by);
   const deliveredBy = optionalText(value.delivered_by);
+  const interactionRuntimeInstanceId = optionalText(value.interaction_runtime_instance_id);
   const createdAt = date(value.created_at);
   const deliveredAt = value.delivered_at === null ? undefined : date(value.delivered_at);
   if (!id || !workflowId || !kind || !notificationStatus || attempts === undefined ||
-    claimedBy === false || deliveredBy === false || !createdAt ||
+    claimedBy === false || deliveredBy === false || interactionRuntimeInstanceId === false || !createdAt ||
     (value.delivered_at !== null && !deliveredAt)) {
     return undefined;
   }
@@ -313,6 +317,7 @@ function parseNotification(value: unknown): BackpressureNotification | undefined
     attempts,
     claimedBy,
     deliveredBy,
+    interactionRuntimeInstanceId,
     createdAt,
     deliveredAt,
   };
@@ -336,7 +341,8 @@ function parseActivity(value: unknown): BackpressureActivity | undefined {
 
 export function parseBackpressureSnapshot(value: unknown): BackpressureSnapshot | undefined {
   if (!isRecord(value) || !Array.isArray(value.jobs) || !Array.isArray(value.runs) ||
-    !Array.isArray(value.notifications) || !Array.isArray(value.activity)) return undefined;
+    !Array.isArray(value.notifications) || !Array.isArray(value.approval_requests) ||
+    !Array.isArray(value.activity)) return undefined;
   const capturedAt = date(value.captured_at);
   const worker = parseWorker(value.worker);
   const scope = parseScope(value.scope);
@@ -345,9 +351,11 @@ export function parseBackpressureSnapshot(value: unknown): BackpressureSnapshot 
   const jobs = value.jobs.map(parseJob);
   const runs = value.runs.map(parseRun);
   const notifications = value.notifications.map(parseNotification);
+  const approvalRequests = value.approval_requests.map(parseApprovalRequest);
   const activity = value.activity.map(parseActivity);
   if (!capturedAt || !worker || !scope || !latency || !counts || jobs.some((item) => !item) ||
     runs.some((item) => !item) || notifications.some((item) => !item) ||
+    approvalRequests.some((item) => !item) ||
     activity.some((item) => !item)) return undefined;
   return {
     capturedAt,
@@ -358,6 +366,7 @@ export function parseBackpressureSnapshot(value: unknown): BackpressureSnapshot 
     jobs: jobs as BackpressureJob[],
     runs: runs as BackpressureRun[],
     notifications: notifications as BackpressureNotification[],
+    approvalRequests: approvalRequests as ApprovalRequest[],
     activity: activity as BackpressureActivity[],
   };
 }

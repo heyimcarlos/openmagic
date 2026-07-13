@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from uuid import uuid4
 
 from server.config import Settings
 from server.services.backpressure_demo import BackpressureDemoService
 from server.tests.workflows.factories import BROKER_ID, ORGANIZATION_ID
 from server.workflows import (
+    AcknowledgeNotificationCommand,
+    ClaimNotificationCommand,
     ClaimWorkflowJobCommand,
     ReportRunResultCommand,
     RunResult,
@@ -134,6 +137,74 @@ async def test_snapshot_separates_run_completion_from_notification_delivery(
         "draft_ready",
         "run_started",
     ]
+
+    await database.dispose()
+    await service.dispose()
+
+
+async def test_snapshot_projects_exact_approval_and_fresh_interaction_identity(
+    migrated_postgres_url: str,
+    seeded_workflow_identity,
+):
+    service = _service(migrated_postgres_url)
+    await service.enqueue_jobs(2)
+    database = WorkflowDatabase(migrated_postgres_url)
+    control_plane = WorkflowControlPlane(
+        database=database,
+        registry=default_workflow_registry(),
+        authority=StaticWorkflowAuthority(grants=set()),
+    )
+    draft = await control_plane.claim_job(
+        ClaimWorkflowJobCommand(
+            worker_id="demo-worker",
+            application_build="test-build",
+            lease_duration=timedelta(minutes=5),
+            executor_keys=("renewal_email_drafter",),
+        )
+    )
+    assert draft is not None
+    await control_plane.report_run_result(
+        ReportRunResultCommand(
+            run_id=draft.run_id,
+            result=RunResult(
+                outcome="succeeded",
+                data={"subject": "2026 renewal", "body": "Hello John"},
+                evidence=({"type": "deterministic-test"},),
+            ),
+        )
+    )
+    notification = await control_plane.claim_notification(
+        ClaimNotificationCommand(
+            worker_id="notification-worker:test",
+            lease_duration=timedelta(minutes=5),
+        )
+    )
+    assert notification is not None
+    interaction_runtime_id = uuid4()
+    presentation = await control_plane.resolve_notification_presentation(
+        notification.notification_id,
+        notification.workflow_event_id,
+        notification.workflow_id,
+        "notification-worker:test",
+        notification.delivery_attempt,
+        interaction_runtime_id,
+    )
+    await control_plane.acknowledge_notification(
+        AcknowledgeNotificationCommand(
+            notification_id=notification.notification_id,
+            worker_id="notification-worker:test",
+            delivery_attempt=notification.delivery_attempt,
+        )
+    )
+
+    snapshot = await service.snapshot()
+
+    assert snapshot.notifications[0].interaction_runtime_instance_id == interaction_runtime_id
+    assert snapshot.approval_requests[0].workflow_id == notification.workflow_id
+    assert snapshot.approval_requests[0].job_id == presentation.send_job_id
+    assert snapshot.approval_requests[0].draft_revision_id == presentation.draft_job_id
+    assert snapshot.approval_requests[0].subject == "2026 renewal"
+    assert snapshot.approval_requests[0].body == "Hello John"
 
     await database.dispose()
     await service.dispose()

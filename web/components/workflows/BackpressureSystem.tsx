@@ -4,12 +4,15 @@ import { useCallback, useEffect, useReducer, useState } from 'react';
 import { LoaderCircleIcon } from 'lucide-react';
 
 import { AppViewNav } from '@/components/app/AppViewNav';
+import { SIMULATED_SMS_SENDERS } from '@/components/chat/SmsContactHeader';
 import { BackpressureFlow } from '@/components/workflows/BackpressureFlow';
 import { BackpressureTimeline } from '@/components/workflows/BackpressureTimeline';
 import { backpressureTimelineReducer } from '@/lib/backpressureTimeline';
 import { parseBackpressureSnapshot } from '@/lib/backpressureDemo';
+import type { ApprovalRequest } from '@/lib/chatTelemetry';
 
 const endpoint = '/api/demo/backpressure';
+const broker = SIMULATED_SMS_SENDERS.find((sender) => sender.id === 'broker');
 
 export function BackpressureSystem() {
   const [timeline, dispatchTimeline] = useReducer(backpressureTimelineReducer, {
@@ -17,7 +20,7 @@ export function BackpressureSystem() {
     cursor: null,
   });
   const [error, setError] = useState<string>();
-  const [submitting, setSubmitting] = useState<'workflows' | 'worker'>();
+  const [submitting, setSubmitting] = useState<'workflows' | 'worker' | 'approval'>();
 
   const refresh = useCallback(async (signal?: AbortSignal) => {
     try {
@@ -85,6 +88,46 @@ export function BackpressureSystem() {
     }
   }, []);
 
+  const approveExactEmail = useCallback(async (approval: ApprovalRequest) => {
+    if (!broker) {
+      setError('The demo Broker identity is unavailable');
+      return;
+    }
+    setSubmitting('approval');
+    try {
+      const response = await fetch('/api/chat/approval', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sender_phone: broker.phone,
+          cause_id: `ui-approval:${approval.jobId}:${approval.draftRevisionId}`,
+          workflow_id: approval.workflowId,
+          job_id: approval.jobId,
+          expected_draft_revision_id: approval.draftRevisionId,
+        }),
+      });
+      const payload: unknown = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        const detail = payload && typeof payload === 'object' && 'detail' in payload
+          ? payload.detail
+          : undefined;
+        throw new Error(typeof detail === 'string' ? detail : 'Could not record exact approval');
+      }
+      const verificationRequired = payload && typeof payload === 'object' &&
+        'status' in payload && payload.status === 'verification_required';
+      if (verificationRequired) {
+        setError('Verification is required. Continue in Chat as Carlos Broker to enter the code.');
+      } else {
+        setError(undefined);
+      }
+      await refresh();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Could not record exact approval');
+    } finally {
+      setSubmitting(undefined);
+    }
+  }, [refresh]);
+
   const latestSnapshot = timeline.frames[timeline.frames.length - 1];
   const snapshot = timeline.cursor === null
     ? latestSnapshot
@@ -117,7 +160,7 @@ export function BackpressureSystem() {
                 Durable execution playground
               </h1>
               <p className="truncate text-[0.62rem] text-muted-foreground">
-                Click any Job, Worker, Run, Agent, Notification, or Interaction turn to inspect it.
+                Click any Job, Worker, Run, Agent, Notification, or approval request to inspect it.
               </p>
             </div>
             {snapshot && (
@@ -144,8 +187,10 @@ export function BackpressureSystem() {
                 snapshot={snapshot}
                 addingWorkflows={submitting === 'workflows'}
                 addingWorker={submitting === 'worker'}
+                approving={submitting === 'approval'}
                 onAddWorkflows={enqueueWorkflows}
                 onAddWorker={addWorker}
+                onApprove={approveExactEmail}
               />
               <BackpressureTimeline
                 timeline={timeline}

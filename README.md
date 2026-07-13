@@ -95,6 +95,7 @@ Set `OPENMAGIC_ENABLE_BACKPRESSURE_DEMO=1` only in the isolated local demo envir
 - **Add Worker** adds a real, independently identified async Worker, up to eight. These Workers claim and execute concurrently inside the local FastAPI process, not as a distributed production fleet.
 - Each Worker claims at most one eligible Job per tick. The visible queue-to-capacity ratio and p50 timings show how added claim capacity changes backpressure.
 - Draft Jobs call the configured execution LLM. Send Jobs remain blocked on exact approval, so the load control never sends demo email automatically.
+- Each delivered approval Notification shows its Notification Worker, fresh Interaction Agent, and tool path. Open **Approval ready** to review every effect-defining email field and submit through the same exact-approval boundary as Chat. Approving can send through the configured Gmail integration.
 - The observed-state timeline retains roughly three minutes of 400 ms database captures. Pause, scrub backward or forward, then return to the still-running live system without mutating durable state.
 
 ## Project Layout

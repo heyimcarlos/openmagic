@@ -168,6 +168,7 @@ class WorkflowNotificationProtocol:
         workflow_id: UUID,
         worker_id: str,
         delivery_attempt: int,
+        interaction_runtime_instance_id: UUID | None = None,
     ) -> NotificationPresentationContext:
         async with self._database.transaction() as session:
             workflow = await session.scalar(
@@ -297,6 +298,15 @@ class WorkflowNotificationProtocol:
                         "draft_job_id": str(draft.id),
                         "effect_fingerprint": fingerprint,
                         "sender_mailbox_id": str(effect.sender_mailbox_id),
+                        **(
+                            {
+                                "interaction_runtime_instance_id": str(
+                                    interaction_runtime_instance_id
+                                )
+                            }
+                            if interaction_runtime_instance_id is not None
+                            else {}
+                        ),
                     },
                 )
             )
