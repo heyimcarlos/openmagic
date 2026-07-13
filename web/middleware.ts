@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 
 import { authorizeBrowserRequest, requiresBrowserAuthentication } from './lib/browserAuth';
+import { parseWorkflowTelemetryVariant } from './components/chat/workflow-telemetry-prototype/variants';
 
 function unauthorized(): NextResponse {
   return new NextResponse('Authentication required', {
@@ -10,6 +11,13 @@ function unauthorized(): NextResponse {
 }
 
 export async function middleware(request: NextRequest): Promise<NextResponse> {
+  const prototypeVariant = request.nextUrl.searchParams.get('variant');
+  const isWorkflowTelemetryPrototype =
+    process.env.NODE_ENV !== 'production' &&
+    request.nextUrl.pathname === '/' &&
+    parseWorkflowTelemetryVariant(prototypeVariant) !== null;
+  if (isWorkflowTelemetryPrototype) return NextResponse.next();
+
   if (!requiresBrowserAuthentication(request.nextUrl.pathname)) return NextResponse.next();
 
   const authorization = await authorizeBrowserRequest(

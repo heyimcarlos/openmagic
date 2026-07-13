@@ -1,11 +1,19 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
+import { useRouter } from 'next/navigation';
 import SettingsModal, { useSettings } from '@/components/SettingsModal';
 import { ChatHeader } from '@/components/chat/ChatHeader';
 import { ChatInput } from '@/components/chat/ChatInput';
 import { ChatMessages } from '@/components/chat/ChatMessages';
 import { ErrorBanner } from '@/components/chat/ErrorBanner';
+import {
+  WorkflowTelemetryPrototype,
+} from '@/components/chat/workflow-telemetry-prototype/WorkflowTelemetryPrototype';
+import {
+  parseWorkflowTelemetryVariant,
+  type WorkflowTelemetryVariant,
+} from '@/components/chat/workflow-telemetry-prototype/variants';
 import type { ChatBubble } from '@/components/chat/types';
 
 const POLL_INTERVAL_MS = 1500;
@@ -40,12 +48,14 @@ const toBubbles = (payload: any): ChatBubble[] => {
 };
 
 export default function Page() {
+  const router = useRouter();
   const { settings, setSettings } = useSettings();
   const [open, setOpen] = useState(false);
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState<ChatBubble[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [isWaitingForResponse, setIsWaitingForResponse] = useState(false);
+  const [telemetryVariant, setTelemetryVariant] = useState<WorkflowTelemetryVariant | null>(null);
   const openSettings = useCallback(() => setOpen(true), [setOpen]);
   const closeSettings = useCallback(() => setOpen(false), [setOpen]);
 
@@ -64,6 +74,19 @@ export default function Page() {
   useEffect(() => {
     void loadHistory();
   }, [loadHistory]);
+
+  useEffect(() => {
+    if (process.env.NODE_ENV === 'production') return;
+    const candidate = new URLSearchParams(window.location.search).get('variant');
+    setTelemetryVariant(parseWorkflowTelemetryVariant(candidate));
+  }, []);
+
+  const selectTelemetryVariant = useCallback((variant: WorkflowTelemetryVariant) => {
+    const params = new URLSearchParams(window.location.search);
+    params.set('variant', variant);
+    router.replace(`?${params.toString()}`, { scroll: false });
+    setTelemetryVariant(variant);
+  }, [router]);
 
   // Detect and store browser timezone on first load
   useEffect(() => {
@@ -216,8 +239,14 @@ export default function Page() {
 
         <div className="flex-1 overflow-hidden">
           <ChatMessages
-            messages={messages}
-            isWaitingForResponse={isWaitingForResponse}
+            messages={telemetryVariant ? [] : messages}
+            isWaitingForResponse={telemetryVariant ? false : isWaitingForResponse}
+            prototype={telemetryVariant ? (
+              <WorkflowTelemetryPrototype
+                variant={telemetryVariant}
+                onVariantChange={selectTelemetryVariant}
+              />
+            ) : undefined}
           />
 
           <div className="border-t bg-background/80 p-3 backdrop-blur sm:p-4">

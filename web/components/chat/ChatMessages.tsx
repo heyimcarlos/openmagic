@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import { LoaderCircleIcon } from 'lucide-react';
 
 import { Markdown } from './Markdown';
@@ -17,19 +18,22 @@ import {
 interface ChatMessagesProps {
   messages: ReadonlyArray<ChatBubble>;
   isWaitingForResponse: boolean;
+  prototype?: ReactNode;
 }
 
-export function ChatMessages({ messages, isWaitingForResponse }: ChatMessagesProps) {
+export function ChatMessages({ messages, isWaitingForResponse, prototype }: ChatMessagesProps) {
   return (
     <MessageScrollerProvider autoScroll defaultScrollPosition="end">
       <MessageScroller className="h-[calc(100dvh-12rem)] min-h-[24rem] sm:h-[70vh]">
         <MessageScrollerViewport>
           <MessageScrollerContent aria-busy={isWaitingForResponse} className="gap-6 px-4 py-6 sm:px-7">
-            {messages.length === 0 && <EmptyState />}
+            {messages.length === 0 && !prototype && <EmptyState />}
 
             {messages.map((message) => (
               <ChatMessage key={message.id} message={message} />
             ))}
+
+            {prototype}
 
             {isWaitingForResponse && <TypingIndicator />}
           </MessageScrollerContent>
