@@ -117,6 +117,10 @@ async def _schedule_chat_request(payload: ChatRequest) -> PlainTextResponse | JS
                     cause_id=user_message.id,
                 )
                 if verified.status == "verified" and verified.challenge_id is not None:
+                    session.log.record_reply(
+                        "Your identity is verified. I'm continuing your request.",
+                        cause_id=user_message.id,
+                    )
                     return
                 if verified.status == "no_active_challenge":
                     session.log.record_reply(

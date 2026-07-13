@@ -54,11 +54,13 @@ async def test_six_digit_sms_reply_queues_durable_resume_without_model_or_secret
             )
 
     recorded_user_messages: list[str] = []
-    recorded_replies: list[str] = []
+    recorded_replies: list[tuple[str, str | None]] = []
     session = SimpleNamespace(
         log=SimpleNamespace(
             record_user_message=lambda message, **_kwargs: recorded_user_messages.append(message),
-            record_reply=lambda message, **_kwargs: recorded_replies.append(message),
+            record_reply=lambda message, **kwargs: recorded_replies.append(
+                (message, kwargs.get("cause_id"))
+            ),
         ),
         working_memory=SimpleNamespace(render_transcript=lambda: ""),
     )
@@ -99,7 +101,9 @@ async def test_six_digit_sms_reply_queues_durable_resume_without_model_or_secret
     assert response.status_code == 202
     assert model_calls == []
     assert recorded_user_messages == ["[Verification code submitted]"]
-    assert recorded_replies == []
+    assert recorded_replies == [
+        ("Your identity is verified. I'm continuing your request.", "sms-code-message")
+    ]
     assert "482913" not in repr(session)
 
 

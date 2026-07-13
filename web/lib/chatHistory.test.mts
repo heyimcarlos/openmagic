@@ -85,3 +85,24 @@ test('response detection ignores unrelated assistant notifications', () => {
   assert.equal(hasAssistantReplyForCause(messages.slice(0, 1), 'request-1'), false);
   assert.equal(hasAssistantReplyForCause(messages, 'request-1'), true);
 });
+
+test('verification acknowledgement completes only the code message request', () => {
+  const messages = parseChatHistory({
+    messages: [
+      {
+        id: 'reply:verification-code-1',
+        role: 'assistant',
+        content: "Your identity is verified. I'm continuing your request.",
+      },
+      {
+        id: 'reply:protected-request-1',
+        role: 'assistant',
+        content: 'The protected request is complete.',
+      },
+    ],
+  });
+
+  assert.equal(hasAssistantReplyForCause(messages.slice(0, 1), 'verification-code-1'), true);
+  assert.equal(hasAssistantReplyForCause(messages.slice(0, 1), 'protected-request-1'), false);
+  assert.equal(hasAssistantReplyForCause(messages, 'protected-request-1'), true);
+});
