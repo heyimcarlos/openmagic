@@ -110,6 +110,7 @@ async def test_workflow_tools_search_read_one_packet_then_propose(
         organization_party_id=ACME_ID,
         cause_id="message-issue-18",
     )
+    await workflow_toolbox.record_interaction_cause(context, "Prepare the selected renewal.")
 
     search = await workflow_toolbox.invoke(
         "search_workflows",
@@ -217,6 +218,7 @@ async def test_selected_authorized_workflow_derives_its_organization_context(
         organization_party_id=ACME_ID,
         cause_id="message-cross-organization",
     )
+    await workflow_toolbox.record_interaction_cause(context, "Prepare the Northwind renewal.")
     search = await workflow_toolbox.invoke(
         "search_workflows",
         {
@@ -281,6 +283,7 @@ async def test_ambiguous_search_cannot_read_or_propose_the_first_candidate(
         organization_party_id=ACME_ID,
         cause_id="message-ambiguous-selection",
     )
+    await workflow_toolbox.record_interaction_cause(context, "Prepare John's renewal.")
     search = await workflow_toolbox.invoke(
         "search_workflows",
         {"query": "John renewal"},

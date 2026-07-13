@@ -21,7 +21,7 @@ from server.workflows.identity_models import (
     WorkflowParticipantRoleRow,
     WorkflowParticipantRow,
 )
-from server.workflows.models import WorkflowEventRow, WorkflowRow
+from server.workflows.models import InteractionCauseRow, WorkflowEventRow, WorkflowRow
 
 BROKER_ID = UUID("10000000-0000-0000-0000-000000000001")
 OTHER_BROKER_ID = UUID("10000000-0000-0000-0000-000000000002")
@@ -115,6 +115,14 @@ async def seed_retrieval_landscape(database_url: str) -> None:
                     person_party_id=OTHER_BROKER_ID,
                     organization_party_id=HIDDEN_ORG_ID,
                     granted_at=now,
+                ),
+                InteractionCauseRow(
+                    id="renewal-request-message",
+                    cause_type="message",
+                    actor_party_id=BROKER_ID,
+                    content_digest=(
+                        "9893389911c1defb3c7cc8fa1366ff57c5c2c5ebc2ab075889a697b1c950c9b9"
+                    ),
                 ),
             ]
         )

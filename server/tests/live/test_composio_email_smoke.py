@@ -213,6 +213,12 @@ async def _run_live_email_acceptance(
                 grants={(broker_id, organization_id, RENEWAL_OUTREACH_KIND)}
             ),
         )
+        await control_plane.record_interaction_cause(
+            RecordInteractionCauseCommand(
+                context=context,
+                content="Run the live approved renewal email acceptance.",
+            )
+        )
         created = await control_plane.create_workflow(
             CreateWorkflowCommand(
                 context=context,

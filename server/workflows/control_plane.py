@@ -59,6 +59,7 @@ from .identity_models import (
     WorkflowParticipantRoleRow,
     WorkflowParticipantRow,
 )
+from .interaction_cause_protocol import WorkflowInteractionCauseProtocol
 from .lifecycle_protocol import WorkflowLifecycleProtocol
 from .models import (
     NotificationRow,
@@ -69,6 +70,7 @@ from .models import (
     WorkflowRow,
 )
 from .notification_protocol import WorkflowNotificationProtocol
+from .proposal_protocol import WorkflowProposalProtocol
 from .registry import (
     DRAFT_RENEWAL_EMAIL_KIND,
     GMAIL_SEND_EMAIL_KIND,
@@ -92,6 +94,8 @@ class WorkflowControlPlane:
         self._database = database
         self._registry = registry
         self._authority = authority
+        self._causes = WorkflowInteractionCauseProtocol(database)
+        self._proposals = WorkflowProposalProtocol(registry)
         self._execution = WorkflowExecutionProtocol(
             database=database,
             registry=registry,
@@ -100,6 +104,7 @@ class WorkflowControlPlane:
         self._approval = WorkflowApprovalProtocol(
             database,
             self._has_current_broker_authority,
+            self._causes,
         )
         self._external_effects = WorkflowExternalEffectProtocol(
             database,
@@ -117,12 +122,29 @@ class WorkflowControlPlane:
 
     async def create_workflow(self, command: CreateWorkflowCommand) -> WorkflowTrace:
         validated = self._registry.validate(command.proposal)
+        proposal_digest = self._proposals.workflow_digest(validated)
         if not await self._authority.can_create_workflow(command.context, validated.kind):
             raise WorkflowAuthorizationError("Party cannot create this Workflow Kind")
 
         workflow_id = uuid4()
 
         async with self._database.transaction() as session:
+            await self._causes.require(session, command.context)
+            existing_proposal = await self._proposals.event_for_cause(session, command.context)
+            if existing_proposal is not None:
+                existing_workflow = await session.get(WorkflowRow, existing_proposal.workflow_id)
+                if existing_workflow is None or not self._proposals.replays(
+                    existing_proposal,
+                    command.context,
+                    proposal_digest,
+                    command.context.organization_party_id,
+                ):
+                    raise WorkflowLifecycleError("Workflow proposal Cause was already used")
+                return await self._proposals.read_receipt(
+                    session,
+                    existing_workflow,
+                    existing_proposal,
+                )
             workflow = WorkflowRow(
                 id=workflow_id,
                 kind=validated.kind,
@@ -153,8 +175,14 @@ class WorkflowControlPlane:
                 )
             )
 
-            await self._append_job_graph(session, workflow, validated, command.context)
-            trace = await self._read_trace(session, workflow)
+            proposal_event = await self._proposals.append_graph(
+                session,
+                workflow,
+                validated,
+                command.context,
+                proposal_digest=proposal_digest,
+            )
+            trace = await self._proposals.read_receipt(session, workflow, proposal_event)
 
         return trace
 
@@ -169,16 +197,6 @@ class WorkflowControlPlane:
                 raise WorkflowNotFoundError(str(command.workflow_id))
             if not await self._has_current_broker_authority(session, command.context, workflow):
                 raise WorkflowAuthorizationError("Party cannot propose work for this Workflow")
-            if workflow.status != "active":
-                raise WorkflowLifecycleError("Workflow is not active")
-            existing_job = await session.scalar(
-                sa.select(WorkflowJobRow.id)
-                .where(WorkflowJobRow.workflow_id == workflow.id)
-                .limit(1)
-            )
-            if existing_job is not None:
-                raise WorkflowLifecycleError("Workflow already has its initial Job graph")
-
             validated = self._registry.validate(
                 WorkflowProposal(
                     kind=workflow.kind,
@@ -189,14 +207,42 @@ class WorkflowControlPlane:
             )
             if validated.kind != workflow.kind:
                 raise InvalidWorkflowProposalError("Job graph does not match the Workflow Kind")
+            proposal_digest = self._proposals.job_graph_digest(validated)
+            await self._causes.require(session, command.context)
+            existing_proposal = await self._proposals.event_for_cause(session, command.context)
+            if existing_proposal is not None:
+                if existing_proposal.workflow_id != workflow.id or not self._proposals.replays(
+                    existing_proposal,
+                    command.context,
+                    proposal_digest,
+                    workflow.organization_party_id,
+                ):
+                    raise WorkflowLifecycleError("Workflow proposal Cause was already used")
+                return await self._proposals.read_receipt(session, workflow, existing_proposal)
+            if workflow.status != "active":
+                raise WorkflowLifecycleError("Workflow is not active")
+            existing_job = await session.scalar(
+                sa.select(WorkflowJobRow.id)
+                .where(WorkflowJobRow.workflow_id == workflow.id)
+                .limit(1)
+            )
+            if existing_job is not None:
+                raise WorkflowLifecycleError("Workflow already has its initial Job graph")
+
             await self._validate_current_renewal_parties(
                 session,
                 workflow,
                 validated,
                 command.context,
             )
-            await self._append_job_graph(session, workflow, validated, command.context)
-            trace = await self._read_trace(session, workflow)
+            proposal_event = await self._proposals.append_graph(
+                session,
+                workflow,
+                validated,
+                command.context,
+                proposal_digest=proposal_digest,
+            )
+            trace = await self._proposals.read_receipt(session, workflow, proposal_event)
         return trace
 
     async def claim_job(
@@ -209,7 +255,7 @@ class WorkflowControlPlane:
         return await self._approval.approve_job(command)
 
     async def record_interaction_cause(self, command: RecordInteractionCauseCommand) -> None:
-        await self._approval.record_cause(command)
+        await self._causes.record(command)
 
     async def begin_external_effect_dispatch(
         self,
@@ -385,61 +431,6 @@ class WorkflowControlPlane:
         if len(recipients) != 1 or not recipients <= emails_by_party[policyholder_id]:
             raise WorkflowLifecycleError("Recipient no longer matches the Policyholder")
 
-    async def _append_job_graph(
-        self,
-        session: AsyncSession,
-        workflow: WorkflowRow,
-        validated: ValidatedWorkflowProposal,
-        context: WorkflowCommandContext,
-    ) -> None:
-        job_ids = {job.key: uuid4() for job in validated.jobs}
-        job_inputs = {
-            job.key: self._registry.materialize_job_input(job, job_ids) for job in validated.jobs
-        }
-        session.add_all(
-            [
-                WorkflowJobRow(
-                    id=job_ids[job.key],
-                    workflow_id=workflow.id,
-                    kind=job.kind,
-                    status=(
-                        "waiting" if job.depends_on or job.contract.requires_approval else "queued"
-                    ),
-                    attempts=0,
-                    max_attempts=job.contract.max_attempts,
-                    input=job_inputs[job.key],
-                )
-                for job in validated.jobs
-            ]
-        )
-        await session.flush()
-        session.add_all(
-            [
-                WorkflowJobDependencyRow(
-                    workflow_id=workflow.id,
-                    job_id=job_ids[job.key],
-                    depends_on_job_id=job_ids[dependency],
-                )
-                for job in validated.jobs
-                for dependency in job.depends_on
-            ]
-        )
-        session.add(
-            WorkflowEventRow(
-                workflow_id=workflow.id,
-                event_type="workflow_jobs_proposed",
-                actor_type="party",
-                actor_id=str(context.actor_party_id),
-                cause_type=context.cause_type,
-                cause_id=context.cause_id,
-                data={
-                    "job_ids": [str(job_ids[job.key]) for job in validated.jobs],
-                    "organization_party_id": str(workflow.organization_party_id),
-                },
-            )
-        )
-        await session.flush()
-
     async def read_workflow_trace(
         self,
         workflow_id: UUID,
@@ -564,7 +555,12 @@ class WorkflowControlPlane:
                     id=run.id,
                     job_id=run.job_id,
                     status=run.status,
+                    worker_id=run.worker_id,
+                    application_build=run.application_build,
                     runtime_instance_id=run.runtime_instance_id,
+                    lease_expires_at=run.lease_expires_at,
+                    result=run.result,
+                    finished_at=run.finished_at,
                 )
                 for run in runs
             ),
@@ -574,6 +570,7 @@ class WorkflowControlPlane:
                     workflow_id=event.workflow_id,
                     job_id=event.job_id,
                     run_id=event.run_id,
+                    approval_grant_id=event.approval_grant_id,
                     event_type=event.event_type,
                     actor_type=event.actor_type,
                     actor_id=event.actor_id,
