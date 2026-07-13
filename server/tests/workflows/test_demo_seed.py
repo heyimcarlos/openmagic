@@ -11,6 +11,7 @@ from server.tests.workflows.retrieval_fixtures import ACME_ID, BROKER_ID
 from server.workflows import WorkflowDatabase, WorkflowInspectionContext, WorkflowRetrieval
 from server.workflows.demo_seed import (
     DEMO_BROKER_IDENTIFIER_ID,
+    DEMO_POLICYHOLDER_ID,
     DEMO_WORKFLOW_ID,
     DemoResetBlockedError,
     reset_v0_demo,
@@ -141,6 +142,49 @@ async def test_demo_reset_deletes_runtime_state_and_restores_only_the_seed(
 
     assert workflows == [(DEMO_WORKFLOW_ID, "2026 renewal outreach for John Smith")]
     assert cause_count == 0
+    assert party_count == 3
+
+
+async def test_demo_reset_replaces_only_fixed_demo_identity_configuration(
+    migrated_postgres_url: str,
+    clean_workflow_database,
+):
+    await seed_v0_demo(
+        migrated_postgres_url,
+        broker_party_id=BROKER_ID,
+        organization_party_id=ACME_ID,
+    )
+
+    await reset_v0_demo(
+        migrated_postgres_url,
+        broker_party_id=BROKER_ID,
+        organization_party_id=ACME_ID,
+        broker_email="broker@updated.example",
+        policyholder_email="john@updated.example",
+    )
+
+    engine = create_async_engine(migrated_postgres_url)
+    async with engine.connect() as connection:
+        identifier_rows = (
+            await connection.execute(
+                sa.text(
+                    "SELECT party_id, value FROM party_identifiers "
+                    "WHERE party_id IN (:broker_id, :policyholder_id) "
+                    "AND kind = 'email'"
+                ),
+                {
+                    "broker_id": BROKER_ID,
+                    "policyholder_id": DEMO_POLICYHOLDER_ID,
+                },
+            )
+        ).all()
+        party_count = await connection.scalar(sa.text("SELECT count(*) FROM parties"))
+    await engine.dispose()
+
+    assert dict(identifier_rows) == {
+        BROKER_ID: "broker@updated.example",
+        DEMO_POLICYHOLDER_ID: "john@updated.example",
+    }
     assert party_count == 3
 
 
