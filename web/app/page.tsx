@@ -15,6 +15,7 @@ import { workflowTelemetryDemoMessages } from '@/components/chat/workflow-teleme
 import { messageForDisplay } from '@/lib/chatDisplay';
 import { parseChatHistory } from '@/lib/chatHistory';
 import { isWorkflowTelemetryDemoVariant } from '@/lib/workflowTelemetryDemo';
+import type { ApprovalRequest } from '@/lib/chatTelemetry';
 
 const POLL_INTERVAL_MS = 1500;
 const RESPONSE_POLL_INTERVAL_MS = 1000;
@@ -225,6 +226,42 @@ export default function Page() {
 
   const clearError = useCallback(() => setError(null), [setError]);
 
+  const approveExactEmail = useCallback(async (approval: ApprovalRequest) => {
+    setError(null);
+    const response = await fetch('/api/chat/approval', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sender_phone: sender.phone,
+        cause_id: `ui-approval:${approval.jobId}:${approval.draftRevisionId}`,
+        workflow_id: approval.workflowId,
+        job_id: approval.jobId,
+        expected_draft_revision_id: approval.draftRevisionId,
+      }),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const message = typeof payload.detail === 'string'
+        ? payload.detail
+        : 'I could not record that approval. Please review the latest email and try again.';
+      setError(message);
+      throw new Error(message);
+    }
+    if (payload.status === 'verification_required') {
+      const destination = typeof payload.masked_destination === 'string'
+        ? ` at ${payload.masked_destination}`
+        : '';
+      setError(`I sent a verification code${destination}. Reply with the code to continue.`);
+      return;
+    }
+    await loadHistory();
+  }, [loadHistory, sender.phone]);
+
+  const requestEmailChanges = useCallback((_approval: ApprovalRequest) => {
+    setInput('Please revise the email: ');
+    setError(null);
+  }, []);
+
   return (
     <main className="min-h-screen bg-[radial-gradient(circle_at_top,_color-mix(in_oklch,var(--primary)_10%,transparent),_transparent_35%)] p-0 sm:p-6">
       <div className="mx-auto flex min-h-screen w-full max-w-3xl flex-col bg-card sm:min-h-0 sm:overflow-hidden sm:rounded-2xl sm:border sm:shadow-xl sm:shadow-foreground/5">
@@ -239,6 +276,8 @@ export default function Page() {
           <ChatMessages
             messages={showTelemetryDemo ? workflowTelemetryDemoMessages : messages}
             isWaitingForResponse={showTelemetryDemo ? false : isWaitingForResponse}
+            onApprove={approveExactEmail}
+            onRequestChanges={requestEmailChanges}
           />
 
           <div className="border-t bg-background/80 p-3 backdrop-blur sm:p-4">

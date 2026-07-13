@@ -124,3 +124,61 @@ test('preserves canonical Job states and rejects states from another row kind', 
     undefined,
   );
 });
+
+test('parses the exact approval and durable cockpit projections', () => {
+  const parsed = parseChatTurnTelemetry({
+    activity_summary: 'Updated one renewal',
+    activity: [],
+    workflows: [{
+      id: 'wf-1',
+      title: 'John renewal',
+      status_label: 'Waiting for approval',
+      stages: [],
+    }],
+    approval_request: {
+      workflow_id: 'wf-1',
+      job_id: 'send-1',
+      draft_revision_id: 'draft-1',
+      revision: 1,
+      sender: 'broker@example.com',
+      to: ['john@example.com'],
+      cc: [],
+      bcc: [],
+      subject: 'Renewal',
+      body: 'Hello John',
+    },
+    cockpit: {
+      workflow: {
+        id: 'wf-1',
+        kind: 'renewal_outreach.v1',
+        objective: '2026 renewal outreach for John Smith',
+        organization: 'Acme Brokerage',
+        status: 'active',
+      },
+      jobs: [{
+        id: 'send-1',
+        kind: 'gmail.send_email.v1',
+        title: 'Send approved email',
+        detail: 'Waiting for exact approval',
+        status: 'waiting',
+        depends_on: ['draft-1'],
+      }],
+      events: [{
+        id: 'event-1',
+        occurred_at: '2026-07-13T12:00:00Z',
+        type: 'approval_presentation_committed',
+        aggregate: 'Send approved email',
+        detail: 'Exact effect presented',
+        tone: 'progress',
+      }],
+      has_earlier_events: true,
+    },
+  });
+
+  assert.equal(parsed?.approvalRequest?.draftRevisionId, 'draft-1');
+  assert.equal(parsed?.approvalRequest?.body, 'Hello John');
+  assert.equal(parsed?.cockpit?.workflow.id, 'wf-1');
+  assert.equal(parsed?.cockpit?.jobs[0]?.dependsOn[0], 'draft-1');
+  assert.equal(parsed?.cockpit?.events[0]?.type, 'approval_presentation_committed');
+  assert.equal(parsed?.cockpit?.hasEarlierEvents, true);
+});

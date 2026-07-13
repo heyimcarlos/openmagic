@@ -88,6 +88,7 @@ from .operations_projection import (
 from .party_resolution import (
     ResolvedSmsParty,
     find_sms_party,
+    find_sms_party_by_id,
     normalize_sms_phone,
     resolve_sms_party,
     sms_interaction_id,
@@ -227,6 +228,7 @@ __all__ = [
     "WorkflowWorker",
     "default_workflow_registry",
     "find_sms_party",
+    "find_sms_party_by_id",
     "normalize_sms_phone",
     "resolve_sms_party",
     "resolve_verified_mailbox",

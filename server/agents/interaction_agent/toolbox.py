@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 from uuid import UUID
 
 from server.workflows import WorkflowPacket
@@ -30,6 +30,7 @@ class InteractionToolContext:
     actor_party_id: UUID
     organization_party_id: UUID
     cause_id: str
+    cause_type: Literal["message", "ui_action"] = "message"
     interaction_id: str | None = None
     verification_challenge_id: UUID | None = None
     delivery_id: str | None = None

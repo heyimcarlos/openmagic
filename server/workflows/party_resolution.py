@@ -112,6 +112,35 @@ async def find_sms_party(
     )
 
 
+async def find_sms_party_by_id(
+    database: WorkflowDatabase,
+    party_id: UUID,
+) -> ResolvedSmsParty | None:
+    """Resolve one active SMS identity for an already authorized Party."""
+
+    async with database.read_transaction() as session:
+        row = (
+            await session.execute(
+                sa.select(PartyIdentifierRow, PartyRow)
+                .join(PartyRow, PartyRow.id == PartyIdentifierRow.party_id)
+                .where(
+                    PartyRow.id == party_id,
+                    PartyIdentifierRow.kind == "phone",
+                    PartyIdentifierRow.revoked_at.is_(None),
+                )
+                .limit(1)
+            )
+        ).one_or_none()
+    if row is None:
+        return None
+    identifier, party = row
+    return ResolvedSmsParty(
+        party_id=party.id,
+        display_name=party.display_name,
+        phone=identifier.value,
+    )
+
+
 def sms_interaction_id(phone: str) -> str:
     """Derive one server-owned SMS interaction identity from the sender phone."""
 
@@ -123,6 +152,7 @@ def sms_interaction_id(phone: str) -> str:
 __all__ = [
     "ResolvedSmsParty",
     "find_sms_party",
+    "find_sms_party_by_id",
     "normalize_sms_phone",
     "resolve_sms_party",
     "sms_interaction_id",

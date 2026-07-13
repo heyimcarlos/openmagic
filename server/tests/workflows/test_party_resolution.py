@@ -7,6 +7,7 @@ import sqlalchemy as sa
 from server.workflows import (
     WorkflowDatabase,
     find_sms_party,
+    find_sms_party_by_id,
     resolve_sms_party,
     seed_v0_demo,
     sms_interaction_id,
@@ -31,6 +32,7 @@ async def test_sms_phone_resolves_party_and_unknown_number_stays_provisional(
     john = await resolve_sms_party(database, "+1 (416) 555-0142")
     unknown = await resolve_sms_party(database, "+1 (416) 555-0199")
     repeated_unknown = await resolve_sms_party(database, "+14165550199")
+    broker = await find_sms_party_by_id(database, BROKER_ID)
 
     assert john.party_id == DEMO_POLICYHOLDER_ID
     assert john.display_name == "John Smith"
@@ -40,6 +42,8 @@ async def test_sms_phone_resolves_party_and_unknown_number_stays_provisional(
     assert unknown.display_name == "Caller 0199"
     assert unknown.phone == "+14165550199"
     assert sms_interaction_id("+1 (416) 555-0142") == sms_interaction_id("+14165550142")
+    assert broker is not None
+    assert broker.phone == "+14165550101"
 
     await database.dispose()
 

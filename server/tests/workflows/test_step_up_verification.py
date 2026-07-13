@@ -171,6 +171,7 @@ async def test_private_operation_survives_restart_and_queues_exact_resume(
     )
     assert resume.operation == verified.operation
     assert resume.request_cause_id == "private-read-message"
+    assert resume.request_cause_type == "message"
     await restarted_database.dispose()
 
 
@@ -226,6 +227,7 @@ async def test_fresh_worker_resumes_committed_verification_after_request_process
     assert delivered.kind == VERIFICATION_RESUME_NOTIFICATION_KIND
     assert len(resumed) == 1
     assert resumed[0]["operation_cause_id"] == "private-read-message"
+    assert resumed[0]["operation_cause_type"] == "message"
     assert resumed[0]["operation"] == _request().operation
     await database.dispose()
 

@@ -4,7 +4,12 @@ from .agent import (
     build_system_prompt,
     prepare_message_with_history,
 )
-from .factory import create_interaction_runtime, get_step_up_verification
+from .factory import (
+    create_interaction_runtime,
+    get_step_up_verification,
+    get_workflow_interaction_toolbox,
+    get_workflow_retrieval,
+)
 from .runtime import Completion, InteractionAgentRuntime, InteractionResult
 from .toolbox import InteractionToolbox, InteractionToolContext, ToolResult
 from .tools import LegacyInteractionToolbox
@@ -24,6 +29,8 @@ __all__ = [
     "build_workflow_system_prompt",
     "create_interaction_runtime",
     "get_step_up_verification",
+    "get_workflow_interaction_toolbox",
+    "get_workflow_retrieval",
     "prepare_message_with_history",
     "prepare_workflow_message",
 ]

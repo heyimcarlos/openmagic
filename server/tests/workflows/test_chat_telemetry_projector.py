@@ -41,7 +41,8 @@ async def test_projects_sanitized_activity_and_current_authorized_workflow_state
         registry=default_workflow_registry(),
         authority=StaticWorkflowAuthority(grants=set()),
     )
-    await control_plane.propose_jobs(renewal_job_command())
+    trace = await control_plane.propose_jobs(renewal_job_command())
+    jobs = {job.kind: job for job in trace.jobs}
     async with database.transaction() as session:
         session.add(
             WorkflowEventRow(
@@ -110,18 +111,47 @@ async def test_projects_sanitized_activity_and_current_authorized_workflow_state
             ),
         )
     )
+    async with database.transaction() as session:
+        session.add(
+            WorkflowEventRow(
+                workflow_id=TARGET_ID,
+                job_id=jobs["gmail.send_email.v1"].id,
+                event_type="approval_presentation_committed",
+                actor_type="worker",
+                actor_id="notification-worker",
+                cause_type="notification",
+                cause_id="approval-notification",
+                data={
+                    "draft_job_id": str(jobs["renewal_email.draft.v1"].id),
+                    "effect_fingerprint": "test-fingerprint",
+                },
+            )
+        )
 
     refreshed = await projector.project(
         actor_party_id=BROKER_ID,
-        cause_ids=["renewal-request-message"],
+        cause_ids=["notification:approval-notification"],
     )
-    workflow = refreshed["renewal-request-message"].workflows[0]
+    workflow = refreshed["notification:approval-notification"].workflows[0]
     assert workflow.status_label == "Waiting for approval"
     assert [(stage.kind, stage.status) for stage in workflow.stages] == [
         ("job", "succeeded"),
         ("checkpoint", "waiting"),
         ("job", "waiting"),
     ]
+    approval = refreshed["notification:approval-notification"].approval_request
+    assert approval is not None
+    assert approval.job_id == str(jobs["gmail.send_email.v1"].id)
+    assert approval.draft_revision_id == str(jobs["renewal_email.draft.v1"].id)
+    assert approval.sender == "broker@acme.example"
+    assert approval.to == ["john@example.com"]
+    assert approval.subject == "2026 renewal"
+    assert approval.body == "Hello John"
+    cockpit = refreshed["notification:approval-notification"].cockpit
+    assert cockpit is not None
+    assert cockpit.workflow.id == str(TARGET_ID)
+    assert [job.status for job in cockpit.jobs] == ["succeeded", "waiting"]
+    assert cockpit.events[-1].type == "approval_presentation_committed"
     await database.dispose()
 
 

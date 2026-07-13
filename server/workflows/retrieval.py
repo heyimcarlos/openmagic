@@ -311,6 +311,11 @@ class WorkflowRetrieval:
 
         if not cause_ids:
             return {}
+        notification_causes = {
+            cause_id.removeprefix("notification:")
+            for cause_id in cause_ids
+            if cause_id.startswith("notification:")
+        }
         async with self._database.read_transaction() as session:
             rows = (
                 await session.execute(
@@ -339,9 +344,34 @@ class WorkflowRetrieval:
                     )
                 )
             ).all()
+            notification_rows = []
+            if notification_causes:
+                notification_rows = (
+                    await session.execute(
+                        sa.select(
+                            WorkflowEventRow.cause_id,
+                            WorkflowEventRow.workflow_id,
+                            sa.func.min(WorkflowEventRow.occurred_at).label("first_seen_at"),
+                        )
+                        .join(WorkflowRow, WorkflowRow.id == WorkflowEventRow.workflow_id)
+                        .where(
+                            WorkflowEventRow.cause_type == "notification",
+                            WorkflowEventRow.cause_id.in_(notification_causes),
+                            self._authorization_predicate(context.actor_party_id),
+                        )
+                        .group_by(WorkflowEventRow.cause_id, WorkflowEventRow.workflow_id)
+                        .order_by(
+                            WorkflowEventRow.cause_id,
+                            sa.func.min(WorkflowEventRow.occurred_at),
+                            WorkflowEventRow.workflow_id,
+                        )
+                    )
+                ).all()
         grouped: dict[str, list[UUID]] = defaultdict(list)
         for cause_id, workflow_id, _first_seen_at in rows:
             grouped[cause_id].append(workflow_id)
+        for cause_id, workflow_id, _first_seen_at in notification_rows:
+            grouped[f"notification:{cause_id}"].append(workflow_id)
         return {cause_id: tuple(ids) for cause_id, ids in grouped.items()}
 
     async def resolve_renewal_email_addresses(
