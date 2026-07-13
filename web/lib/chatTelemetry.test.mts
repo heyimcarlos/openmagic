@@ -8,7 +8,15 @@ test('parses valid chat-turn telemetry from history', () => {
     parseChatTurnTelemetry({
       activity_summary: 'Found context, advanced 1 workflow',
       activity: [
-        { id: 'search', label: 'Searched authorized Workflows', status: 'succeeded' },
+        {
+          id: 'search',
+          tool: 'search_workflows',
+          label: 'Searched authorized Workflows',
+          status: 'succeeded',
+          input_summary: 'query "John Smith"',
+          result_summary: '1 authorized match, showing 1',
+          result_items: ['John Smith renewal · active · Acme Brokerage'],
+        },
       ],
       workflows: [
         {
@@ -29,7 +37,15 @@ test('parses valid chat-turn telemetry from history', () => {
     {
       activitySummary: 'Found context, advanced 1 workflow',
       activity: [
-        { id: 'search', label: 'Searched authorized Workflows', status: 'succeeded' },
+        {
+          id: 'search',
+          tool: 'search_workflows',
+          label: 'Searched authorized Workflows',
+          status: 'succeeded',
+          inputSummary: 'query "John Smith"',
+          resultSummary: '1 authorized match, showing 1',
+          resultItems: ['John Smith renewal · active · Acme Brokerage'],
+        },
       ],
       workflows: [
         {
@@ -70,13 +86,27 @@ test('accepts failed operational facts without exposing arbitrary nested detail'
   assert.deepEqual(
     parseChatTurnTelemetry({
       activity_summary: 'Could not advance the Workflow',
-      activity: [{ id: 'proposal', label: 'Proposed Job graph', status: 'failed', secret: 'no' }],
+      activity: [{
+        id: 'proposal',
+        tool: 'propose_workflow_work',
+        label: 'Proposed Job graph',
+        status: 'failed',
+        result_summary: 'Failed: the approval target changed',
+        secret: 'no',
+      }],
       workflows: [],
       reasoning: 'hidden',
     }),
     {
       activitySummary: 'Could not advance the Workflow',
-      activity: [{ id: 'proposal', label: 'Proposed Job graph', status: 'failed' }],
+      activity: [{
+        id: 'proposal',
+        tool: 'propose_workflow_work',
+        label: 'Proposed Job graph',
+        status: 'failed',
+        resultSummary: 'Failed: the approval target changed',
+        resultItems: [],
+      }],
       workflows: [],
     },
   );

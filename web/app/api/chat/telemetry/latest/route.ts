@@ -5,7 +5,9 @@ export async function GET(request: Request) {
   const requestUrl = new URL(request.url);
   const upstreamUrl = new URL(upstreamPath);
   const senderPhone = requestUrl.searchParams.get('sender_phone');
+  const causeId = requestUrl.searchParams.get('cause_id');
   if (senderPhone) upstreamUrl.searchParams.set('sender_phone', senderPhone);
+  if (causeId) upstreamUrl.searchParams.set('cause_id', causeId);
 
   try {
     const response = await fetch(upstreamUrl, {

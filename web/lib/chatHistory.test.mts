@@ -16,6 +16,7 @@ test('parses history and its attached Workflow telemetry', () => {
           activity: [
             {
               id: 'receipt-1',
+              tool: 'search_workflows',
               label: 'Searched authorized Workflows',
               status: 'succeeded',
             },

@@ -71,7 +71,8 @@ export function SmsContactHeader({
             variant="ghost"
             size="icon-sm"
             onClick={onClearHistory}
-            aria-label="Clear conversation"
+            aria-label="Reset demo data"
+            title="Reset demo data"
           >
             <RotateCcwIcon />
           </Button>
