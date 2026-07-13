@@ -96,16 +96,12 @@ async def test_mixed_workflow_burst_contains_distinct_workflow_and_job_shapes(
     snapshot = await service.enqueue_workflows(6)
 
     assert snapshot.counts.workflows == 6
-    assert {
-        job.kind for job in snapshot.jobs
-    } == {
+    assert {job.kind for job in snapshot.jobs} == {
         "renewal_email.draft.v1",
         "gmail.send_email.v1",
         "insurance_task.execute.v1",
     }
-    assert {
-        job.label for job in snapshot.jobs if job.kind == "insurance_task.execute.v1"
-    } == {
+    assert {job.label for job in snapshot.jobs if job.kind == "insurance_task.execute.v1"} == {
         "Extract claim facts",
         "Assess claim routing",
         "Review policy coverage",
@@ -306,8 +302,7 @@ async def test_snapshot_projects_immutable_email_revision_boundary(
     snapshot = await service.snapshot()
 
     assert any(
-        item.type == "workflow_work_revised"
-        and item.boundary == "revise_and_approve_email"
+        item.type == "workflow_work_revised" and item.boundary == "revise_and_approve_email"
         for item in snapshot.activity
     )
     revised_draft = next(job for job in snapshot.jobs if job.id == approval.draft_job_id)
