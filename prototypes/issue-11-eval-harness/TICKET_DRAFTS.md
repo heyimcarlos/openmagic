@@ -4,7 +4,11 @@ These drafts are not published tracker tickets until the issue 11 verdict
 boundary is approved. They follow the same vertical-ticket shape used by the
 completed issue 10 handoff.
 
-## Pair the legacy and Workflow renewal coordination journeys
+## Compare legacy delegation with Workflow coordination
+
+### Parent
+
+[Prototype the V0 paired evaluation and recovery harness](https://github.com/heyimcarlos/openmagic/issues/11)
 
 ### What to build
 
@@ -39,16 +43,20 @@ trial, then render a concise paired evidence report.
 
 ### Decision provenance
 
-- Prototype V0 paired evaluation and recovery harness.
-- Define the V0 Workflow search and packet-retrieval contract.
-- Prototype V0 workflow tools, packets, and Worker integration.
-- Issue 11 ranked comparables and coverage audit.
+- [Prototype the V0 paired evaluation and recovery harness](https://github.com/heyimcarlos/openmagic/issues/11)
+- [Define the V0 Workflow search and packet-retrieval contract](https://github.com/heyimcarlos/openmagic/issues/15)
+- [Prototype V0 workflow tools, packets, and Worker integration](https://github.com/heyimcarlos/openmagic/issues/10)
+- [Issue 11 ranked comparables and coverage audit](https://github.com/heyimcarlos/openmagic/tree/codex/issue-11-eval-prototype/prototypes/issue-11-eval-harness)
 
 ### Blocking
 
 This is the first implementation frontier after issue 11 resolves.
 
 ## Prove restart and duplicate-Cause recovery
+
+### Parent
+
+[Prototype the V0 paired evaluation and recovery harness](https://github.com/heyimcarlos/openmagic/issues/11)
 
 ### What to build
 
@@ -77,16 +85,20 @@ cannot create a second Workflow graph or a different mutation.
 
 ### Decision provenance
 
-- Complete the minimum V0 Workflow and Job lifecycle authority.
-- Specify the minimum V0 PostgreSQL Job protocol.
-- Define V0 renewal-email acceptance scenarios.
-- Prototype V0 paired evaluation and recovery harness.
+- [Complete the minimum V0 Workflow and Job lifecycle authority](https://github.com/heyimcarlos/openmagic/issues/3)
+- [Specify the minimum V0 PostgreSQL Job protocol](https://github.com/heyimcarlos/openmagic/issues/8)
+- [Define V0 renewal-email acceptance scenarios](https://github.com/heyimcarlos/openmagic/issues/4)
+- [Prototype the V0 paired evaluation and recovery harness](https://github.com/heyimcarlos/openmagic/issues/11)
 
 ### Blocking
 
-Blocked by Pair the legacy and Workflow renewal coordination journeys.
+Blocked by [Compare legacy delegation with Workflow coordination](https://github.com/heyimcarlos/openmagic/issues/28).
 
 ## Complete the Notification fault matrix and V0 evaluation report
+
+### Parent
+
+[Prototype the V0 paired evaluation and recovery harness](https://github.com/heyimcarlos/openmagic/issues/11)
 
 ### What to build
 
@@ -117,11 +129,11 @@ smoke evidence into the bounded issue 11 report consumed by the walkthrough.
 
 ### Decision provenance
 
-- Specify the minimum V0 PostgreSQL Job protocol.
-- Compare OpenMagic with Effective AI's multi-agent runtime.
-- Prototype V0 workflow tools, packets, and Worker integration.
-- Prototype V0 paired evaluation and recovery harness.
+- [Specify the minimum V0 PostgreSQL Job protocol](https://github.com/heyimcarlos/openmagic/issues/8)
+- [Compare OpenMagic with Effective AI's multi-agent runtime](https://github.com/heyimcarlos/openmagic/issues/16)
+- [Prototype V0 workflow tools, packets, and Worker integration](https://github.com/heyimcarlos/openmagic/issues/10)
+- [Prototype the V0 paired evaluation and recovery harness](https://github.com/heyimcarlos/openmagic/issues/11)
 
 ### Blocking
 
-Blocked by Prove restart and duplicate-Cause recovery.
+Blocked by [Prove restart and duplicate-Cause recovery](https://github.com/heyimcarlos/openmagic/issues/29).
