@@ -33,3 +33,20 @@ export function parseChatHistory(payload: unknown): ChatBubble[] {
       telemetry: parseChatTurnTelemetry(message.telemetry),
     }));
 }
+
+export type ChatHistorySnapshot = {
+  raw: string;
+  messages: ChatBubble[];
+  changed: boolean;
+};
+
+export function parseChatHistorySnapshot(
+  raw: string,
+  previousRaw?: string,
+): ChatHistorySnapshot {
+  return {
+    raw,
+    messages: parseChatHistory(JSON.parse(raw)),
+    changed: raw !== previousRaw,
+  };
+}

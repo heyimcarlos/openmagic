@@ -15,7 +15,13 @@ from ..models import (
     ChatLatestTelemetryResponse,
     ChatRequest,
 )
-from ..services import get_conversation_log, get_trigger_service, handle_chat_request
+from ..services import (
+    get_conversation_log,
+    get_trigger_service,
+    get_workflow_runtime_service,
+    handle_chat_request,
+    pause_chat_requests,
+)
 from ..services.conversation import (
     WorkflowTelemetryProjector,
     clear_conversation_sessions,
@@ -38,6 +44,7 @@ if TYPE_CHECKING:
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 _LATEST_TELEMETRY_CAUSE_LIMIT = 20
+_HISTORY_TELEMETRY_CAUSE_LIMIT = 20
 
 
 @router.post(
@@ -74,7 +81,14 @@ async def chat_history(
     for index, entry in enumerate(correlated):
         if entry.message.role == "assistant" and entry.cause_id is not None:
             latest_reply_index_by_cause[entry.cause_id] = index
-    cause_ids = list(latest_reply_index_by_cause)
+    cause_ids = [
+        cause_id
+        for cause_id, _index in sorted(
+            latest_reply_index_by_cause.items(),
+            key=lambda item: item[1],
+            reverse=True,
+        )[:_HISTORY_TELEMETRY_CAUSE_LIMIT]
+    ]
     if not cause_ids:
         return ChatHistoryResponse(messages=messages)
     try:
@@ -331,14 +345,21 @@ async def reset_demo_state() -> ChatHistoryClearResponse:
     assert settings.database_url is not None
     assert settings.workflow_broker_party_id is not None
     assert settings.workflow_organization_party_id is not None
+    runtime = get_workflow_runtime_service()
     try:
-        await reset_v0_demo(
-            settings.database_url,
-            broker_party_id=UUID(settings.workflow_broker_party_id),
-            organization_party_id=UUID(settings.workflow_organization_party_id),
-            policyholder_email=settings.demo_policyholder_email,
-            broker_email=settings.demo_broker_email,
-        )
+        async with pause_chat_requests():
+            await runtime.stop()
+            try:
+                await reset_v0_demo(
+                    settings.database_url,
+                    broker_party_id=UUID(settings.workflow_broker_party_id),
+                    organization_party_id=UUID(settings.workflow_organization_party_id),
+                    policyholder_email=settings.demo_policyholder_email,
+                    broker_email=settings.demo_broker_email,
+                )
+                clear_conversation_sessions()
+            finally:
+                await runtime.start()
     except DemoResetBlockedError as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -356,7 +377,6 @@ async def reset_demo_state() -> ChatHistoryClearResponse:
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Demo reset is unavailable",
         ) from exc
-    clear_conversation_sessions()
     return ChatHistoryClearResponse()
 
 

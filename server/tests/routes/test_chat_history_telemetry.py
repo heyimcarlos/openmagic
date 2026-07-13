@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID
@@ -283,6 +284,58 @@ async def test_latest_telemetry_projects_only_bounded_recent_reply_causes(
     assert response.telemetry == latest
 
 
+async def test_history_projects_telemetry_only_for_bounded_recent_causes(
+    tmp_path: Path,
+    monkeypatch,
+):
+    log = _conversation(tmp_path / "conversation.log")
+    for index in range(25):
+        cause_id = f"cause-{index}"
+        log.record_user_message(f"Request {index}", cause_id=cause_id)
+        log.record_reply(f"Reply {index}", cause_id=cause_id)
+    projected_causes: list[str] = []
+
+    class Projector:
+        async def project(self, *, actor_party_id, cause_ids):
+            del actor_party_id
+            projected_causes.extend(cause_ids)
+            return {}
+
+    monkeypatch.setattr(
+        chat_route,
+        "get_settings",
+        lambda: SimpleNamespace(
+            interaction_mode="workflow",
+            database_url="postgresql+psycopg://unused",
+            workflow_cursor_secret="test-secret",
+        ),
+    )
+    monkeypatch.setattr(
+        chat_route,
+        "get_conversation_session",
+        lambda _interaction_id: SimpleNamespace(log=log),
+    )
+    monkeypatch.setattr(
+        chat_route,
+        "_workflow_telemetry_services",
+        lambda _url, _secret: (object(), Projector()),
+    )
+
+    async def find_party(_database, _phone):
+        return ResolvedSmsParty(
+            party_id=UUID("10000000-0000-0000-0000-000000000001"),
+            display_name="Carlos Broker",
+            phone="+14165550142",
+        )
+
+    monkeypatch.setattr(chat_route, "find_sms_party", find_party)
+
+    response = await chat_route.chat_history(sender_phone="+14165550142")
+
+    assert len(response.messages) == 50
+    assert projected_causes == [f"cause-{index}" for index in range(24, 4, -1)]
+
+
 async def test_latest_telemetry_can_project_an_explicit_in_progress_cause(
     tmp_path: Path,
     monkeypatch,
@@ -531,6 +584,22 @@ async def test_demo_reset_resets_durable_state_and_all_sms_sessions(monkeypatch)
     organization_id = UUID("20000000-0000-0000-0000-000000000001")
     reset_calls: list[dict[str, object]] = []
     cleared_sessions: list[bool] = []
+    lifecycle: list[str] = []
+
+    class Runtime:
+        async def stop(self):
+            lifecycle.append("runtime_stopped")
+
+        async def start(self):
+            lifecycle.append("runtime_started")
+
+    @asynccontextmanager
+    async def paused_chat_requests():
+        lifecycle.append("chat_paused")
+        try:
+            yield
+        finally:
+            lifecycle.append("chat_resumed")
 
     monkeypatch.setattr(
         chat_route,
@@ -546,14 +615,17 @@ async def test_demo_reset_resets_durable_state_and_all_sms_sessions(monkeypatch)
     )
 
     async def reset_demo(database_url, **kwargs):
+        lifecycle.append("database_reset")
         reset_calls.append({"database_url": database_url, **kwargs})
 
+    def clear_sessions():
+        cleared_sessions.append(True)
+        lifecycle.append("sessions_cleared")
+
     monkeypatch.setattr(chat_route, "reset_v0_demo", reset_demo)
-    monkeypatch.setattr(
-        chat_route,
-        "clear_conversation_sessions",
-        lambda: cleared_sessions.append(True),
-    )
+    monkeypatch.setattr(chat_route, "get_workflow_runtime_service", lambda: Runtime())
+    monkeypatch.setattr(chat_route, "pause_chat_requests", paused_chat_requests)
+    monkeypatch.setattr(chat_route, "clear_conversation_sessions", clear_sessions)
 
     response = await chat_route.reset_demo_state()
 
@@ -568,9 +640,34 @@ async def test_demo_reset_resets_durable_state_and_all_sms_sessions(monkeypatch)
         }
     ]
     assert cleared_sessions == [True]
+    assert lifecycle == [
+        "chat_paused",
+        "runtime_stopped",
+        "database_reset",
+        "sessions_cleared",
+        "runtime_started",
+        "chat_resumed",
+    ]
 
 
 async def test_demo_reset_reports_running_work_without_deleting_transcripts(monkeypatch):
+    lifecycle: list[str] = []
+
+    class Runtime:
+        async def stop(self):
+            lifecycle.append("runtime_stopped")
+
+        async def start(self):
+            lifecycle.append("runtime_started")
+
+    @asynccontextmanager
+    async def paused_chat_requests():
+        lifecycle.append("chat_paused")
+        try:
+            yield
+        finally:
+            lifecycle.append("chat_resumed")
+
     monkeypatch.setattr(
         chat_route,
         "get_settings",
@@ -589,6 +686,8 @@ async def test_demo_reset_reports_running_work_without_deleting_transcripts(monk
 
     cleared_sessions: list[bool] = []
     monkeypatch.setattr(chat_route, "reset_v0_demo", blocked_reset)
+    monkeypatch.setattr(chat_route, "get_workflow_runtime_service", lambda: Runtime())
+    monkeypatch.setattr(chat_route, "pause_chat_requests", paused_chat_requests)
     monkeypatch.setattr(
         chat_route,
         "clear_conversation_sessions",
@@ -601,3 +700,9 @@ async def test_demo_reset_reports_running_work_without_deleting_transcripts(monk
     assert captured.value.status_code == 409
     assert "running" in captured.value.detail
     assert cleared_sessions == []
+    assert lifecycle == [
+        "chat_paused",
+        "runtime_stopped",
+        "runtime_started",
+        "chat_resumed",
+    ]

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { parseChatHistory } from './chatHistory.ts';
+import { parseChatHistory, parseChatHistorySnapshot } from './chatHistory.ts';
 
 test('parses history and its attached Workflow telemetry', () => {
   const messages = parseChatHistory({
@@ -37,4 +37,15 @@ test('parses history and its attached Workflow telemetry', () => {
 test('history parser rejects empty or malformed messages', () => {
   assert.deepEqual(parseChatHistory({ messages: [{ role: 'assistant', content: '' }] }), []);
   assert.deepEqual(parseChatHistory({ messages: 'not-an-array' }), []);
+});
+
+test('unchanged snapshots still expose messages to response detection', () => {
+  const raw = JSON.stringify({
+    messages: [{ role: 'assistant', content: 'The draft is ready' }],
+  });
+
+  const snapshot = parseChatHistorySnapshot(raw, raw);
+
+  assert.equal(snapshot.changed, false);
+  assert.equal(snapshot.messages[0]?.text, 'The draft is ready');
 });

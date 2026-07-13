@@ -13,8 +13,13 @@ import {
 } from '@/components/chat/SmsContactHeader';
 import type { ChatBubble } from '@/components/chat/types';
 import { workflowTelemetryDemoMessages } from '@/components/chat/workflow-telemetry/demo';
+import {
+  approvalCauseFor,
+  approvalSubmissionKey,
+  submitChatApproval,
+} from '@/lib/chatApproval';
 import { messageForDisplay } from '@/lib/chatDisplay';
-import { parseChatHistory } from '@/lib/chatHistory';
+import { parseChatHistorySnapshot } from '@/lib/chatHistory';
 import { isWorkflowTelemetryDemoVariant } from '@/lib/workflowTelemetryDemo';
 import { parseChatTurnTelemetry, type ApprovalRequest, type ChatTurnTelemetry } from '@/lib/chatTelemetry';
 
@@ -47,31 +52,29 @@ export default function Page() {
   const openSettings = useCallback(() => setOpen(true), [setOpen]);
   const closeSettings = useCallback(() => setOpen(false), [setOpen]);
 
-  const readChangedHistory = useCallback(async (
+  const readHistory = useCallback(async (
     response: Response,
     requestGeneration: number,
-  ): Promise<ChatBubble[] | undefined> => {
+  ) => {
     if (!response.ok) return undefined;
     const raw = await response.text();
-    if (senderGeneration.current !== requestGeneration || raw === historySnapshot.current) {
-      return undefined;
-    }
-    const currentMessages = parseChatHistory(JSON.parse(raw));
-    historySnapshot.current = raw;
-    return currentMessages;
+    if (senderGeneration.current !== requestGeneration) return undefined;
+    const snapshot = parseChatHistorySnapshot(raw, historySnapshot.current);
+    if (snapshot.changed) historySnapshot.current = raw;
+    return snapshot;
   }, []);
 
   const loadHistory = useCallback(async () => {
     const requestGeneration = senderGeneration.current;
     try {
       const res = await fetch(historyUrl, { cache: 'no-store' });
-      const currentMessages = await readChangedHistory(res, requestGeneration);
-      if (currentMessages) setMessages(currentMessages);
+      const snapshot = await readHistory(res, requestGeneration);
+      if (snapshot?.changed) setMessages(snapshot.messages);
     } catch (err: any) {
       if (err?.name === 'AbortError') return;
       console.error('Failed to load chat history', err);
     }
-  }, [historyUrl, readChangedHistory]);
+  }, [historyUrl, readHistory]);
 
   useEffect(() => {
     void loadHistory();
@@ -185,12 +188,14 @@ export default function Page() {
             const telemetryPayload = await telemetryResponse.json();
             setPendingTelemetry(parseChatTurnTelemetry(telemetryPayload.telemetry));
           }
-          const currentMessages = await readChangedHistory(response, requestGeneration);
-          if (!currentMessages) continue;
-          const assistantCount = currentMessages.filter((message) => message.role === 'assistant').length;
+          const snapshot = await readHistory(response, requestGeneration);
+          if (!snapshot) continue;
+          const assistantCount = snapshot.messages.filter(
+            (message) => message.role === 'assistant',
+          ).length;
 
           if (assistantCount > assistantCountBeforeSend) {
-            setMessages(currentMessages);
+            setMessages(snapshot.messages);
             setPendingTelemetry(undefined);
             setIsWaitingForResponse(false);
             return;
@@ -206,7 +211,7 @@ export default function Page() {
         await loadHistory();
       }
     },
-    [historyUrl, loadHistory, messages, readChangedHistory, sender.phone],
+    [historyUrl, loadHistory, messages, readHistory, sender.phone],
   );
 
   const handleClearHistory = useCallback(async () => {
@@ -276,34 +281,27 @@ export default function Page() {
       subject: revision.subject.trim(),
       body: revision.body,
     } : undefined;
-    const submissionKey = JSON.stringify({
+    const submissionKey = approvalSubmissionKey({
       senderPhone: sender.phone,
       workflowId: approval.workflowId,
       jobId: approval.jobId,
       draftRevisionId: approval.draftRevisionId,
       revisedEmail,
     });
-    let causeId = approvalCauseBySubmission.current.get(submissionKey);
-    if (!causeId) {
-      causeId = `ui-approval:${crypto.randomUUID()}`;
-      approvalCauseBySubmission.current.set(submissionKey, causeId);
-    }
-    const response = await fetch('/api/chat/approval', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+    const causeId = approvalCauseFor(approvalCauseBySubmission.current, submissionKey);
+    let payload: Record<string, unknown>;
+    try {
+      payload = await submitChatApproval({
         sender_phone: sender.phone,
         cause_id: causeId,
         workflow_id: approval.workflowId,
         job_id: approval.jobId,
         expected_draft_revision_id: approval.draftRevisionId,
         ...(revisedEmail ? { revised_email: revisedEmail } : {}),
-      }),
-    });
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      const message = typeof payload.detail === 'string'
-        ? payload.detail
+      });
+    } catch (approvalError) {
+      const message = approvalError instanceof Error
+        ? approvalError.message
         : 'I could not record that approval. Please review the latest email and try again.';
       setError(message);
       await loadHistory();

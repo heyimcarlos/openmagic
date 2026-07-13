@@ -103,6 +103,68 @@ async def test_six_digit_sms_reply_queues_durable_resume_without_model_or_secret
     assert "482913" not in repr(session)
 
 
+async def test_demo_reset_barrier_cancels_in_flight_interaction_before_continuing(monkeypatch):
+    party_id = UUID("30000000-0000-0000-0000-000000000001")
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    class FakeDatabase:
+        async def dispose(self) -> None:
+            return None
+
+    class FakeRuntime:
+        async def execute(self, **_kwargs) -> None:
+            started.set()
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+    session = SimpleNamespace(
+        log=SimpleNamespace(),
+        working_memory=SimpleNamespace(render_transcript=lambda: ""),
+    )
+    monkeypatch.setattr(
+        chat_handler,
+        "get_settings",
+        lambda: SimpleNamespace(
+            interaction_mode="workflow",
+            database_url="postgresql+psycopg://unused",
+        ),
+    )
+    monkeypatch.setattr(chat_handler, "WorkflowDatabase", lambda _url: FakeDatabase())
+    monkeypatch.setattr(
+        chat_handler,
+        "resolve_sms_party",
+        lambda _database, _phone: _resolved_party(party_id),
+    )
+    monkeypatch.setattr(chat_handler, "get_conversation_session", lambda _id: session)
+    monkeypatch.setattr(
+        chat_handler,
+        "create_interaction_runtime",
+        lambda *_args, **_kwargs: FakeRuntime(),
+    )
+    request = ChatRequest.model_validate(
+        {
+            "messages": [{"id": "in-flight", "role": "user", "content": "Start work"}],
+            "interaction": {
+                "channel": "sms",
+                "sender_phone": "+1 (416) 555-0142",
+            },
+        }
+    )
+
+    response = await chat_handler.handle_chat_request(request)
+    await started.wait()
+
+    async with chat_handler.pause_chat_requests():
+        assert cancelled.is_set()
+        assert not chat_handler._BACKGROUND_TASKS
+
+    assert response.status_code == 202
+
+
 async def _resolved_party(party_id: UUID) -> ResolvedSmsParty:
     return ResolvedSmsParty(
         party_id=party_id,

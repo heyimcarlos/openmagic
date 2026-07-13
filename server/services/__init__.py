@@ -13,7 +13,7 @@ from .conversation import (
     get_working_memory_log,
     schedule_summarization,
 )
-from .conversation.chat_handler import handle_chat_request
+from .conversation.chat_handler import handle_chat_request, pause_chat_requests
 from .execution import (
     AgentRoster,
     ExecutionAgentLogStore,
@@ -65,5 +65,6 @@ __all__ = [
     "get_working_memory_log",
     "handle_chat_request",
     "initiate_connect",
+    "pause_chat_requests",
     "schedule_summarization",
 ]
