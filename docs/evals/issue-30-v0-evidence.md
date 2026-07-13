@@ -29,15 +29,19 @@ uv run python -m server.evals.v0_evidence \
   --run-live-composio
 ```
 
-Every run creates one exclusive directory containing `report.json` and
-`report.md`. The report distinguishes four deterministic safety lanes, the
+Every run requires a clean Git worktree and verifies the supplied build against
+the checked-out commit. It creates one exclusive directory containing
+`report.json`, `report.md`, JUnit evidence for every executed lane, and the
+existing typed recovery or paired reports produced by those suites. The report
+distinguishes four deterministic safety lanes, the
 real-model diagnostic lane, and the live-provider lane. The strict V0 verdict
 is derived only from deterministic gates. Optional external lanes remain
 visible as `not_run`, `pass`, or `fail` and cannot rewrite deterministic safety
 evidence.
 
-The report records the exact build, exact lane commands, bounded observation
-names, durations, and output digests. It does not retain prompts, raw provider
+The report records the exact build, shell-safe lane commands with their
+non-secret environment switches, typed observation outcomes, evidence paths
+and digests, and durations. It does not retain prompts, raw provider
 responses, email content, mailbox addresses, or credentials. In the live lane,
 Send Job completion, Notification delivery, user-visible acknowledgement, and
 recipient observation are separate assertions and separate report

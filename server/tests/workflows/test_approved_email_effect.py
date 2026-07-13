@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from uuid import UUID, uuid4
@@ -50,11 +51,13 @@ from server.workflows import (
 from server.workflows.identity_models import OrganizationMembershipRow, WorkflowParticipantRoleRow
 from server.workflows.models import WorkflowJobRow
 
+APPLICATION_BUILD = os.getenv("OPENMAGIC_EVAL_APPLICATION_BUILD", "test-build")
+
 
 def draft_claim() -> ClaimWorkflowJobCommand:
     return ClaimWorkflowJobCommand(
         worker_id="draft-worker",
-        application_build="test-build",
+        application_build=APPLICATION_BUILD,
         lease_duration=timedelta(minutes=5),
         executor_keys=("renewal_email_drafter",),
     )
@@ -296,7 +299,7 @@ async def test_dispatch_consumes_exact_approval_before_provider_call(
     run = await control_plane.claim_job(
         ClaimWorkflowJobCommand(
             worker_id="send-worker",
-            application_build="test-build",
+            application_build=APPLICATION_BUILD,
             lease_duration=timedelta(minutes=5),
             executor_keys=("composio_gmail_send",),
         )
@@ -335,7 +338,7 @@ async def test_deterministic_adapter_records_one_exact_effect(
     run = await control_plane.claim_job(
         ClaimWorkflowJobCommand(
             worker_id="send-worker",
-            application_build="test-build",
+            application_build=APPLICATION_BUILD,
             lease_duration=timedelta(minutes=5),
             executor_keys=("composio_gmail_send",),
         )
@@ -384,7 +387,7 @@ async def test_composio_adapter_uses_pinned_public_execute_and_normalizes_succes
     run = await control_plane.claim_job(
         ClaimWorkflowJobCommand(
             worker_id="send-worker",
-            application_build="test-build",
+            application_build=APPLICATION_BUILD,
             lease_duration=timedelta(minutes=5),
             executor_keys=("composio_gmail_send",),
         )
@@ -524,7 +527,7 @@ async def test_worker_sends_once_and_completes_workflow_atomically(
         executors={},
         email_adapters={"composio_gmail_send": adapter},
         worker_id="send-worker",
-        application_build="test-build",
+        application_build=APPLICATION_BUILD,
     )
 
     packet = await worker.run_once()
@@ -577,7 +580,7 @@ async def test_uncertain_send_never_completes_or_requeues(
         executors={},
         email_adapters={"composio_gmail_send": adapter},
         worker_id="send-worker",
-        application_build="test-build",
+        application_build=APPLICATION_BUILD,
     )
 
     await worker.run_once()
@@ -636,7 +639,7 @@ async def test_fake_forces_pre_and_post_dispatch_failure_boundaries(
         executors={},
         email_adapters={"composio_gmail_send": adapter},
         worker_id="send-worker",
-        application_build="test-build",
+        application_build=APPLICATION_BUILD,
     )
 
     await worker.run_once()
@@ -664,7 +667,7 @@ async def test_send_result_replay_is_write_once_and_conflicts_fail(
     run = await control_plane.claim_job(
         ClaimWorkflowJobCommand(
             worker_id="send-worker",
-            application_build="test-build",
+            application_build=APPLICATION_BUILD,
             lease_duration=timedelta(minutes=5),
             executor_keys=("composio_gmail_send",),
         )
@@ -710,7 +713,7 @@ async def test_send_result_requires_dispatch_and_post_dispatch_failure_never_ret
     run = await control_plane.claim_job(
         ClaimWorkflowJobCommand(
             worker_id="send-worker",
-            application_build="test-build",
+            application_build=APPLICATION_BUILD,
             lease_duration=timedelta(minutes=5),
             executor_keys=("composio_gmail_send",),
         )
@@ -777,7 +780,7 @@ async def test_integrity_failure_is_audited_and_never_dispatched(
     run = await control_plane.claim_job(
         ClaimWorkflowJobCommand(
             worker_id="send-worker",
-            application_build="test-build",
+            application_build=APPLICATION_BUILD,
             lease_duration=timedelta(minutes=5),
             executor_keys=("composio_gmail_send",),
         )
@@ -808,7 +811,7 @@ async def test_cancellation_and_dispatch_have_one_transaction_winner(
     run = await control_plane.claim_job(
         ClaimWorkflowJobCommand(
             worker_id="send-worker",
-            application_build="test-build",
+            application_build=APPLICATION_BUILD,
             lease_duration=timedelta(minutes=5),
             executor_keys=("composio_gmail_send",),
         )
@@ -864,7 +867,7 @@ async def test_authority_revocation_and_dispatch_have_one_transaction_winner(
     run = await control_plane.claim_job(
         ClaimWorkflowJobCommand(
             worker_id="send-worker",
-            application_build="test-build",
+            application_build=APPLICATION_BUILD,
             lease_duration=timedelta(minutes=5),
             executor_keys=("composio_gmail_send",),
         )
@@ -935,7 +938,7 @@ async def test_reapproval_after_predispatch_revocation_can_claim_a_fresh_run(
     first_run = await control_plane.claim_job(
         ClaimWorkflowJobCommand(
             worker_id="send-worker-one",
-            application_build="test-build",
+            application_build=APPLICATION_BUILD,
             lease_duration=timedelta(minutes=5),
             executor_keys=("composio_gmail_send",),
         )
@@ -976,7 +979,7 @@ async def test_reapproval_after_predispatch_revocation_can_claim_a_fresh_run(
     second_run = await control_plane.claim_job(
         ClaimWorkflowJobCommand(
             worker_id="send-worker-two",
-            application_build="test-build",
+            application_build=APPLICATION_BUILD,
             lease_duration=timedelta(minutes=5),
             executor_keys=("composio_gmail_send",),
         )
@@ -1053,7 +1056,7 @@ async def test_membership_revocation_invalidates_every_affected_workflow(
         await control_plane.claim_job(
             ClaimWorkflowJobCommand(
                 worker_id="send-worker",
-                application_build="test-build",
+                application_build=APPLICATION_BUILD,
                 lease_duration=timedelta(minutes=5),
                 executor_keys=("composio_gmail_send",),
             )
@@ -1086,7 +1089,7 @@ async def test_predispatch_revocation_fails_an_exhausted_send_job(
     run = await control_plane.claim_job(
         ClaimWorkflowJobCommand(
             worker_id="send-worker",
-            application_build="test-build",
+            application_build=APPLICATION_BUILD,
             lease_duration=timedelta(minutes=5),
             executor_keys=("composio_gmail_send",),
         )
@@ -1123,7 +1126,7 @@ async def test_attempt_upgrade_includes_running_undispatched_send(
     run = await control_plane.claim_job(
         ClaimWorkflowJobCommand(
             worker_id="send-worker",
-            application_build="test-build",
+            application_build=APPLICATION_BUILD,
             lease_duration=timedelta(minutes=5),
             executor_keys=("composio_gmail_send",),
         )
@@ -1226,7 +1229,7 @@ async def test_send_confirmation_uses_fresh_packet_driven_interaction(
         executors={},
         email_adapters={"composio_gmail_send": DeterministicEmailSendAdapter()},
         worker_id="send-worker",
-        application_build="test-build",
+        application_build=APPLICATION_BUILD,
     ).run_once()
     calls = 0
 

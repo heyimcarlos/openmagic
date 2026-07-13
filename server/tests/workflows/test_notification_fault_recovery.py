@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -51,6 +52,7 @@ class MutableClock:
 class ApprovalCompletion:
     def __init__(self, workflow_id: UUID) -> None:
         self.workflow_id = workflow_id
+        self.first_messages: list[list[dict[str, Any]]] = []
 
     async def __call__(self, **request: Any) -> dict[str, Any]:
         messages = request["messages"]
@@ -60,6 +62,7 @@ class ApprovalCompletion:
             for call in message.get("tool_calls", [])
         }
         if "read_workflow_packet" not in invoked:
+            self.first_messages.append(json.loads(json.dumps(messages)))
             return _tool_call("read_workflow_packet", {"workflow_id": str(self.workflow_id)})
         if "present_approval_request" not in invoked:
             return _tool_call("present_approval_request", {})
@@ -77,6 +80,9 @@ class CorrelatedReplyLog:
             return False
         self.messages_by_delivery[delivery_id] = message
         return True
+
+    def load_transcript(self) -> str:
+        raise AssertionError("fresh Notification runtime must not load conversation history")
 
 
 class TrackingInteractionFactory:
@@ -178,17 +184,34 @@ async def test_visible_reply_survives_lost_ack_without_duplicate_message(
             first.workflow_id,
         )
 
-    clock.advance(timedelta(minutes=5, microseconds=1))
+    clock.advance(timedelta(minutes=5))
+    stale_acknowledgement = AcknowledgeNotificationCommand(
+        notification_id=first.notification_id,
+        worker_id="first-worker",
+        delivery_attempt=first.delivery_attempt,
+    )
+    with pytest.raises(NotificationLifecycleError, match="lease is stale"):
+        await control_plane.acknowledge_notification(stale_acknowledgement)
     assert await control_plane.claim_notification(_notification_claim("recovery-scan")) is None
     clock.advance(timedelta(seconds=1))
-    recovery = NotificationWorker(
-        control_plane=control_plane,
-        interactions=factory,
-        worker_id="recovery-worker",
+    second = await control_plane.claim_notification(_notification_claim("recovery-worker"))
+    assert second is not None
+    with pytest.raises(NotificationLifecycleError, match="lease is stale"):
+        await control_plane.acknowledge_notification(stale_acknowledgement)
+    async with factory.create("recovery-worker", second.delivery_attempt) as interaction:
+        await interaction.handle(
+            second.notification_id,
+            second.workflow_event_id,
+            second.workflow_id,
+        )
+    await control_plane.acknowledge_notification(
+        AcknowledgeNotificationCommand(
+            notification_id=second.notification_id,
+            worker_id="recovery-worker",
+            delivery_attempt=second.delivery_attempt,
+        )
     )
-    delivered = await recovery.run_once()
 
-    assert delivered is not None
     assert reply_log.calls == 2
     assert len(reply_log.messages_by_delivery) == 1
     trace = await control_plane.read_workflow_trace(workflow_id, create_command().context)
@@ -255,8 +278,14 @@ async def test_notification_delivery_restarts_from_durable_identifiers_only(
         "server.agents.interaction_agent.workflow_notifications.get_conversation_log",
         lambda: reply_log,
     )
+    completion = ApprovalCompletion(workflow_id)
     interactions = TrackingInteractionFactory(
-        _fresh_factory(restarted_control_plane, restarted_database, workflow_id)
+        _fresh_factory(
+            restarted_control_plane,
+            restarted_database,
+            workflow_id,
+            completion=completion,
+        )
     )
     worker = NotificationWorker(
         control_plane=restarted_control_plane,
@@ -270,6 +299,9 @@ async def test_notification_delivery_restarts_from_durable_identifiers_only(
     assert delivered.workflow_id == workflow_id
     assert len(interactions.runtime_instance_ids) == 1
     assert len(reply_log.messages_by_delivery) == 1
+    assert len(completion.first_messages) == 1
+    assert len(completion.first_messages[0]) == 1
+    assert "notification_id" in completion.first_messages[0][0]["content"]
     packet = await WorkflowRetrieval(
         database=restarted_database,
         cursor_secret=b"restart-evidence",
@@ -291,7 +323,10 @@ async def _publish_draft_notification(control_plane: WorkflowControlPlane) -> UU
     draft = await control_plane.claim_job(
         ClaimWorkflowJobCommand(
             worker_id="draft-worker",
-            application_build="notification-eval",
+            application_build=os.getenv(
+                "OPENMAGIC_EVAL_APPLICATION_BUILD",
+                "notification-eval",
+            ),
             lease_duration=timedelta(minutes=5),
             executor_keys=("renewal_email_drafter",),
         )
@@ -332,6 +367,7 @@ def _fresh_factory(
     control_plane: WorkflowControlPlane,
     database: WorkflowDatabase,
     workflow_id: UUID,
+    completion: ApprovalCompletion | None = None,
 ) -> FreshWorkflowInteractionFactory:
     return FreshWorkflowInteractionFactory(
         control_plane=control_plane,
@@ -339,7 +375,7 @@ def _fresh_factory(
         presenter=ConversationApprovalPresenter(expected_party_id=BROKER_ID),
         settings=Settings(openrouter_api_key="test-key"),
         organization_party_id=ORGANIZATION_ID,
-        completion=ApprovalCompletion(workflow_id),
+        completion=completion or ApprovalCompletion(workflow_id),
     )
 
 

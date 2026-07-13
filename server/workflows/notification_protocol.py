@@ -183,20 +183,6 @@ class WorkflowNotificationProtocol:
             except ValueError as exc:
                 raise NotificationLifecycleError("Notification destination is invalid") from exc
 
-            committed = await session.scalar(
-                sa.select(WorkflowEventRow).where(
-                    WorkflowEventRow.workflow_id == workflow_id,
-                    WorkflowEventRow.event_type == "approval_presentation_committed",
-                    WorkflowEventRow.cause_type == "notification",
-                    WorkflowEventRow.cause_id == str(notification_id),
-                )
-            )
-            if committed is not None:
-                return await self._committed_presentation(
-                    session,
-                    committed,
-                    destination_party_id,
-                )
             authorized = await self._has_current_broker_authority(
                 session,
                 WorkflowCommandContext(
@@ -210,6 +196,22 @@ class WorkflowNotificationProtocol:
             if not authorized:
                 raise NotificationLifecycleError(
                     "Notification destination no longer has Broker authority"
+                )
+
+            committed = await session.scalar(
+                sa.select(WorkflowEventRow).where(
+                    WorkflowEventRow.workflow_id == workflow_id,
+                    WorkflowEventRow.event_type == "approval_presentation_committed",
+                    WorkflowEventRow.cause_type == "notification",
+                    WorkflowEventRow.cause_id == str(notification_id),
+                )
+            )
+            if committed is not None:
+                return await self._committed_presentation(
+                    session,
+                    committed,
+                    destination_party_id,
+                    workflow,
                 )
 
             draft = await session.scalar(
@@ -400,7 +402,10 @@ class WorkflowNotificationProtocol:
         session: AsyncSession,
         event: WorkflowEventRow,
         destination_party_id: UUID,
+        workflow: WorkflowRow,
     ) -> NotificationPresentationContext:
+        if workflow.status != "active":
+            raise NotificationLifecycleError("Committed presentation is no longer actionable")
         if event.job_id is None:
             raise NotificationLifecycleError("Committed presentation has no Send Job")
         try:
@@ -412,10 +417,33 @@ class WorkflowNotificationProtocol:
             sa.select(WorkflowJobRow).where(
                 WorkflowJobRow.workflow_id == event.workflow_id,
                 WorkflowJobRow.id == event.job_id,
+                WorkflowJobRow.status == "waiting",
             )
         )
         if send is None:
-            raise NotificationLifecycleError("Committed presentation Send Job is missing")
+            raise NotificationLifecycleError("Committed presentation is no longer actionable")
+        draft = await session.scalar(
+            sa.select(WorkflowJobRow).where(
+                WorkflowJobRow.workflow_id == event.workflow_id,
+                WorkflowJobRow.id == draft_job_id,
+                WorkflowJobRow.status == "succeeded",
+            )
+        )
+        approval_exists = await session.scalar(
+            sa.select(WorkflowEventRow.id)
+            .where(
+                WorkflowEventRow.workflow_id == event.workflow_id,
+                WorkflowEventRow.job_id == send.id,
+                WorkflowEventRow.event_type == "approval_granted",
+            )
+            .limit(1)
+        )
+        if (
+            draft is None
+            or approval_exists is not None
+            or not await cls._dependencies_succeeded(session, event.workflow_id, send.id)
+        ):
+            raise NotificationLifecycleError("Committed presentation is no longer actionable")
         sender_mailbox_id = event.data.get("sender_mailbox_id")
         effect = await resolve_email_effect(
             session,
@@ -465,7 +493,7 @@ class WorkflowNotificationProtocol:
                 sa.select(NotificationRow)
                 .where(
                     NotificationRow.status == "delivering",
-                    NotificationRow.lease_expires_at < now,
+                    NotificationRow.lease_expires_at <= now,
                 )
                 .order_by(NotificationRow.lease_expires_at, NotificationRow.id)
                 .with_for_update(skip_locked=True)
@@ -495,7 +523,7 @@ class WorkflowNotificationProtocol:
             or notification.claimed_by != worker_id
             or notification.attempts != delivery_attempt
             or notification.lease_expires_at is None
-            or notification.lease_expires_at < self._clock()
+            or notification.lease_expires_at <= self._clock()
         ):
             raise NotificationLifecycleError("Notification delivery lease is stale")
 

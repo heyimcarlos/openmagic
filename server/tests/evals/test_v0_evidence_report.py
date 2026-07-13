@@ -4,6 +4,8 @@ import json
 import subprocess
 from datetime import UTC, datetime
 
+import pytest
+
 from server.evals.v0_evidence import run_v0_evidence
 
 
@@ -20,7 +22,7 @@ def test_report_separates_deterministic_diagnostic_and_live_evidence(tmp_path) -
     runner = _SuccessfulRunner()
     report, json_path, markdown_path = run_v0_evidence(
         output_directory=tmp_path,
-        application_build="0123456789abcdef",
+        application_build="0123456789abcdef0123456789abcdef01234567",
         invocation=("python", "-m", "server.evals.v0_evidence"),
         run_model_diagnostics=False,
         run_live_composio=False,
@@ -40,17 +42,19 @@ def test_report_separates_deterministic_diagnostic_and_live_evidence(tmp_path) -
         "live_composio": "not_run",
     }
     notification = next(lane for lane in report.lanes if lane.lane_id == "notification_recovery")
-    assert "Job completion remains separate from Notification delivery" in notification.observations
+    observation_names = {observation.name for observation in notification.observations}
+    assert "Job completion remains separate from Notification delivery" in observation_names
     assert (
         "Notification delivery remains separate from user-visible acknowledgement"
-        in notification.observations
+        in observation_names
     )
     live = next(lane for lane in report.lanes if lane.lane_id == "live_composio")
-    assert "Send Job completed" in live.observations
-    assert "Notification delivered" in live.observations
-    assert "User-visible acknowledgement recorded" in live.observations
+    live_observation_names = {observation.name for observation in live.observations}
+    assert "Send Job completed" in live_observation_names
+    assert "Notification delivered" in live_observation_names
+    assert "User-visible acknowledgement recorded" in live_observation_names
     payload = json.loads(json_path.read_text())
-    assert payload["application_build"] == "0123456789abcdef"
+    assert payload["application_build"] == "0123456789abcdef0123456789abcdef01234567"
     assert "Deterministic V0 verdict: PASS" in markdown_path.read_text()
     serialized = json_path.read_text().casefold()
     assert "api_key" not in serialized
@@ -72,7 +76,7 @@ def test_failed_deterministic_lane_fails_only_the_strict_gate(tmp_path) -> None:
 
     report, _, _ = run_v0_evidence(
         output_directory=tmp_path,
-        application_build="build-2",
+        application_build="2" * 40,
         invocation=("evidence",),
         run_model_diagnostics=True,
         run_live_composio=True,
@@ -85,3 +89,56 @@ def test_failed_deterministic_lane_fails_only_the_strict_gate(tmp_path) -> None:
     assert (
         next(lane for lane in report.lanes if lane.lane_id == "workflow_recovery").status == "fail"
     )
+
+
+def test_timed_out_lane_is_bounded_failure_evidence(tmp_path) -> None:
+    def runner(command, **_kwargs):
+        raise subprocess.TimeoutExpired(command, timeout=1, output="bounded output")
+
+    report, _, _ = run_v0_evidence(
+        output_directory=tmp_path,
+        application_build="3" * 40,
+        invocation=("evidence",),
+        run_model_diagnostics=False,
+        run_live_composio=False,
+        runner=runner,
+        now=datetime(2026, 7, 13, 0, 0, 2, tzinfo=UTC),
+        lane_timeout_seconds=1,
+    )
+
+    assert report.v0_passed is False
+    assert all(
+        lane.status == "fail"
+        for lane in report.lanes
+        if lane.classification == "deterministic_gate"
+    )
+
+
+def test_unstartable_lane_is_bounded_failure_evidence(tmp_path) -> None:
+    def runner(_command, **_kwargs):
+        raise OSError("process unavailable")
+
+    report, _, _ = run_v0_evidence(
+        output_directory=tmp_path,
+        application_build="4" * 40,
+        invocation=("evidence",),
+        run_model_diagnostics=False,
+        run_live_composio=False,
+        runner=runner,
+        now=datetime(2026, 7, 13, 0, 0, 3, tzinfo=UTC),
+    )
+
+    assert report.v0_passed is False
+
+
+def test_invalid_build_is_rejected_before_creating_output(tmp_path) -> None:
+    with pytest.raises(ValueError, match="full lowercase Git SHA"):
+        run_v0_evidence(
+            output_directory=tmp_path,
+            application_build="feature/bad-build",
+            invocation=("evidence",),
+            run_model_diagnostics=False,
+            run_live_composio=False,
+        )
+
+    assert list(tmp_path.iterdir()) == []

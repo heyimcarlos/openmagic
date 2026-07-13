@@ -6,6 +6,8 @@ import argparse
 import hashlib
 import json
 import os
+import re
+import shlex
 import subprocess
 import sys
 import time
@@ -27,18 +29,39 @@ LaneId = Literal[
     "live_composio",
 ]
 Runner = Callable[..., subprocess.CompletedProcess[str]]
+_LANE_CLASSIFICATIONS: dict[LaneId, LaneClassification] = {
+    "workflow_correctness": "deterministic_gate",
+    "workflow_recovery": "deterministic_gate",
+    "notification_recovery": "deterministic_gate",
+    "deterministic_composio": "deterministic_gate",
+    "model_diagnostics": "model_diagnostic",
+    "live_composio": "live_smoke",
+}
 
 
 class _EvidenceModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
+class V0EvidenceObservation(_EvidenceModel):
+    name: str = Field(min_length=1, max_length=255)
+    status: LaneStatus
+    source: str = Field(min_length=1, max_length=1_000)
+
+
+class V0EvidenceArtifact(_EvidenceModel):
+    path: str = Field(min_length=1, max_length=2_000)
+    digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 class V0EvidenceLane(_EvidenceModel):
     lane_id: LaneId
     classification: LaneClassification
     status: LaneStatus
+    environment: tuple[str, ...]
     command: tuple[str, ...]
-    observations: tuple[str, ...]
+    observations: tuple[V0EvidenceObservation, ...]
+    artifacts: tuple[V0EvidenceArtifact, ...]
     duration_ms: float = Field(ge=0)
     output_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
@@ -47,7 +70,7 @@ class V0EvidenceReport(_EvidenceModel):
     schema_version: Literal[1] = 1
     suite_id: Literal["openmagic-v0-evidence.v1"] = "openmagic-v0-evidence.v1"
     run_id: str = Field(pattern=r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$")
-    application_build: str = Field(min_length=1, max_length=255)
+    application_build: str = Field(pattern=r"^[0-9a-f]{40}$")
     generated_at: datetime
     invocation: tuple[str, ...]
     v0_passed: bool
@@ -55,18 +78,17 @@ class V0EvidenceReport(_EvidenceModel):
 
     @model_validator(mode="after")
     def require_complete_and_traceable_lanes(self) -> V0EvidenceReport:
-        expected = {
-            "workflow_correctness",
-            "workflow_recovery",
-            "notification_recovery",
-            "deterministic_composio",
-            "model_diagnostics",
-            "live_composio",
-        }
+        expected = set(_LANE_CLASSIFICATIONS)
         lane_ids = [lane.lane_id for lane in self.lanes]
         if set(lane_ids) != expected or len(lane_ids) != len(expected):
             raise ValueError("V0 evidence report requires every named lane exactly once")
-        gates = [lane for lane in self.lanes if lane.classification == "deterministic_gate"]
+        if any(lane.classification != _LANE_CLASSIFICATIONS[lane.lane_id] for lane in self.lanes):
+            raise ValueError("V0 evidence lane classification does not match its contract")
+        gates = [
+            lane
+            for lane in self.lanes
+            if _LANE_CLASSIFICATIONS[lane.lane_id] == "deterministic_gate"
+        ]
         if any(lane.status == "not_run" for lane in gates):
             raise ValueError("Deterministic gates may not be omitted")
         if self.v0_passed != all(lane.status == "pass" for lane in gates):
@@ -80,6 +102,12 @@ class _LaneSpec(_EvidenceModel):
     pytest_targets: tuple[str, ...]
     observations: tuple[str, ...]
     opt_in_environment: tuple[tuple[str, str], ...] = ()
+
+    @model_validator(mode="after")
+    def require_authoritative_classification(self) -> _LaneSpec:
+        if self.classification != _LANE_CLASSIFICATIONS[self.lane_id]:
+            raise ValueError("Lane classification does not match its contract")
+        return self
 
 
 _LANES = (
@@ -161,9 +189,11 @@ def run_v0_evidence(
     run_live_composio: bool,
     runner: Runner = subprocess.run,
     now: datetime | None = None,
+    lane_timeout_seconds: float = 360,
 ) -> tuple[V0EvidenceReport, Path, Path]:
     """Run every deterministic lane and optional external lanes, then write one index."""
 
+    _require_build_sha(application_build)
     run_at = now or datetime.now(UTC)
     run_id = f"v0-{run_at.strftime('%Y%m%dT%H%M%SZ')}-{application_build[:12]}"
     run_directory = output_directory / run_id
@@ -178,6 +208,8 @@ def run_v0_evidence(
                 or (spec.lane_id == "live_composio" and run_live_composio)
             ),
             runner=runner,
+            run_directory=run_directory,
+            timeout_seconds=lane_timeout_seconds,
         )
         for spec in _LANES
     )
@@ -204,44 +236,112 @@ def _run_lane(
     application_build: str,
     enabled: bool,
     runner: Runner,
+    run_directory: Path,
+    timeout_seconds: float,
 ) -> V0EvidenceLane:
-    command = (sys.executable, "-m", "pytest", "-q", *spec.pytest_targets)
+    lane_directory = run_directory / spec.lane_id
+    junit_path = lane_directory / "junit.xml"
+    command = (
+        sys.executable,
+        "-m",
+        "pytest",
+        "-q",
+        *spec.pytest_targets,
+        f"--junitxml={junit_path}",
+    )
+    public_environment = tuple(
+        f"{name}={value}"
+        for name, value in (
+            *spec.opt_in_environment,
+            ("OPENMAGIC_EVAL_APPLICATION_BUILD", application_build),
+            ("OPENMAGIC_RECOVERY_EVAL_APPLICATION_BUILD", application_build),
+            ("OPENMAGIC_RECOVERY_EVAL_OUTPUT_DIR", str(lane_directory)),
+            ("OPENMAGIC_PAIRED_EVAL_OUTPUT_DIR", str(lane_directory)),
+        )
+    )
+    lane_directory.mkdir()
     if not enabled:
         return V0EvidenceLane(
             lane_id=spec.lane_id,
             classification=spec.classification,
             status="not_run",
+            environment=public_environment,
             command=command,
-            observations=spec.observations,
+            observations=tuple(
+                V0EvidenceObservation(name=name, status="not_run", source="lane not requested")
+                for name in spec.observations
+            ),
+            artifacts=(),
             duration_ms=0,
         )
     environment = os.environ.copy()
     environment.update(spec.opt_in_environment)
     environment["OPENMAGIC_EVAL_APPLICATION_BUILD"] = application_build
     environment["OPENMAGIC_RECOVERY_EVAL_APPLICATION_BUILD"] = application_build
+    environment["OPENMAGIC_RECOVERY_EVAL_OUTPUT_DIR"] = str(lane_directory)
+    environment["OPENMAGIC_PAIRED_EVAL_OUTPUT_DIR"] = str(lane_directory)
     started = time.perf_counter()
-    result = runner(
-        command,
-        cwd=Path.cwd(),
-        env=environment,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
+    try:
+        result = runner(
+            command,
+            cwd=Path.cwd(),
+            env=environment,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=timeout_seconds,
+        )
+        return_code = result.returncode
+        stdout = result.stdout
+        stderr = result.stderr
+    except subprocess.TimeoutExpired as exc:
+        return_code = 124
+        stdout = _bounded_subprocess_text(exc.stdout)
+        stderr = "lane timed out"
+    except OSError as exc:
+        return_code = 126
+        stdout = ""
+        stderr = f"lane could not start: {type(exc).__name__}"
     duration_ms = (time.perf_counter() - started) * 1_000
-    output = f"{result.stdout}\n{result.stderr}".encode()
-    if result.returncode != 0:
-        sys.stderr.write(result.stdout)
-        sys.stderr.write(result.stderr)
+    output = f"{stdout}\n{stderr}".encode()
+    if return_code != 0:
+        sys.stderr.write(stdout)
+        sys.stderr.write(stderr)
+    status: LaneStatus = "pass" if return_code == 0 else "fail"
+    artifacts = _artifacts(lane_directory)
+    source = str(junit_path) if junit_path.exists() else "lane process outcome"
     return V0EvidenceLane(
         lane_id=spec.lane_id,
         classification=spec.classification,
-        status="pass" if result.returncode == 0 else "fail",
+        status=status,
+        environment=public_environment,
         command=command,
-        observations=spec.observations,
+        observations=tuple(
+            V0EvidenceObservation(name=name, status=status, source=source)
+            for name in spec.observations
+        ),
+        artifacts=artifacts,
         duration_ms=duration_ms,
         output_digest=hashlib.sha256(output).hexdigest(),
     )
+
+
+def _artifacts(lane_directory: Path) -> tuple[V0EvidenceArtifact, ...]:
+    return tuple(
+        V0EvidenceArtifact(
+            path=str(path),
+            digest=hashlib.sha256(path.read_bytes()).hexdigest(),
+        )
+        for path in sorted(lane_directory.rglob("*"))
+        if path.is_file()
+    )
+
+
+def _bounded_subprocess_text(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    text = value.decode(errors="replace") if isinstance(value, bytes) else value
+    return text[-4_000:]
 
 
 def _render_markdown(report: V0EvidenceReport) -> str:
@@ -260,6 +360,21 @@ def _render_markdown(report: V0EvidenceReport) -> str:
     ]
     for lane in report.lanes:
         lines.append(f"| {lane.lane_id} | {lane.classification} | {lane.status} |")
+    lines.extend(
+        [
+            "",
+            "## Typed observations",
+            "",
+            "| Lane | Observation | Status | Evidence source |",
+            "| --- | --- | --- | --- |",
+        ]
+    )
+    for lane in report.lanes:
+        for observation in lane.observations:
+            lines.append(
+                f"| {lane.lane_id} | {observation.name} | "
+                f"{observation.status} | `{observation.source}` |"
+            )
     lines.extend(["", "## Exact commands", ""])
     for lane in report.lanes:
         lines.extend(
@@ -267,7 +382,7 @@ def _render_markdown(report: V0EvidenceReport) -> str:
                 f"### {lane.lane_id}",
                 "",
                 "```text",
-                " ".join(lane.command),
+                shlex.join(("env", *lane.environment, *lane.command)),
                 "```",
                 "",
             ]
@@ -278,14 +393,15 @@ def _render_markdown(report: V0EvidenceReport) -> str:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=Path("/tmp/openmagic-v0-evidence"))
-    parser.add_argument("--build", required=True)
+    parser.add_argument("--build")
     parser.add_argument("--run-model-diagnostics", action="store_true")
     parser.add_argument("--run-live-composio", action="store_true")
     args = parser.parse_args(argv)
+    application_build = _verified_current_build(args.build)
     invocation = (sys.executable, "-m", "server.evals.v0_evidence", *(argv or sys.argv[1:]))
     report, json_path, markdown_path = run_v0_evidence(
         output_directory=args.output,
-        application_build=args.build,
+        application_build=application_build,
         invocation=invocation,
         run_model_diagnostics=args.run_model_diagnostics,
         run_live_composio=args.run_live_composio,
@@ -294,8 +410,40 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 0 if report.v0_passed else 1
 
 
+def _verified_current_build(requested_build: str | None) -> str:
+    head = subprocess.run(
+        ("git", "rev-parse", "HEAD"),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    dirty = subprocess.run(
+        ("git", "status", "--porcelain"),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    if dirty:
+        raise RuntimeError("V0 evidence requires a clean worktree")
+    if requested_build is not None and requested_build != head:
+        raise RuntimeError("Requested build does not match the checked-out Git HEAD")
+    return _require_build_sha(head)
+
+
+def _require_build_sha(application_build: str) -> str:
+    if re.fullmatch(r"[0-9a-f]{40}", application_build) is None:
+        raise ValueError("Application build must be one full lowercase Git SHA")
+    return application_build
+
+
 if __name__ == "__main__":
     raise SystemExit(main())
 
 
-__all__ = ["V0EvidenceLane", "V0EvidenceReport", "run_v0_evidence"]
+__all__ = [
+    "V0EvidenceArtifact",
+    "V0EvidenceLane",
+    "V0EvidenceObservation",
+    "V0EvidenceReport",
+    "run_v0_evidence",
+]

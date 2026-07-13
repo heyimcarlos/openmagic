@@ -873,7 +873,7 @@ async def test_presentation_rejects_send_job_that_no_longer_waits_for_approval(
     await database.dispose()
 
 
-async def test_presentation_commit_wins_before_later_job_replacement(
+async def test_committed_presentation_is_rejected_after_later_job_replacement(
     control_plane: WorkflowControlPlane,
     migrated_postgres_url: str,
 ):
@@ -922,15 +922,15 @@ async def test_presentation_commit_wins_before_later_job_replacement(
             )
         )
 
-    replay = await control_plane.resolve_notification_presentation(
-        delivery.notification_id,
-        delivery.workflow_event_id,
-        delivery.workflow_id,
-        "notification-worker",
-        delivery.delivery_attempt,
-    )
+    with pytest.raises(NotificationLifecycleError, match="no longer actionable"):
+        await control_plane.resolve_notification_presentation(
+            delivery.notification_id,
+            delivery.workflow_event_id,
+            delivery.workflow_id,
+            "notification-worker",
+            delivery.delivery_attempt,
+        )
 
-    assert replay == first
     trace = await control_plane.read_workflow_trace(created.workflow.id, create_command().context)
     assert [event.event_type for event in trace.events].count(
         "approval_presentation_committed"
