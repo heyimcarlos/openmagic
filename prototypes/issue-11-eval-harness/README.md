@@ -15,7 +15,9 @@ The proposed shape has three deliberately separate lanes:
 
 1. **Paired journey:** run the same synthetic broker requests through the
    inherited baseline and the V0 Workflow path. Compare final task behavior,
-   Workflow selection, context burden, and latency segments.
+   Workflow selection, duplicate input, context burden, and latency segments.
+   V0 correctness is gated. The inherited baseline remains an observation, so
+   demonstrating an inherited weakness does not make the harness itself fail.
 2. **Protocol recovery:** exercise PostgreSQL, Workers, leases, approval,
    dispatch, and notification faults only against the durable path. These are
    deterministic correctness gates, not model benchmarks.

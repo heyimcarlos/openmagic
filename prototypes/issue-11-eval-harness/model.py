@@ -49,6 +49,14 @@ SCENARIOS = (
         evidence=("local control-plane time", "model time", "provider time"),
     ),
     Scenario(
+        name="Deduplicate the broker request",
+        lane="paired journey",
+        systems="baseline + V0",
+        verdict="gate",
+        perturbation="deliver the same authenticated message Cause twice",
+        evidence=("one V0 Workflow graph", "stable replay outcome", "baseline observation"),
+    ),
+    Scenario(
         name="Fence concurrent Job claims",
         lane="protocol recovery",
         systems="V0 only",
