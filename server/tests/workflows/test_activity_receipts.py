@@ -9,6 +9,7 @@ from sqlalchemy.exc import IntegrityError
 from server.tests.workflows.factories import BROKER_ID
 from server.workflows import (
     InteractionActivityAction,
+    InteractionActivityPresentation,
     InteractionActivityStatus,
     InteractionActivityStore,
     WorkflowDatabase,
@@ -25,12 +26,23 @@ async def test_activity_receipts_are_ordered_and_expose_only_sanitized_fields(
     first = await store.start(
         cause_id="message-renewal-request",
         action=InteractionActivityAction.SEARCH_WORKFLOWS,
+        input_summary='query "John Smith" · active renewals',
     )
     second = await store.start(
         cause_id="message-renewal-request",
         action=InteractionActivityAction.READ_WORKFLOW_PACKET,
     )
-    await store.finish(first.id, status=InteractionActivityStatus.SUCCEEDED)
+    await store.finish(
+        first.id,
+        status=InteractionActivityStatus.SUCCEEDED,
+        presentation=InteractionActivityPresentation(
+            summary="2 authorized matches",
+            items=(
+                "2026 renewal outreach for John Smith · active · Acme Brokerage",
+                "2025 renewal outreach for John Smith · completed · Acme Brokerage",
+            ),
+        ),
+    )
     await store.finish(second.id, status=InteractionActivityStatus.FAILED)
 
     receipts = await store.list_for_actor_causes(
@@ -49,9 +61,19 @@ async def test_activity_receipts_are_ordered_and_expose_only_sanitized_fields(
         "action",
         "status",
         "workflow_id",
+        "input_summary",
+        "presentation",
         "created_at",
         "finished_at",
     }
+    assert receipts[0].input_summary == 'query "John Smith" · active renewals'
+    assert receipts[0].presentation == InteractionActivityPresentation(
+        summary="2 authorized matches",
+        items=(
+            "2026 renewal outreach for John Smith · active · Acme Brokerage",
+            "2025 renewal outreach for John Smith · completed · Acme Brokerage",
+        ),
+    )
     await database.dispose()
 
 

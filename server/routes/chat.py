@@ -1,5 +1,5 @@
 from functools import lru_cache
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, status
@@ -18,6 +18,7 @@ from ..models import (
 from ..services import get_conversation_log, get_trigger_service, handle_chat_request
 from ..services.conversation import (
     WorkflowTelemetryProjector,
+    clear_conversation_sessions,
     get_conversation_session,
 )
 from ..workflows import (
@@ -27,6 +28,7 @@ from ..workflows import (
     WorkflowRetrieval,
     default_workflow_registry,
     find_sms_party,
+    reset_v0_demo,
     sms_interaction_id,
 )
 
@@ -117,21 +119,23 @@ async def chat_history(
 @router.get("/telemetry/latest", response_model=ChatLatestTelemetryResponse)
 async def latest_chat_telemetry(
     sender_phone: str = Query(min_length=8, max_length=32),
+    cause_id: Annotated[str | None, Query(min_length=1, max_length=255)] = None,
 ) -> ChatLatestTelemetryResponse:
     """Project the latest bounded Workflow activity for the cockpit."""
 
     settings = get_settings()
     if settings.interaction_mode != "workflow":
         return ChatLatestTelemetryResponse()
-    log = get_conversation_session(sms_interaction_id(sender_phone)).log
-    cause_ids: list[str] = []
-    for entry in reversed(list(log.iter_correlated_entries())):
-        if entry.tag != "poke_reply" or entry.cause_id is None:
-            continue
-        if entry.cause_id not in cause_ids:
-            cause_ids.append(entry.cause_id)
-        if len(cause_ids) == _LATEST_TELEMETRY_CAUSE_LIMIT:
-            break
+    cause_ids = [cause_id] if cause_id is not None else []
+    if cause_id is None:
+        log = get_conversation_session(sms_interaction_id(sender_phone)).log
+        for entry in reversed(list(log.iter_correlated_entries())):
+            if entry.tag != "poke_reply" or entry.cause_id is None:
+                continue
+            if entry.cause_id not in cause_ids:
+                cause_ids.append(entry.cause_id)
+            if len(cause_ids) == _LATEST_TELEMETRY_CAUSE_LIMIT:
+                break
     if not cause_ids:
         return ChatLatestTelemetryResponse()
     if not settings.database_url or not settings.workflow_cursor_secret:
@@ -307,7 +311,7 @@ def get_workflow_retrieval(settings: Settings) -> WorkflowRetrieval:
 
 
 @router.delete("/history", response_model=ChatHistoryClearResponse)
-def clear_history(
+async def clear_history(
     sender_phone: str | None = Query(default=None, min_length=8, max_length=32),
 ) -> ChatHistoryClearResponse:
     from ..services import get_agent_roster, get_execution_agent_logs
@@ -318,6 +322,39 @@ def clear_history(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="SMS sender phone is required",
         )
+    if settings.interaction_mode == "workflow":
+        required = (
+            settings.database_url,
+            settings.workflow_broker_party_id,
+            settings.workflow_organization_party_id,
+        )
+        if not all(required):
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Demo reset is unavailable",
+            )
+        assert settings.database_url is not None
+        assert settings.workflow_broker_party_id is not None
+        assert settings.workflow_organization_party_id is not None
+        try:
+            await reset_v0_demo(
+                settings.database_url,
+                broker_party_id=UUID(settings.workflow_broker_party_id),
+                organization_party_id=UUID(settings.workflow_organization_party_id),
+                policyholder_email=settings.demo_policyholder_email,
+                broker_email=settings.demo_broker_email,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Local Workflow demo reset failed",
+                extra={"error_type": type(exc).__name__},
+            )
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Demo reset is unavailable",
+            ) from exc
+        clear_conversation_sessions()
+        return ChatHistoryClearResponse()
     log = (
         get_conversation_session(sms_interaction_id(sender_phone)).log
         if sender_phone

@@ -35,6 +35,22 @@ class InteractionActivityStatus(StrEnum):
 
 
 @dataclass(frozen=True)
+class InteractionActivityPresentation:
+    """Bounded, application-authored result context safe for chat display."""
+
+    summary: str
+    items: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not self.summary.strip() or len(self.summary) > 255:
+            raise ValueError("activity summary must contain at most 255 characters")
+        if len(self.items) > 8:
+            raise ValueError("activity presentation may contain at most eight items")
+        if any(not item.strip() or len(item) > 255 for item in self.items):
+            raise ValueError("activity items must contain at most 255 characters")
+
+
+@dataclass(frozen=True)
 class InteractionActivityReceipt:
     id: UUID
     cause_id: str
@@ -42,6 +58,8 @@ class InteractionActivityReceipt:
     action: InteractionActivityAction
     status: InteractionActivityStatus
     workflow_id: UUID | None
+    input_summary: str | None
+    presentation: InteractionActivityPresentation | None
     created_at: datetime
     finished_at: datetime | None
 
@@ -57,8 +75,11 @@ class InteractionActivityStore:
         *,
         cause_id: str,
         action: InteractionActivityAction,
+        input_summary: str | None = None,
     ) -> InteractionActivityReceipt:
         action = InteractionActivityAction(action)
+        if input_summary is not None and (not input_summary.strip() or len(input_summary) > 500):
+            raise ValueError("activity input summary must contain at most 500 characters")
         async with self._database.transaction() as session:
             cause = await session.scalar(
                 sa.select(InteractionCauseRow)
@@ -77,6 +98,7 @@ class InteractionActivityStore:
                 sequence=(latest_sequence or 0) + 1,
                 action_key=action.value,
                 status=InteractionActivityStatus.RUNNING.value,
+                input_summary=input_summary,
             )
             session.add(row)
             await session.flush()
@@ -88,6 +110,7 @@ class InteractionActivityStore:
         *,
         status: InteractionActivityStatus,
         workflow_id: UUID | None = None,
+        presentation: InteractionActivityPresentation | None = None,
     ) -> InteractionActivityReceipt:
         status = InteractionActivityStatus(status)
         if status is InteractionActivityStatus.RUNNING:
@@ -101,11 +124,31 @@ class InteractionActivityStore:
             if row is None:
                 raise LookupError("Interaction activity receipt does not exist")
             if row.status != InteractionActivityStatus.RUNNING.value:
-                if row.status == status.value and row.workflow_id == workflow_id:
+                serialized_presentation = (
+                    {
+                        "summary": presentation.summary,
+                        "items": list(presentation.items),
+                    }
+                    if presentation is not None
+                    else None
+                )
+                if (
+                    row.status == status.value
+                    and row.workflow_id == workflow_id
+                    and row.presentation == serialized_presentation
+                ):
                     return self._receipt(row)
                 raise RuntimeError("Interaction activity receipt already finished")
             row.status = status.value
             row.workflow_id = workflow_id
+            row.presentation = (
+                {
+                    "summary": presentation.summary,
+                    "items": list(presentation.items),
+                }
+                if presentation is not None
+                else None
+            )
             row.finished_at = datetime.now(UTC)
             await session.flush()
             return self._receipt(row)
@@ -142,6 +185,19 @@ class InteractionActivityStore:
 
     @staticmethod
     def _receipt(row: InteractionActivityReceiptRow) -> InteractionActivityReceipt:
+        presentation = None
+        if isinstance(row.presentation, dict):
+            summary = row.presentation.get("summary")
+            items = row.presentation.get("items", [])
+            if (
+                isinstance(summary, str)
+                and isinstance(items, list)
+                and all(isinstance(item, str) for item in items)
+            ):
+                presentation = InteractionActivityPresentation(
+                    summary=summary,
+                    items=tuple(items),
+                )
         return InteractionActivityReceipt(
             id=row.id,
             cause_id=row.cause_id,
@@ -149,6 +205,8 @@ class InteractionActivityStore:
             action=InteractionActivityAction(row.action_key),
             status=InteractionActivityStatus(row.status),
             workflow_id=row.workflow_id,
+            input_summary=row.input_summary,
+            presentation=presentation,
             created_at=row.created_at,
             finished_at=row.finished_at,
         )
@@ -156,6 +214,7 @@ class InteractionActivityStore:
 
 __all__ = [
     "InteractionActivityAction",
+    "InteractionActivityPresentation",
     "InteractionActivityReceipt",
     "InteractionActivityStatus",
     "InteractionActivityStore",
