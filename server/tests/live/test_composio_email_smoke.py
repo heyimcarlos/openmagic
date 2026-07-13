@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
@@ -177,6 +178,7 @@ async def test_exact_approved_email_reaches_the_authorized_recipient(
             recipient=recipient,
             database_url=migrated_postgres_url,
             monkeypatch=monkeypatch,
+            application_build=os.getenv("OPENMAGIC_EVAL_APPLICATION_BUILD", "live-email-smoke"),
         )
 
 
@@ -187,6 +189,7 @@ async def _run_live_email_acceptance(
     recipient: AgentMailRecipient,
     database_url: str,
     monkeypatch: pytest.MonkeyPatch,
+    application_build: str,
 ) -> None:
     previous_message_ids = await recipient.message_ids()
     broker_id, organization_id, mailbox_id = uuid4(), uuid4(), uuid4()
@@ -253,7 +256,7 @@ async def _run_live_email_acceptance(
         draft_run = await control_plane.claim_job(
             ClaimWorkflowJobCommand(
                 worker_id="live-draft-worker",
-                application_build="live-email-smoke",
+                application_build=application_build,
                 lease_duration=timedelta(minutes=5),
                 executor_keys=("renewal_email_drafter",),
             )
@@ -326,7 +329,7 @@ async def _run_live_email_acceptance(
             executors={},
             email_adapters={"composio_gmail_send": adapter},
             worker_id="live-send-worker",
-            application_build="live-email-smoke",
+            application_build=application_build,
         ).run_once()
         assert execution is not None
 
@@ -405,10 +408,41 @@ async def _run_live_email_acceptance(
         assert send_job.output.get("message_id")
         assert trace.workflow.status == "completed"
         assert send_notification.status == "delivered"
-        assert await recipient.wait_for_exactly_one_message(
+        recipient_observed = await recipient.wait_for_exactly_one_message(
             effect=approved_effect,
             previous_ids=previous_message_ids,
             wait_limit=timedelta(seconds=90),
         )
+        assert recipient_observed
+        _write_live_evidence(
+            application_build=application_build,
+            workflow_id=created.workflow.id,
+            send_job_id=send_job.id,
+            notification_id=send_notification.id,
+        )
     finally:
         await database.dispose()
+
+
+def _write_live_evidence(
+    *,
+    application_build: str,
+    workflow_id: UUID,
+    send_job_id: UUID,
+    notification_id: UUID,
+) -> None:
+    configured_path = os.getenv("OPENMAGIC_LIVE_EVIDENCE_PATH")
+    if configured_path is None:
+        return
+    payload = {
+        "schema_version": 1,
+        "application_build": application_build,
+        "workflow_id": str(workflow_id),
+        "send_job_id": str(send_job_id),
+        "notification_id": str(notification_id),
+        "job_completed": True,
+        "notification_delivered": True,
+        "user_acknowledged": True,
+        "recipient_observed": True,
+    }
+    Path(configured_path).write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")

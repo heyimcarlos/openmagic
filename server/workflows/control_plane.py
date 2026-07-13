@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Callable
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
@@ -90,6 +91,7 @@ class WorkflowControlPlane:
         database: WorkflowDatabase,
         registry: WorkflowKindRegistry,
         authority: WorkflowAuthority,
+        notification_clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._database = database
         self._registry = registry
@@ -118,6 +120,7 @@ class WorkflowControlPlane:
         self._notification_delivery = WorkflowNotificationProtocol(
             database,
             self._has_current_broker_authority,
+            notification_clock,
         )
 
     async def create_workflow(self, command: CreateWorkflowCommand) -> WorkflowTrace:
@@ -587,6 +590,14 @@ class WorkflowControlPlane:
                     workflow_event_id=notification.workflow_event_id,
                     kind=notification.kind,
                     status=notification.status,
+                    attempts=notification.attempts,
+                    max_attempts=notification.max_attempts,
+                    available_at=notification.available_at,
+                    claimed_by=notification.claimed_by,
+                    lease_expires_at=notification.lease_expires_at,
+                    delivered_at=notification.delivered_at,
+                    delivered_by=notification.delivered_by,
+                    last_error=notification.last_error,
                 )
                 for notification in notifications
             ),
