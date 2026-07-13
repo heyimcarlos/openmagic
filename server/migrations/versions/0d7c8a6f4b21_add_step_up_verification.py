@@ -24,12 +24,14 @@ def upgrade() -> None:
         sa.Column("actor_party_id", sa.UUID(), nullable=False),
         sa.Column("interaction_id", sa.Text(), nullable=False),
         sa.Column("workflow_id", sa.UUID(), nullable=False),
+        sa.Column("delivery_workflow_id", sa.UUID(), nullable=False),
         sa.Column("purpose", sa.Text(), nullable=False),
         sa.Column("operation_name", sa.Text(), nullable=False),
         sa.Column("operation_arguments", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
         sa.Column("operation_fingerprint", sa.Text(), nullable=False),
         sa.Column("request_cause_id", sa.Text(), nullable=False),
         sa.Column("destination_identifier_id", sa.UUID(), nullable=False),
+        sa.Column("delivery_job_id", sa.UUID(), nullable=False),
         sa.Column("created_event_id", sa.UUID(), nullable=False),
         sa.Column("status", sa.Text(), nullable=False),
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
@@ -37,7 +39,11 @@ def upgrade() -> None:
         sa.Column("max_attempts", sa.Integer(), server_default="5", nullable=False),
         sa.Column("verified_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("verified_cause_id", sa.Text(), nullable=True),
-        sa.Column("authorization_expires_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column(
+            "verification_session_expires_at",
+            sa.DateTime(timezone=True),
+            nullable=True,
+        ),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -66,9 +72,11 @@ def upgrade() -> None:
         ),
         sa.CheckConstraint(
             "(status = 'verified' AND verified_at IS NOT NULL "
-            "AND verified_cause_id IS NOT NULL AND authorization_expires_at IS NOT NULL) "
+            "AND verified_cause_id IS NOT NULL "
+            "AND verification_session_expires_at IS NOT NULL) "
             "OR (status <> 'verified' AND verified_at IS NULL "
-            "AND verified_cause_id IS NULL AND authorization_expires_at IS NULL)",
+            "AND verified_cause_id IS NULL "
+            "AND verification_session_expires_at IS NULL)",
             name=op.f("ck_verification_challenges_verification_shape"),
         ),
         sa.ForeignKeyConstraint(
@@ -77,21 +85,26 @@ def upgrade() -> None:
             name="fk_verification_challenges_actor_party",
         ),
         sa.ForeignKeyConstraint(
-            ["created_event_id"],
-            ["workflow_events.id"],
+            ["workflow_id", "created_event_id"],
+            ["workflow_events.workflow_id", "workflow_events.id"],
             name="fk_verification_challenges_created_event",
+        ),
+        sa.ForeignKeyConstraint(
+            ["delivery_workflow_id", "delivery_job_id"],
+            ["workflow_jobs.workflow_id", "workflow_jobs.id"],
+            name="fk_verification_challenges_delivery_job",
         ),
         sa.ForeignKeyConstraint(
             ["destination_identifier_id"],
             ["party_identifiers.id"],
             name="fk_verification_challenges_destination_identifier",
         ),
-        sa.ForeignKeyConstraint(
-            ["workflow_id"],
-            ["workflows.id"],
-            name="fk_verification_challenges_workflow",
-        ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_verification_challenges")),
+        sa.UniqueConstraint(
+            "delivery_workflow_id",
+            "delivery_job_id",
+            name="uq_verification_challenges_delivery_job",
+        ),
     )
     op.create_index(
         "ix_verification_challenges_authorization",
@@ -99,9 +112,7 @@ def upgrade() -> None:
         [
             "actor_party_id",
             "interaction_id",
-            "workflow_id",
-            "purpose",
-            "authorization_expires_at",
+            "verification_session_expires_at",
         ],
         unique=False,
         postgresql_where=sa.text("status = 'verified'"),

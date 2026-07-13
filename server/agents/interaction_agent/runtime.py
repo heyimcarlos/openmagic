@@ -24,6 +24,8 @@ class _ConversationState(Protocol):
 
     def record_reply(self, message: str) -> None: ...
 
+    def record_reply_once(self, delivery_id: str, message: str) -> bool: ...
+
 
 class _WorkingMemoryState(Protocol):
     def render_transcript(self) -> str: ...
@@ -200,7 +202,7 @@ class InteractionAgentRuntime:
     async def execute_verified_resume(
         self,
         *,
-        user_message: str,
+        notification_id: UUID,
         operation_cause_id: str,
         challenge_id: UUID,
         workflow_id: UUID,
@@ -209,11 +211,10 @@ class InteractionAgentRuntime:
         """Run the exact stored operation, then let a fresh turn present its result."""
 
         try:
-            transcript_before = self._load_conversation_transcript()
             tool_context = self._tool_context_factory(operation_cause_id)
             tool_context.verification_challenge_id = challenge_id
             tool_context.trusted_workflow_id = workflow_id
-            self.conversation_log.record_user_message(user_message)
+            tool_context.delivery_id = str(notification_id)
             result = await self.toolbox.invoke(
                 operation.name,
                 operation.arguments,
@@ -224,7 +225,7 @@ class InteractionAgentRuntime:
                     "Verification succeeded, but I can no longer complete that request because "
                     "your access or the Workflow state changed. Please start the request again."
                 )
-                self.conversation_log.record_reply(recovery)
+                self.conversation_log.record_reply_once(str(notification_id), recovery)
                 error_code = (
                     result.payload.get("code")
                     if isinstance(result.payload, dict)
@@ -246,17 +247,25 @@ class InteractionAgentRuntime:
             )
             messages = self._message_builder(
                 resumed_message,
-                transcript_before,
+                "",
                 message_type="agent",
             )
-            summary = await self._run_interaction_loop(
-                self._system_prompt_builder(),
+            response = await self._make_llm_call(
+                (
+                    "Present the verified operation result to the user clearly and concisely. "
+                    "Do not propose, approve, or perform additional work. Return only the "
+                    "user-facing response."
+                ),
                 messages,
-                tool_context,
+                tool_schemas=(),
             )
-            final_response = self._finalize_response(summary)
-            if final_response and not summary.user_messages:
-                self.conversation_log.record_reply(final_response)
+            assistant_message = self._extract_assistant_message(response)
+            if assistant_message.get("tool_calls"):
+                raise RuntimeError("Verified result presenter attempted a tool call")
+            final_response = (assistant_message.get("content") or "").strip()
+            if not final_response:
+                raise RuntimeError("Verified result presenter returned no response")
+            self.conversation_log.record_reply_once(str(notification_id), final_response)
             return InteractionResult(success=True, response=final_response)
         except Exception as exc:
             logger.error(
@@ -338,12 +347,17 @@ class InteractionAgentRuntime:
         self,
         system_prompt: str,
         messages: list[dict[str, Any]],
+        *,
+        tool_schemas: tuple[dict[str, Any], ...] | None = None,
     ) -> dict[str, Any]:
         """Make an LLM call via OpenRouter."""
 
         logger.debug(
             "Interaction agent calling LLM",
-            extra={"model": self.model, "tools": len(self.tool_schemas)},
+            extra={
+                "model": self.model,
+                "tools": len(self.tool_schemas if tool_schemas is None else tool_schemas),
+            },
         )
         completion = self._completion or request_chat_completion
         return await completion(
@@ -351,7 +365,7 @@ class InteractionAgentRuntime:
             messages=messages,
             system=system_prompt,
             api_key=self.api_key,
-            tools=self.tool_schemas,
+            tools=self.tool_schemas if tool_schemas is None else list(tool_schemas),
         )
 
     # Extract the assistant's message from the OpenRouter API response structure

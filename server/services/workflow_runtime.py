@@ -8,16 +8,22 @@ from functools import lru_cache
 from uuid import UUID, uuid4
 
 from server.agents.execution_agent.workflow_draft import FreshDraftExecutionAgentFactory
+from server.agents.interaction_agent.verification_resume import (
+    VerificationDeliveryAttentionInteractionFactory,
+    VerificationResumeInteractionFactory,
+    VerificationResumeRecoveryInteractionFactory,
+)
 from server.agents.interaction_agent.workflow_notifications import (
     ConversationApprovalPresenter,
     FreshWorkflowInteractionFactory,
 )
 from server.config import Settings, get_settings
 from server.logging_config import logger
-from server.services.conversation import get_conversation_session
 from server.workflows import (
     COMPOSIO_GMAIL_TOOLKIT_VERSION,
-    VERIFICATION_EMAIL_NOTIFICATION_KIND,
+    VERIFICATION_DELIVERY_ATTENTION_NOTIFICATION_KIND,
+    VERIFICATION_RESUME_NOTIFICATION_KIND,
+    VERIFICATION_RESUME_RECOVERY_NOTIFICATION_KIND,
     ComposioGmailSendAdapter,
     ComposioMailboxBinding,
     ComposioVerificationEmailSender,
@@ -25,8 +31,7 @@ from server.workflows import (
     NotificationWorker,
     StaticWorkflowAuthority,
     StepUpVerification,
-    VerificationDeliveryFailureHandler,
-    VerificationEmailInteractionFactory,
+    VerificationEmailExecutionHandler,
     WorkflowControlPlane,
     WorkflowDatabase,
     WorkflowRetrieval,
@@ -47,7 +52,9 @@ class WorkflowRuntimeService:
         self._database: WorkflowDatabase | None = None
         self._job_worker: WorkflowWorker | None = None
         self._notification_worker: NotificationWorker | None = None
-        self._verification_worker: NotificationWorker | None = None
+        self._verification_resume_worker: NotificationWorker | None = None
+        self._verification_recovery_worker: NotificationWorker | None = None
+        self._verification_attention_worker: NotificationWorker | None = None
 
     async def start(self) -> None:
         if self._settings.interaction_mode != "workflow":
@@ -77,12 +84,43 @@ class WorkflowRuntimeService:
         )
         self._database = database
         email_adapters = await self._email_adapters(database)
+        verification = None
+        deterministic_handlers = {}
+        if self._settings.verification_code_secret:
+            verification = StepUpVerification(
+                database=database,
+                code_secret=self._settings.verification_code_secret.encode(),
+                delivery_available=bool(
+                    self._settings.composio_api_key and self._settings.workflow_composio_user_id
+                ),
+            )
+        if (
+            verification is not None
+            and self._settings.composio_api_key
+            and self._settings.workflow_composio_user_id
+        ):
+            from composio import Composio
+
+            client = Composio(
+                api_key=self._settings.composio_api_key,
+                toolkit_versions={"gmail": COMPOSIO_GMAIL_TOOLKIT_VERSION},
+            )
+            deterministic_handlers["composio_verification_email"] = (
+                VerificationEmailExecutionHandler(
+                    verification=verification,
+                    sender=ComposioVerificationEmailSender(
+                        client=client,
+                        composio_user_id=self._settings.workflow_composio_user_id,
+                    ),
+                )
+            )
         self._job_worker = WorkflowWorker(
             control_plane=control_plane,
             executors={
                 "renewal_email_drafter": FreshDraftExecutionAgentFactory(self._settings),
             },
             email_adapters=email_adapters,
+            deterministic_handlers=deterministic_handlers,
             worker_id=f"workflow-worker:{uuid4()}",
             application_build=self._settings.app_version,
         )
@@ -100,40 +138,33 @@ class WorkflowRuntimeService:
             worker_id=f"notification-worker:{uuid4()}",
             notification_kinds=("approval_required", "send_confirmed"),
         )
-        if (
-            self._settings.verification_code_secret
-            and self._settings.composio_api_key
-            and self._settings.workflow_composio_user_id
-        ):
-            from composio import Composio
-
-            verification = StepUpVerification(
-                database=database,
-                code_secret=self._settings.verification_code_secret.encode(),
-            )
-            client = Composio(
-                api_key=self._settings.composio_api_key,
-                toolkit_versions={"gmail": COMPOSIO_GMAIL_TOOLKIT_VERSION},
-            )
-            self._verification_worker = NotificationWorker(
+        if verification is not None:
+            self._verification_resume_worker = NotificationWorker(
                 control_plane=control_plane,
-                interactions=VerificationEmailInteractionFactory(
+                interactions=VerificationResumeInteractionFactory(
                     verification=verification,
-                    sender=ComposioVerificationEmailSender(
-                        client=client,
-                        composio_user_id=self._settings.workflow_composio_user_id,
-                    ),
+                    settings=self._settings,
                 ),
-                worker_id=f"verification-email-worker:{uuid4()}",
-                notification_kinds=(VERIFICATION_EMAIL_NOTIFICATION_KIND,),
-                on_delivery_failure=VerificationDeliveryFailureHandler(
-                    verification=verification,
-                    notify=lambda interaction_id, message: get_conversation_session(
-                        interaction_id
-                    ).log.record_reply(message),
-                ),
+                worker_id=f"verification-resume-worker:{uuid4()}",
+                notification_kinds=(VERIFICATION_RESUME_NOTIFICATION_KIND,),
             )
-        else:
+            self._verification_recovery_worker = NotificationWorker(
+                control_plane=control_plane,
+                interactions=VerificationResumeRecoveryInteractionFactory(
+                    verification=verification,
+                ),
+                worker_id=f"verification-recovery-worker:{uuid4()}",
+                notification_kinds=(VERIFICATION_RESUME_RECOVERY_NOTIFICATION_KIND,),
+            )
+            self._verification_attention_worker = NotificationWorker(
+                control_plane=control_plane,
+                interactions=VerificationDeliveryAttentionInteractionFactory(
+                    verification=verification,
+                ),
+                worker_id=f"verification-attention-worker:{uuid4()}",
+                notification_kinds=(VERIFICATION_DELIVERY_ATTENTION_NOTIFICATION_KIND,),
+            )
+        if verification is None or not deterministic_handlers:
             logger.warning(
                 "Verification email worker disabled because verification or Composio is incomplete"
             )
@@ -183,7 +214,9 @@ class WorkflowRuntimeService:
         self._database = None
         self._job_worker = None
         self._notification_worker = None
-        self._verification_worker = None
+        self._verification_resume_worker = None
+        self._verification_recovery_worker = None
+        self._verification_attention_worker = None
 
     async def _run(self) -> None:
         while self._running:
@@ -203,8 +236,12 @@ class WorkflowRuntimeService:
             return
         await self._job_worker.run_once()
         await self._notification_worker.run_once()
-        if self._verification_worker is not None:
-            await self._verification_worker.run_once()
+        if self._verification_resume_worker is not None:
+            await self._verification_resume_worker.run_once()
+        if self._verification_recovery_worker is not None:
+            await self._verification_recovery_worker.run_once()
+        if self._verification_attention_worker is not None:
+            await self._verification_attention_worker.run_once()
 
 
 @lru_cache(maxsize=1)

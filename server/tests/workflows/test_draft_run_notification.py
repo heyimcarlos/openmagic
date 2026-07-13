@@ -572,7 +572,8 @@ async def test_notification_failure_requeues_and_expired_claim_is_fenced(
             delivery_attempt=second.delivery_attempt,
         )
     )
-    assert delivered == second
+    assert delivered.model_copy(update={"status": "delivering"}) == second
+    assert delivered.status == "delivered"
     with pytest.raises(NotificationLifecycleError):
         await control_plane.acknowledge_notification(
             AcknowledgeNotificationCommand(

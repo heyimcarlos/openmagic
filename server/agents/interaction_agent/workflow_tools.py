@@ -159,27 +159,6 @@ class WorkflowInteractionToolbox:
                 context.resolved_workflow_id = (
                     page.results[0].workflow_id if page.total_matches == 1 else None
                 )
-                if self._verification is not None:
-                    if page.total_matches == 0:
-                        return ToolResult(
-                            success=True,
-                            payload={"resolution": "not_found"},
-                        )
-                    if page.total_matches > 1:
-                        return ToolResult(
-                            success=True,
-                            payload={
-                                "resolution": "ambiguous",
-                                "refine_with": ["organization", "renewal_period"],
-                            },
-                        )
-                    return ToolResult(
-                        success=True,
-                        payload={
-                            "resolution": "resolved",
-                            "workflow_id": str(page.results[0].workflow_id),
-                        },
-                    )
                 return ToolResult(success=True, payload=page.model_dump(mode="json"))
             if name == "read_workflow_packet":
                 request = _PacketArguments.model_validate(arguments)
@@ -336,7 +315,10 @@ class WorkflowInteractionToolbox:
             if name == "send_message_to_user":
                 request = _MessageArguments.model_validate(arguments)
                 conversation = context.conversation or get_conversation_log()
-                conversation.record_reply(request.message)
+                if context.delivery_id is not None:
+                    conversation.record_reply_once(context.delivery_id, request.message)
+                else:
+                    conversation.record_reply(request.message)
                 return ToolResult(
                     success=True,
                     payload={"status": "delivered"},
@@ -379,16 +361,25 @@ class WorkflowInteractionToolbox:
                 success=False,
                 payload={"code": "verification_context_required"},
             )
-        decision = await self._verification.authorize_or_challenge(
-            AuthorizeProtectedOperationCommand(
+        if context.verification_challenge_id is not None:
+            decision = await self._verification.validate_verified_resume(
+                challenge_id=context.verification_challenge_id,
                 actor_party_id=context.actor_party_id,
                 interaction_id=context.interaction_id,
                 workflow_id=workflow_id,
-                purpose=purpose,
-                cause_id=context.cause_id,
                 operation=operation,
             )
-        )
+        else:
+            decision = await self._verification.authorize_or_challenge(
+                AuthorizeProtectedOperationCommand(
+                    actor_party_id=context.actor_party_id,
+                    interaction_id=context.interaction_id,
+                    workflow_id=workflow_id,
+                    purpose=purpose,
+                    cause_id=context.cause_id,
+                    operation=operation,
+                )
+            )
         if decision.status == "verification_unavailable":
             return ToolResult(
                 success=False,
@@ -403,6 +394,18 @@ class WorkflowInteractionToolbox:
                     "purpose": purpose,
                     "delivery_method": "email_code",
                     "delivery_status": "queued",
+                    "destination": decision.masked_destination,
+                    "expires_at": (
+                        decision.expires_at.isoformat() if decision.expires_at is not None else None
+                    ),
+                },
+            )
+        if decision.status == "verification_in_progress":
+            return ToolResult(
+                success=False,
+                payload={
+                    "code": "verification_in_progress",
+                    "challenge_id": str(decision.challenge_id),
                     "destination": decision.masked_destination,
                     "expires_at": (
                         decision.expires_at.isoformat() if decision.expires_at is not None else None

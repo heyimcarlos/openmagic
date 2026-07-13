@@ -18,6 +18,7 @@ from ...workflows import (
 from .sessions import get_conversation_session
 
 _BACKGROUND_TASKS: set[asyncio.Task[None]] = set()
+_VERIFICATION_CODE = re.compile(r"(?<!\d)(\d{3})[\s-]?(\d{3})(?!\d)")
 
 
 # Extract the most recent user message from the chat request payload
@@ -84,38 +85,31 @@ async def handle_chat_request(payload: ChatRequest) -> PlainTextResponse | JSONR
 
     async def _run_interaction() -> None:
         try:
+            verification_codes = [
+                "".join(match) for match in _VERIFICATION_CODE.findall(user_content)
+            ]
             if (
                 settings.interaction_mode == "workflow"
                 and payload.interaction is not None
-                and re.fullmatch(r"\d{6}", user_content)
+                and len(verification_codes) == 1
             ):
                 verified = await get_step_up_verification(settings).submit_code(
                     SubmitVerificationCodeCommand(
                         actor_party_id=party.party_id,
                         interaction_id=interaction_id,
                         cause_id=user_message.id or "",
-                        code=user_content,
+                        code=verification_codes[0],
                     )
                 )
-                if (
-                    verified.status == "verified"
-                    and verified.challenge_id is not None
-                    and verified.request_cause_id is not None
-                    and verified.operation is not None
-                ):
-                    await runtime.execute_verified_resume(
-                        user_message=user_content,
-                        operation_cause_id=verified.request_cause_id,
-                        challenge_id=verified.challenge_id,
-                        workflow_id=verified.workflow_id,
-                        operation=verified.operation,
-                    )
+                assert session is not None
+                session.log.record_user_message("[Verification code submitted]")
+                if verified.status == "verified" and verified.challenge_id is not None:
                     return
                 if verified.status == "no_active_challenge":
-                    await runtime.execute(user_message=user_content, cause_id=user_message.id)
+                    session.log.record_reply(
+                        "There is no active verification request for this conversation."
+                    )
                     return
-                assert session is not None
-                session.log.record_user_message(user_content)
                 failure_messages = {
                     "invalid_code": "That verification code is not valid. Please try again.",
                     "attempts_exhausted": (
@@ -128,7 +122,11 @@ async def handle_chat_request(payload: ChatRequest) -> PlainTextResponse | JSONR
                 }
                 session.log.record_reply(failure_messages[verified.status])
                 return
-            await runtime.execute(user_message=user_content, cause_id=user_message.id)
+            safe_user_content = _VERIFICATION_CODE.sub(
+                "[six-digit value redacted]",
+                user_content,
+            )
+            await runtime.execute(user_message=safe_user_content, cause_id=user_message.id)
         except Exception as exc:  # pragma: no cover - defensive
             logger.error("chat task failed", extra={"error": str(exc)})
 

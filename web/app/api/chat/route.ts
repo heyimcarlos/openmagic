@@ -50,7 +50,6 @@ export async function POST(req: Request) {
       headers: {
         'Content-Type': 'application/json',
         Accept: 'text/plain, */*',
-        Authorization: `Bearer ${process.env.OPENMAGIC_WORKFLOW_INTERACTION_TOKEN || ''}`,
       },
       body: JSON.stringify(payload),
     });

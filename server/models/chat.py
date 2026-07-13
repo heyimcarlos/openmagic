@@ -25,7 +25,7 @@ class ChatMessage(BaseModel):
 
 
 class SmsInteractionEnvelope(BaseModel):
-    """Trusted proxy envelope for one simulated inbound SMS interaction."""
+    """Demo-only browser envelope for one simulated inbound SMS interaction."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 

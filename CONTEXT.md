@@ -29,11 +29,11 @@ A channel-scoped sequence of messages with stable continuity, such as one simula
 _Avoid_: Account session, global login, authorization role
 
 **Verification Challenge**:
-A durable, single-use request for a Party to prove current control of an on-file identifier through a second channel. It binds one Party, Interaction, Workflow, purpose, and exact waiting protected operation, expires after 15 minutes, and queues delivery through a replaceable adapter.
+A durable, single-use request for a Party to prove current control of an on-file identifier through a second channel. It binds one Party, Interaction, protected Workflow, purpose, and exact waiting protected operation, expires after 10 minutes, and creates delivery through a typed External Effect Job in a separate system Workflow. Verification delivery therefore cannot change the protected business Workflow's cancellation or completion semantics.
 _Avoid_: Verification tool, global Party verification, Workflow authority grant
 
-**Verification Authorization**:
-The short-lived assurance established when a Verification Challenge succeeds. It may authorize protected operations only for the same Party, Interaction, Workflow, and purpose for 15 minutes. The protected operation still revalidates current Workflow authority when it resumes.
+**Verification Session**:
+The short-lived assurance established when a Verification Challenge succeeds. For 15 minutes, it proves control of the current on-file email for the same Party and Interaction, so another protected operation does not require another code. Every protected operation still revalidates its own Workflow authority, lifecycle, and exact Approval Grant requirements. Expiry blocks new protected operations, but it does not erase private facts already shown in that Interaction's transcript.
 _Avoid_: Login session, reusable approval, role assignment
 
 **Workflow**:

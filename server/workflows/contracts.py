@@ -189,6 +189,9 @@ class ClaimNotificationCommand(WorkflowContract):
     kinds: tuple[str, ...] = ()
 
 
+NotificationDeliveryStatus = Literal["queued", "delivering", "delivered", "failed"]
+
+
 class NotificationDeliveryPacket(WorkflowContract):
     """Stable identifiers passed to a fresh Interaction Agent runtime."""
 
@@ -197,13 +200,41 @@ class NotificationDeliveryPacket(WorkflowContract):
     workflow_id: UUID
     kind: str
     delivery_attempt: int
+    status: NotificationDeliveryStatus
+
+
+class _WorkflowPacketOperationArguments(WorkflowContract):
+    workflow_id: UUID
+
+
+class _ApproveJobOperationArguments(WorkflowContract):
+    job_id: UUID
+    expected_draft_revision_id: UUID
+
+
+_PROTECTED_OPERATION_SCHEMAS: dict[str, type[WorkflowContract]] = {
+    "read_workflow_packet": _WorkflowPacketOperationArguments,
+    "propose_renewal_email": _WorkflowPacketOperationArguments,
+    "approve_job": _ApproveJobOperationArguments,
+}
 
 
 class ProtectedOperation(WorkflowContract):
-    """Exact typed operation waiting behind a deterministic verification gate."""
+    """One recognized, schema-validated operation waiting behind verification."""
 
     name: str = Field(pattern=r"^[a-z][a-z0-9_]{0,63}$")
     arguments: dict[str, Any]
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_operation_contract(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        schema = _PROTECTED_OPERATION_SCHEMAS.get(value.get("name"))
+        if schema is None:
+            raise ValueError("protected operation is not recognized")
+        validated = schema.model_validate(value.get("arguments"))
+        return {**value, "arguments": validated.model_dump(mode="json")}
 
 
 class AuthorizeProtectedOperationCommand(WorkflowContract):
@@ -218,13 +249,18 @@ class AuthorizeProtectedOperationCommand(WorkflowContract):
 
 
 class VerificationDecision(WorkflowContract):
-    """Deterministic authorization decision returned to a protected operation."""
+    """Deterministic identity-proof decision returned to a protected operation."""
 
-    status: Literal["authorized", "verification_required", "verification_unavailable"]
+    status: Literal[
+        "session_valid",
+        "verification_required",
+        "verification_in_progress",
+        "verification_unavailable",
+    ]
     challenge_id: UUID | None = None
     masked_destination: str | None = None
     expires_at: datetime | None = None
-    authorization_expires_at: datetime | None = None
+    verification_session_expires_at: datetime | None = None
 
 
 class SubmitVerificationCodeCommand(WorkflowContract):
@@ -252,16 +288,36 @@ class VerificationCodeResult(WorkflowContract):
     purpose: Literal["sensitive_read", "sensitive_write"] | None = None
     request_cause_id: str | None = None
     operation: ProtectedOperation | None = None
-    authorization_expires_at: datetime | None = None
+    verification_session_expires_at: datetime | None = None
 
 
 class VerificationEmailDelivery(WorkflowContract):
     """Trusted email delivery material, never returned to the model or browser."""
 
     challenge_id: UUID
+    job_id: UUID
+    run_id: UUID
     destination: str
     code: str = Field(pattern=r"^\d{6}$")
     expires_at: datetime
+
+
+class VerificationResumeDelivery(WorkflowContract):
+    """Exact verified continuation resolved through a leased Notification."""
+
+    challenge_id: UUID
+    actor_party_id: UUID
+    interaction_id: str
+    workflow_id: UUID
+    request_cause_id: str
+    operation: ProtectedOperation
+
+
+class VerificationDeliveryAttention(WorkflowContract):
+    """Current-state recovery decision for a terminal or uncertain code delivery."""
+
+    interaction_id: str
+    message: str | None
 
 
 class AcknowledgeNotificationCommand(WorkflowContract):

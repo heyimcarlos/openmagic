@@ -9,10 +9,7 @@ async function forward(method: 'GET' | 'DELETE', request: Request) {
   try {
     const res = await fetch(upstreamUrl, {
       method,
-      headers: {
-        Accept: 'application/json',
-        Authorization: `Bearer ${process.env.OPENMAGIC_WORKFLOW_INTERACTION_TOKEN || ''}`,
-      },
+      headers: { Accept: 'application/json' },
       cache: 'no-store',
     });
 

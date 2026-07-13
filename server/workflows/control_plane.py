@@ -35,6 +35,7 @@ from .contracts import (
     RevokeWorkflowAuthorityCommand,
     WorkflowCommandContext,
     WorkflowExecutionPacket,
+    WorkflowJobProposal,
     WorkflowProposal,
     WorkflowTrace,
     WorkflowTraceEvent,
@@ -124,6 +125,7 @@ class WorkflowControlPlane:
         )
 
     async def create_workflow(self, command: CreateWorkflowCommand) -> WorkflowTrace:
+        self._require_party_proposable_jobs(command.proposal.jobs)
         validated = self._registry.validate(command.proposal)
         proposal_digest = self._proposals.workflow_digest(validated)
         if not await self._authority.can_create_workflow(command.context, validated.kind):
@@ -200,6 +202,7 @@ class WorkflowControlPlane:
                 raise WorkflowNotFoundError(str(command.workflow_id))
             if not await self._has_current_broker_authority(session, command.context, workflow):
                 raise WorkflowAuthorizationError("Party cannot propose work for this Workflow")
+            self._require_party_proposable_jobs(command.jobs)
             validated = self._registry.validate(
                 WorkflowProposal(
                     kind=workflow.kind,
@@ -247,6 +250,13 @@ class WorkflowControlPlane:
             )
             trace = await self._proposals.read_receipt(session, workflow, proposal_event)
         return trace
+
+    def _require_party_proposable_jobs(
+        self,
+        jobs: tuple[WorkflowJobProposal, ...],
+    ) -> None:
+        if any(job.kind in self._registry.system_job_kinds() for job in jobs):
+            raise WorkflowAuthorizationError("Party cannot propose system-authorized work")
 
     async def claim_job(
         self,

@@ -7,6 +7,7 @@ import {
   UserRoundIcon,
 } from 'lucide-react';
 
+import { AppViewNav } from '@/components/app/AppViewNav';
 import { Button } from '@/components/ui/button';
 
 export type SimulatedSenderId = 'policyholder' | 'broker' | 'unknown';
@@ -63,7 +64,9 @@ export function SmsContactHeader({
           <MessageCircleIcon className="size-3.5" />
           OpenMagic SMS simulator
         </div>
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-2">
+          <AppViewNav />
+          <div className="flex items-center gap-1">
           <Button
             variant="ghost"
             size="icon-sm"
@@ -80,6 +83,7 @@ export function SmsContactHeader({
           >
             <SettingsIcon />
           </Button>
+          </div>
         </div>
       </div>
       <div className="mt-1 flex items-center gap-3">

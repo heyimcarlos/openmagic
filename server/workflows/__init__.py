@@ -30,7 +30,9 @@ from .contracts import (
     SubmitVerificationCodeCommand,
     VerificationCodeResult,
     VerificationDecision,
+    VerificationDeliveryAttention,
     VerificationEmailDelivery,
+    VerificationResumeDelivery,
     WorkflowCommandContext,
     WorkflowExecutionPacket,
     WorkflowJobProposal,
@@ -79,6 +81,9 @@ from .registry import (
     DRAFT_RENEWAL_EMAIL_KIND,
     GMAIL_SEND_EMAIL_KIND,
     RENEWAL_OUTREACH_KIND,
+    VERIFICATION_DELIVERY_ATTENTION_NOTIFICATION_KIND,
+    VERIFICATION_EMAIL_DELIVERY_WORKFLOW_KIND,
+    VERIFICATION_EMAIL_JOB_KIND,
     DraftRenewalEmailOutput,
     ExecutionStrategy,
     WorkflowKindContract,
@@ -92,13 +97,16 @@ from .retrieval_contracts import (
     WorkflowSearchPage,
     WorkflowSearchRequest,
 )
-from .verification import VERIFICATION_EMAIL_NOTIFICATION_KIND, StepUpVerification
+from .verification import StepUpVerification
 from .verification_email import (
     ComposioVerificationEmailSender,
     DeterministicVerificationEmailSender,
-    VerificationDeliveryFailureHandler,
-    VerificationEmailInteractionFactory,
+    VerificationEmailExecutionHandler,
     VerificationEmailSender,
+)
+from .verification_notifications import (
+    VERIFICATION_RESUME_NOTIFICATION_KIND,
+    VERIFICATION_RESUME_RECOVERY_NOTIFICATION_KIND,
 )
 from .worker import NotificationWorker, WorkflowWorker
 
@@ -107,7 +115,11 @@ __all__ = [
     "DRAFT_RENEWAL_EMAIL_KIND",
     "GMAIL_SEND_EMAIL_KIND",
     "RENEWAL_OUTREACH_KIND",
-    "VERIFICATION_EMAIL_NOTIFICATION_KIND",
+    "VERIFICATION_DELIVERY_ATTENTION_NOTIFICATION_KIND",
+    "VERIFICATION_EMAIL_DELIVERY_WORKFLOW_KIND",
+    "VERIFICATION_EMAIL_JOB_KIND",
+    "VERIFICATION_RESUME_NOTIFICATION_KIND",
+    "VERIFICATION_RESUME_RECOVERY_NOTIFICATION_KIND",
     "AcknowledgeNotificationCommand",
     "ApprovalGrant",
     "ApproveWorkflowJobCommand",
@@ -158,10 +170,11 @@ __all__ = [
     "UnknownWorkflowKindError",
     "VerificationCodeResult",
     "VerificationDecision",
-    "VerificationDeliveryFailureHandler",
+    "VerificationDeliveryAttention",
     "VerificationEmailDelivery",
-    "VerificationEmailInteractionFactory",
+    "VerificationEmailExecutionHandler",
     "VerificationEmailSender",
+    "VerificationResumeDelivery",
     "VerifiedMailbox",
     "WorkflowAuthority",
     "WorkflowAuthorizationError",

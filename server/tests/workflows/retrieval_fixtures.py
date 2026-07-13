@@ -207,7 +207,15 @@ async def seed_retrieval_landscape(database_url: str) -> None:
                     kind=kind,
                     objective=objective,
                     status=status,
-                    input={"renewal_period": period},
+                    input={
+                        "renewal_period": period,
+                        "renewal_details": (
+                            "Your policy renews on January 1, 2026. "
+                            "The quoted annual premium is $1,284."
+                            if workflow_id == TARGET_ID
+                            else None
+                        ),
+                    },
                     organization_party_id=organization_id,
                     created_at=created_at,
                 )

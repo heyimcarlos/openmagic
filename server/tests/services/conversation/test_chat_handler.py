@@ -4,13 +4,25 @@ import asyncio
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
+import pytest
+
 from server.models import ChatRequest
 from server.services.conversation import chat_handler
 from server.workflows import ProtectedOperation, ResolvedSmsParty, VerificationCodeResult
 
 
-async def test_six_digit_sms_reply_resumes_stored_operation_before_model_interpretation(
+@pytest.mark.parametrize(
+    "content",
+    [
+        "482913",
+        "My verification code is 482913.",
+        "My verification code is 482-913.",
+        "My verification code is 482 913.",
+    ],
+)
+async def test_six_digit_sms_reply_queues_durable_resume_without_model_or_secret_log(
     monkeypatch,
+    content,
 ):
     party_id = UUID("30000000-0000-0000-0000-000000000001")
     challenge_id = uuid4()
@@ -18,18 +30,15 @@ async def test_six_digit_sms_reply_resumes_stored_operation_before_model_interpr
         name="read_workflow_packet",
         arguments={"workflow_id": "40000000-0000-0000-0000-000000000001"},
     )
-    resumed: list[dict] = []
+    model_calls: list[dict] = []
 
     class FakeDatabase:
         async def dispose(self) -> None:
             return None
 
     class FakeRuntime:
-        async def execute_verified_resume(self, **kwargs) -> None:
-            resumed.append(kwargs)
-
         async def execute(self, **kwargs) -> None:
-            raise AssertionError(f"Verification code reached normal model path: {kwargs}")
+            model_calls.append(kwargs)
 
     class FakeVerification:
         async def submit_code(self, command):
@@ -44,9 +53,12 @@ async def test_six_digit_sms_reply_resumes_stored_operation_before_model_interpr
                 operation=operation,
             )
 
+    recorded_user_messages: list[str] = []
+    recorded_replies: list[str] = []
     session = SimpleNamespace(
         log=SimpleNamespace(
-            record_user_message=lambda _message: None, record_reply=lambda _message: None
+            record_user_message=recorded_user_messages.append,
+            record_reply=recorded_replies.append,
         ),
         working_memory=SimpleNamespace(render_transcript=lambda: ""),
     )
@@ -73,7 +85,7 @@ async def test_six_digit_sms_reply_resumes_stored_operation_before_model_interpr
     )
     request = ChatRequest.model_validate(
         {
-            "messages": [{"id": "sms-code-message", "role": "user", "content": "482913"}],
+            "messages": [{"id": "sms-code-message", "role": "user", "content": content}],
             "interaction": {
                 "channel": "sms",
                 "sender_phone": "+1 (416) 555-0142",
@@ -85,15 +97,10 @@ async def test_six_digit_sms_reply_resumes_stored_operation_before_model_interpr
     await asyncio.sleep(0)
 
     assert response.status_code == 202
-    assert resumed == [
-        {
-            "user_message": "482913",
-            "operation_cause_id": "private-read-message",
-            "challenge_id": challenge_id,
-            "workflow_id": UUID("40000000-0000-0000-0000-000000000001"),
-            "operation": operation,
-        }
-    ]
+    assert model_calls == []
+    assert recorded_user_messages == ["[Verification code submitted]"]
+    assert recorded_replies == []
+    assert "482913" not in repr(session)
 
 
 async def _resolved_party(party_id: UUID) -> ResolvedSmsParty:

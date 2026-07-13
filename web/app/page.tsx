@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import SettingsModal, { useSettings } from '@/components/SettingsModal';
 import { ChatInput } from '@/components/chat/ChatInput';
 import { ChatMessages } from '@/components/chat/ChatMessages';
@@ -11,6 +11,7 @@ import {
   type SimulatedSenderId,
 } from '@/components/chat/SmsContactHeader';
 import type { ChatBubble } from '@/components/chat/types';
+import { messageForDisplay } from '@/lib/chatDisplay';
 
 const POLL_INTERVAL_MS = 1500;
 const RESPONSE_POLL_INTERVAL_MS = 1000;
@@ -51,6 +52,7 @@ export default function Page() {
   const [error, setError] = useState<string | null>(null);
   const [isWaitingForResponse, setIsWaitingForResponse] = useState(false);
   const [senderId, setSenderId] = useState<SimulatedSenderId>('policyholder');
+  const senderGeneration = useRef(0);
   const sender =
     SIMULATED_SMS_SENDERS.find((candidate) => candidate.id === senderId) ??
     SIMULATED_SMS_SENDERS[0];
@@ -59,11 +61,14 @@ export default function Page() {
   const closeSettings = useCallback(() => setOpen(false), [setOpen]);
 
   const loadHistory = useCallback(async () => {
+    const requestGeneration = senderGeneration.current;
     try {
       const res = await fetch(historyUrl, { cache: 'no-store' });
       if (!res.ok) return;
       const data = await res.json();
-      setMessages(toBubbles(data));
+      if (senderGeneration.current === requestGeneration) {
+        setMessages(toBubbles(data));
+      }
     } catch (err: any) {
       if (err?.name === 'AbortError') return;
       console.error('Failed to load chat history', err);
@@ -121,6 +126,7 @@ export default function Page() {
     async (text: string) => {
       const trimmed = text.trim();
       if (!trimmed) return;
+      const requestGeneration = senderGeneration.current;
 
       const assistantCountBeforeSend = messages.filter((message) => message.role === 'assistant').length;
       setError(null);
@@ -130,7 +136,7 @@ export default function Page() {
       const userMessage: ChatBubble = {
         id: `user-${Date.now()}`,
         role: 'user',
-        text: formatEscapeCharacters(trimmed),
+        text: formatEscapeCharacters(messageForDisplay(trimmed)),
       };
       setMessages((previous) => [...previous, userMessage]);
 
@@ -154,8 +160,10 @@ export default function Page() {
       } catch (err: any) {
         console.error('Failed to send message', err);
         setError(err?.message || 'Failed to send message');
-        setMessages((previous) => previous.filter((message) => message.id !== userMessage.id));
-        setIsWaitingForResponse(false);
+        if (senderGeneration.current === requestGeneration) {
+          setMessages((previous) => previous.filter((message) => message.id !== userMessage.id));
+          setIsWaitingForResponse(false);
+        }
         throw err instanceof Error ? err : new Error('Failed to send message');
       }
 
@@ -168,11 +176,11 @@ export default function Page() {
 
           const currentMessages = toBubbles(await response.json());
           const assistantCount = currentMessages.filter((message) => message.role === 'assistant').length;
-          const submittedMessageIsPresent = currentMessages.some(
-            (message) => message.role === 'user' && message.text === trimmed,
-          );
 
-          if (submittedMessageIsPresent && assistantCount > assistantCountBeforeSend) {
+          if (
+            senderGeneration.current === requestGeneration &&
+            assistantCount > assistantCountBeforeSend
+          ) {
             setMessages(currentMessages);
             setIsWaitingForResponse(false);
             return;
@@ -182,8 +190,10 @@ export default function Page() {
         }
       }
 
-      setIsWaitingForResponse(false);
-      await loadHistory();
+      if (senderGeneration.current === requestGeneration) {
+        setIsWaitingForResponse(false);
+        await loadHistory();
+      }
     },
     [historyUrl, loadHistory, messages, sender],
   );
@@ -202,6 +212,7 @@ export default function Page() {
   }, [historyUrl, setMessages]);
 
   const handleSenderChange = useCallback((id: SimulatedSenderId) => {
+    senderGeneration.current += 1;
     setSenderId(id);
     setMessages([]);
     setError(null);

@@ -57,6 +57,7 @@ async def seed_v0_demo(
     broker_party_id: UUID,
     organization_party_id: UUID,
     policyholder_email: str = "john@example.com",
+    broker_email: str = "broker@acme.example",
 ) -> UUID:
     """Provision explicit trusted demo identity and one unplanned renewal Workflow."""
 
@@ -88,7 +89,7 @@ async def seed_v0_demo(
                 id=DEMO_BROKER_IDENTIFIER_ID,
                 party_id=broker_party_id,
                 kind="email",
-                value="broker@acme.example",
+                value=broker_email,
                 verified_at=now,
             ),
             PartyIdentifierRow(
@@ -133,7 +134,12 @@ async def seed_v0_demo(
             kind="renewal_outreach.v1",
             objective="2026 renewal outreach for John Smith",
             status="active",
-            input={"renewal_period": "2026"},
+            input={
+                "renewal_period": "2026",
+                "renewal_details": (
+                    "Your policy renews on January 1, 2026. The quoted annual premium is $1,284."
+                ),
+            },
             organization_party_id=organization_party_id,
         )
         await _add_if_missing(session, workflow, workflow.id)

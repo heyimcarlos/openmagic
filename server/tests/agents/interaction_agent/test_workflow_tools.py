@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import json
-from datetime import timedelta
 from types import SimpleNamespace
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
@@ -28,14 +27,16 @@ from server.tests.workflows.retrieval_fixtures import (
     seed_retrieval_landscape,
 )
 from server.workflows import (
-    ClaimNotificationCommand,
+    DeterministicVerificationEmailSender,
     ProtectedOperation,
     StaticWorkflowAuthority,
     StepUpVerification,
     SubmitVerificationCodeCommand,
+    VerificationEmailExecutionHandler,
     WorkflowControlPlane,
     WorkflowDatabase,
     WorkflowRetrieval,
+    WorkflowWorker,
     default_workflow_registry,
 )
 
@@ -52,6 +53,28 @@ async def workflow_toolbox(migrated_postgres_url: str, clean_workflow_database):
     )
     yield WorkflowInteractionToolbox(retrieval=retrieval, control_plane=control_plane)
     await database.dispose()
+
+
+async def _deliver_verification_code(
+    database: WorkflowDatabase,
+    control_plane: WorkflowControlPlane,
+    verification: StepUpVerification,
+) -> str:
+    sender = DeterministicVerificationEmailSender()
+    worker = WorkflowWorker(
+        control_plane=control_plane,
+        executors={},
+        deterministic_handlers={
+            "composio_verification_email": VerificationEmailExecutionHandler(
+                verification=verification,
+                sender=sender,
+            )
+        },
+        worker_id="verification-email-worker",
+        application_build="workflow-tool-test",
+    )
+    assert await worker.run_once() is not None
+    return sender.deliveries[0].code
 
 
 def test_workflow_tool_surface_omits_delegation_and_execution_configuration(
@@ -195,10 +218,9 @@ async def test_protected_packet_read_returns_verification_required_from_actual_t
         context,
     )
     assert search.success is True
-    assert search.payload == {
-        "resolution": "resolved",
-        "workflow_id": str(TARGET_ID),
-    }
+    assert search.payload["results"][0]["workflow_id"] == str(TARGET_ID)
+    assert search.payload["total_matches"] == 1
+    assert search.payload["facets"]
 
     packet = await toolbox.invoke(
         "read_workflow_packet",
@@ -215,7 +237,7 @@ async def test_protected_packet_read_returns_verification_required_from_actual_t
     await database.dispose()
 
 
-async def test_sensitive_write_gets_its_own_verification_challenge(
+async def test_verified_session_covers_later_sensitive_write(
     migrated_postgres_url: str,
     clean_workflow_database,
 ):
@@ -264,27 +286,13 @@ async def test_sensitive_write_gets_its_own_verification_challenge(
     assert read.success is False
     assert read.payload["purpose"] == "sensitive_read"
 
-    notification = await control_plane.claim_notification(
-        ClaimNotificationCommand(
-            worker_id="verification-email-worker",
-            lease_duration=timedelta(minutes=5),
-            kinds=("verification_code_email",),
-        )
-    )
-    assert notification is not None
-    delivery = await verification.read_email_delivery(
-        notification_id=notification.notification_id,
-        workflow_event_id=notification.workflow_event_id,
-        workflow_id=notification.workflow_id,
-        worker_id="verification-email-worker",
-        delivery_attempt=notification.delivery_attempt,
-    )
+    code = await _deliver_verification_code(database, control_plane, verification)
     verified = await verification.submit_code(
         SubmitVerificationCodeCommand(
             actor_party_id=BROKER_ID,
             interaction_id="sms-broker-demo",
             cause_id="read-verification-message",
-            code=delivery.code,
+            code=code,
         )
     )
     assert verified.status == "verified"
@@ -303,9 +311,7 @@ async def test_sensitive_write_gets_its_own_verification_challenge(
         context,
     )
 
-    assert proposed.success is False
-    assert proposed.payload["code"] == "verification_required"
-    assert proposed.payload["purpose"] == "sensitive_write"
+    assert proposed.success is True
     await database.dispose()
 
 
@@ -337,7 +343,7 @@ async def test_verified_resume_runs_exact_stored_packet_read_in_fresh_context(
         interaction_id="sms-policyholder-demo",
     )
     await toolbox.record_interaction_cause(initial, "Show my renewal details.")
-    await toolbox.invoke(
+    search = await toolbox.invoke(
         "search_workflows",
         {
             "query": "John Smith renewal",
@@ -348,33 +354,20 @@ async def test_verified_resume_runs_exact_stored_packet_read_in_fresh_context(
         },
         initial,
     )
+    assert "renewal_details" not in json.dumps(search.payload)
     required = await toolbox.invoke(
         "read_workflow_packet",
         {"workflow_id": str(TARGET_ID)},
         initial,
     )
     assert required.payload["code"] == "verification_required"
-    notification = await control_plane.claim_notification(
-        ClaimNotificationCommand(
-            worker_id="verification-email-worker",
-            lease_duration=timedelta(minutes=5),
-            kinds=("verification_code_email",),
-        )
-    )
-    assert notification is not None
-    delivery = await verification.read_email_delivery(
-        notification_id=notification.notification_id,
-        workflow_event_id=notification.workflow_event_id,
-        workflow_id=notification.workflow_id,
-        worker_id="verification-email-worker",
-        delivery_attempt=notification.delivery_attempt,
-    )
+    code = await _deliver_verification_code(database, control_plane, verification)
     verified = await verification.submit_code(
         SubmitVerificationCodeCommand(
             actor_party_id=JOHN_ACME_ID,
             interaction_id="sms-policyholder-demo",
             cause_id="verification-code-message",
-            code=delivery.code,
+            code=code,
         )
     )
     assert verified.challenge_id is not None
@@ -398,6 +391,12 @@ async def test_verified_resume_runs_exact_stored_packet_read_in_fresh_context(
         def record_reply(self, message: str) -> None:
             self.replies.append(message)
 
+        def record_reply_once(self, _delivery_id: str, message: str) -> bool:
+            if message in self.replies:
+                return False
+            self.replies.append(message)
+            return True
+
         def record_wait(self, _reason: str) -> None:
             return None
 
@@ -419,6 +418,8 @@ async def test_verified_resume_runs_exact_stored_packet_read_in_fresh_context(
 
     async def completion(**kwargs):
         assert str(TARGET_ID) in json.dumps(kwargs["messages"])
+        assert "$1,284" in json.dumps(kwargs["messages"])
+        assert kwargs["tools"] == []
         return {"choices": [{"message": {"content": "Your renewal is active."}}]}
 
     conversation = Conversation()
@@ -434,7 +435,7 @@ async def test_verified_resume_runs_exact_stored_packet_read_in_fresh_context(
     )
 
     result = await runtime.execute_verified_resume(
-        user_message=delivery.code,
+        notification_id=uuid4(),
         operation_cause_id=verified.request_cause_id,
         challenge_id=verified.challenge_id,
         workflow_id=verified.workflow_id,
@@ -456,7 +457,8 @@ async def test_verified_resume_explains_revalidation_failure_to_the_user():
         def schemas(self):
             return ()
 
-        async def invoke(self, _name, _arguments, _context):
+        async def invoke(self, name, arguments, context):
+            del name, arguments, context
             return ToolResult(success=False, payload={"code": "stale_approval_target"})
 
     class Conversation:
@@ -469,8 +471,24 @@ async def test_verified_resume_explains_revalidation_failure_to_the_user():
         def record_user_message(self, _message: str) -> None:
             return None
 
+        def record_agent_message(self, _message: str) -> None:
+            return None
+
         def record_reply(self, message: str) -> None:
             self.replies.append(message)
+
+        def record_reply_once(self, _delivery_id: str, message: str) -> bool:
+            if message in self.replies:
+                return False
+            self.replies.append(message)
+            return True
+
+    class WorkingMemory:
+        def render_transcript(self) -> str:
+            return ""
+
+    async def completion(**_kwargs):
+        raise AssertionError("Rejected continuation must not invoke the model")
 
     conversation = Conversation()
     runtime = InteractionAgentRuntime(
@@ -483,14 +501,14 @@ async def test_verified_resume_explains_revalidation_failure_to_the_user():
         ),
         system_prompt_builder=lambda: "unused",
         message_builder=lambda *_args, **_kwargs: [],
-        completion=lambda **_kwargs: None,
+        completion=completion,
         conversation_state=conversation,
-        working_memory_state=SimpleNamespace(render_transcript=lambda: ""),
+        working_memory_state=WorkingMemory(),
         settings=Settings(openrouter_api_key="test-key"),
     )
 
     result = await runtime.execute_verified_resume(
-        user_message="123456",
+        notification_id=uuid4(),
         operation_cause_id="original-private-request",
         challenge_id=UUID("70000000-0000-0000-0000-000000000001"),
         workflow_id=TARGET_ID,

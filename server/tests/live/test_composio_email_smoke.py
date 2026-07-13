@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
+import sqlalchemy as sa
 from composio import Composio
 from pydantic import BaseModel, ConfigDict, EmailStr, SecretStr
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -17,23 +19,34 @@ from server.agents.interaction_agent.runtime import InteractionAgentRuntime
 from server.agents.interaction_agent.workflow_notifications import FreshWorkflowInteractionFactory
 from server.config import Settings
 from server.tests.live.agentmail import AgentMailRecipient
+from server.tests.workflows.retrieval_fixtures import (
+    JOHN_ACME_ID,
+    TARGET_ID,
+    seed_retrieval_landscape,
+)
 from server.workflows import (
     DRAFT_RENEWAL_EMAIL_KIND,
     GMAIL_SEND_EMAIL_KIND,
     RENEWAL_OUTREACH_KIND,
     AcknowledgeNotificationCommand,
     ApproveWorkflowJobCommand,
+    AuthorizeProtectedOperationCommand,
     ClaimNotificationCommand,
     ClaimWorkflowJobCommand,
     ComposioGmailSendAdapter,
     ComposioMailboxBinding,
+    ComposioVerificationEmailSender,
     CreateWorkflowCommand,
     EmailSendEffectV1,
     NotificationWorker,
+    ProtectedOperation,
     RecordInteractionCauseCommand,
     ReportRunResultCommand,
     RunResult,
     StaticWorkflowAuthority,
+    StepUpVerification,
+    SubmitVerificationCodeCommand,
+    VerificationEmailExecutionHandler,
     WorkflowCommandContext,
     WorkflowControlPlane,
     WorkflowDatabase,
@@ -180,6 +193,90 @@ async def test_exact_approved_email_reaches_the_authorized_recipient(
             monkeypatch=monkeypatch,
             application_build=os.getenv("OPENMAGIC_EVAL_APPLICATION_BUILD", "live-email-smoke"),
         )
+
+
+@pytest.mark.skipif(
+    os.getenv("OPENMAGIC_RUN_LIVE_EMAIL_SMOKE") != "1",
+    reason="credentialed live email smoke is opt-in",
+)
+@pytest.mark.timeout(180)
+@pytest.mark.usefixtures("clean_workflow_database")
+async def test_verification_job_establishes_session_after_real_email_receipt(
+    migrated_postgres_url: str,
+) -> None:
+    settings = _LiveSettings.from_environment()
+    client = Composio(api_key=settings.composio_api_key.get_secret_value())
+    _assert_active_gmail_connection(client, settings)
+    await seed_retrieval_landscape(migrated_postgres_url)
+    engine = create_async_engine(migrated_postgres_url)
+    async with engine.begin() as connection:
+        await connection.execute(
+            sa.text(
+                "UPDATE party_identifiers SET value = :recipient "
+                "WHERE party_id = :party_id AND kind = 'email'"
+            ),
+            {"recipient": str(settings.recipient), "party_id": JOHN_ACME_ID},
+        )
+    await engine.dispose()
+
+    database = WorkflowDatabase(migrated_postgres_url)
+    verification = StepUpVerification(
+        database=database,
+        code_secret=b"live-verification-email-secret",
+    )
+    request = AuthorizeProtectedOperationCommand(
+        actor_party_id=JOHN_ACME_ID,
+        interaction_id="live-verification-sms",
+        workflow_id=TARGET_ID,
+        purpose="sensitive_read",
+        cause_id=f"live-verification-request:{uuid4()}",
+        operation=ProtectedOperation(
+            name="read_workflow_packet",
+            arguments={"workflow_id": str(TARGET_ID)},
+        ),
+    )
+    async with AgentMailRecipient(settings.agentmail_api_key, settings.recipient) as recipient:
+        previous_ids = await recipient.message_ids()
+        required = await verification.authorize_or_challenge(request)
+        assert required.status == "verification_required"
+        executed = await WorkflowWorker(
+            control_plane=WorkflowControlPlane(
+                database=database,
+                registry=default_workflow_registry(),
+                authority=StaticWorkflowAuthority(grants=set()),
+            ),
+            executors={},
+            deterministic_handlers={
+                "composio_verification_email": VerificationEmailExecutionHandler(
+                    verification=verification,
+                    sender=ComposioVerificationEmailSender(
+                        client=client,
+                        composio_user_id=settings.composio_user_id,
+                    ),
+                )
+            },
+            worker_id="live-verification-email-worker",
+            application_build="live-verification-email-smoke",
+        ).run_once()
+        assert executed is not None
+        received = await recipient.wait_for_one_new_subject(
+            subject="Your OpenMagic verification code",
+            previous_ids=previous_ids,
+            wait_limit=timedelta(seconds=60),
+        )
+        match = re.search(r"\b(\d{6})\b", received.text)
+        assert match is not None
+        verified = await verification.submit_code(
+            SubmitVerificationCodeCommand(
+                actor_party_id=JOHN_ACME_ID,
+                interaction_id="live-verification-sms",
+                cause_id=f"live-verification-code:{uuid4()}",
+                code=match.group(1),
+            )
+        )
+        assert verified.status == "verified"
+        assert verified.verification_session_expires_at is not None
+    await database.dispose()
 
 
 async def _run_live_email_acceptance(

@@ -1,100 +1,116 @@
-"""Email delivery adapter for durable verification Notifications."""
+"""Typed External Effect adapter for verification email delivery."""
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Callable, Mapping
-from contextlib import asynccontextmanager
 from typing import Any, Protocol
 from uuid import UUID
 
-from .contracts import NotificationDeliveryPacket, VerificationEmailDelivery
-from .email_adapter import COMPOSIO_GMAIL_TOOL, COMPOSIO_GMAIL_TOOLKIT_VERSION
+from .contracts import RunResult, VerificationEmailDelivery, WorkflowExecutionPacket
+from .email_adapter import (
+    COMPOSIO_GMAIL_TOOL,
+    COMPOSIO_GMAIL_TOOLKIT_VERSION,
+    DuplicateEmailSendError,
+    normalize_composio_gmail_response,
+)
+from .errors import WorkflowError
 from .verification import StepUpVerification
 
 
 class VerificationEmailSender(Protocol):
-    """Replaceable delivery method for one verification challenge."""
+    """Replaceable provider call after the durable dispatch boundary."""
 
-    async def send(self, delivery: VerificationEmailDelivery) -> None: ...
+    async def send(self, delivery: VerificationEmailDelivery) -> RunResult: ...
 
 
 class DeterministicVerificationEmailSender:
-    """Inspectable fake that records verification email deliveries."""
+    """Inspectable fake that follows the live adapter result contract."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        result: RunResult | None = None,
+        *,
+        invocation_error: Exception | None = None,
+    ) -> None:
+        self._result = result or RunResult(
+            outcome="succeeded",
+            data={
+                "provider": "deterministic_verification_email",
+                "acknowledged": True,
+                "tool_version": "fake.v1",
+                "message_id": "verification-message",
+                "thread_id": None,
+            },
+            evidence=({"type": "deterministic_provider_acknowledgement"},),
+        )
+        self._invocation_error = invocation_error
         self._deliveries: list[VerificationEmailDelivery] = []
+        self._invoked_job_ids: set[UUID] = set()
 
     @property
     def deliveries(self) -> tuple[VerificationEmailDelivery, ...]:
         return tuple(self._deliveries)
 
-    async def send(self, delivery: VerificationEmailDelivery) -> None:
+    async def send(self, delivery: VerificationEmailDelivery) -> RunResult:
+        if delivery.job_id in self._invoked_job_ids:
+            raise DuplicateEmailSendError(
+                f"Verification email Job {delivery.job_id} was already invoked"
+            )
+        self._invoked_job_ids.add(delivery.job_id)
         self._deliveries.append(delivery)
+        if self._invocation_error is not None:
+            raise self._invocation_error
+        return self._result
 
 
 class ComposioVerificationEmailSender:
-    """Send verification codes through the configured Composio Gmail identity."""
+    """Send one code through pinned, retry-disabled Composio Gmail execution."""
 
     def __init__(self, *, client: Any, composio_user_id: str) -> None:
         self._client = client
         self._composio_user_id = composio_user_id
+        self._invoked_job_ids: set[UUID] = set()
 
-    async def send(self, delivery: VerificationEmailDelivery) -> None:
-        response = await asyncio.to_thread(
-            self._client.tools.execute,
-            slug=COMPOSIO_GMAIL_TOOL,
-            user_id=self._composio_user_id,
-            version=COMPOSIO_GMAIL_TOOLKIT_VERSION,
-            arguments={
-                "user_id": "me",
-                "recipient_email": delivery.destination,
-                "subject": "Your OpenMagic verification code",
-                "body": (
-                    f"Your OpenMagic verification code is {delivery.code}. "
-                    "It expires in 15 minutes."
+    async def send(self, delivery: VerificationEmailDelivery) -> RunResult:
+        if delivery.job_id in self._invoked_job_ids:
+            raise DuplicateEmailSendError(
+                f"Verification email Job {delivery.job_id} was already invoked"
+            )
+        self._invoked_job_ids.add(delivery.job_id)
+        try:
+            response = await asyncio.to_thread(
+                self._client.tools.execute,
+                slug=COMPOSIO_GMAIL_TOOL,
+                user_id=self._composio_user_id,
+                version=COMPOSIO_GMAIL_TOOLKIT_VERSION,
+                arguments={
+                    "user_id": "me",
+                    "recipient_email": delivery.destination,
+                    "subject": "Your OpenMagic verification code",
+                    "body": (
+                        f"Your OpenMagic verification code is {delivery.code}. "
+                        "It expires in 10 minutes."
+                    ),
+                    "is_html": False,
+                },
+            )
+        except Exception as exc:
+            return RunResult(
+                outcome="uncertain",
+                evidence=(
+                    {
+                        "type": "provider_outcome_uncertain",
+                        "provider": "composio_gmail",
+                        "tool_version": COMPOSIO_GMAIL_TOOLKIT_VERSION,
+                    },
                 ),
-                "is_html": False,
-            },
-        )
-        if not isinstance(response, Mapping) or response.get("successful") is not True:
-            raise RuntimeError("Verification email provider did not acknowledge delivery")
+                error={"code": "provider_communication_lost", "detail": type(exc).__name__},
+            )
+        return normalize_composio_gmail_response(response)
 
 
-class VerificationEmailInteraction:
-    """Adapt one leased Notification into an email delivery."""
-
-    def __init__(
-        self,
-        *,
-        verification: StepUpVerification,
-        sender: VerificationEmailSender,
-        worker_id: str,
-        delivery_attempt: int,
-    ) -> None:
-        self._verification = verification
-        self._sender = sender
-        self._worker_id = worker_id
-        self._delivery_attempt = delivery_attempt
-
-    async def handle(
-        self,
-        notification_id: UUID,
-        workflow_event_id: UUID,
-        workflow_id: UUID,
-    ) -> None:
-        delivery = await self._verification.read_email_delivery(
-            notification_id=notification_id,
-            workflow_event_id=workflow_event_id,
-            workflow_id=workflow_id,
-            worker_id=self._worker_id,
-            delivery_attempt=self._delivery_attempt,
-        )
-        await self._sender.send(delivery)
-
-
-class VerificationEmailInteractionFactory:
-    """Create one bounded verification email delivery per Notification attempt."""
+class VerificationEmailExecutionHandler:
+    """Execute one claimed verification email Job through normal Run evidence."""
 
     def __init__(
         self,
@@ -105,51 +121,31 @@ class VerificationEmailInteractionFactory:
         self._verification = verification
         self._sender = sender
 
-    @asynccontextmanager
-    async def create(
-        self,
-        worker_id: str,
-        delivery_attempt: int,
-    ) -> AsyncIterator[VerificationEmailInteraction]:
-        yield VerificationEmailInteraction(
-            verification=self._verification,
-            sender=self._sender,
-            worker_id=worker_id,
-            delivery_attempt=delivery_attempt,
-        )
-
-
-class VerificationDeliveryFailureHandler:
-    """Surface exhausted email delivery retries to the waiting interaction."""
-
-    MESSAGE = (
-        "I couldn't deliver the verification email. Please ask me to try the protected "
-        "request again."
-    )
-
-    def __init__(
-        self,
-        *,
-        verification: StepUpVerification,
-        notify: Callable[[str, str], None],
-    ) -> None:
-        self._verification = verification
-        self._notify = notify
-
-    async def __call__(self, packet: NotificationDeliveryPacket) -> None:
-        interaction_id = await self._verification.record_terminal_delivery_failure(
-            notification_id=packet.notification_id,
-            workflow_event_id=packet.workflow_event_id,
-            workflow_id=packet.workflow_id,
-        )
-        if interaction_id is not None:
-            self._notify(interaction_id, self.MESSAGE)
+    async def execute(self, packet: WorkflowExecutionPacket) -> RunResult:
+        try:
+            delivery = await self._verification.begin_email_dispatch(run_id=packet.run_id)
+        except WorkflowError as exc:
+            return RunResult(
+                outcome="failed",
+                evidence=({"type": "verification_delivery_rejected_before_provider_call"},),
+                error={"code": "verification_delivery_rejected", "detail": str(exc)},
+            )
+        try:
+            return await self._sender.send(delivery)
+        except Exception as exc:
+            return RunResult(
+                outcome="uncertain",
+                evidence=({"type": "verification_email_outcome_uncertain"},),
+                error={
+                    "code": "verification_email_outcome_uncertain",
+                    "detail": type(exc).__name__,
+                },
+            )
 
 
 __all__ = [
     "ComposioVerificationEmailSender",
     "DeterministicVerificationEmailSender",
-    "VerificationDeliveryFailureHandler",
-    "VerificationEmailInteractionFactory",
+    "VerificationEmailExecutionHandler",
     "VerificationEmailSender",
 ]

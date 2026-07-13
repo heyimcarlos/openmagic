@@ -29,6 +29,7 @@ async def _seed() -> None:
             )
         ),
         policyholder_email=settings.demo_policyholder_email,
+        broker_email=settings.demo_broker_email,
     )
     print(f"Seeded V0 Workflow {workflow_id}")
 

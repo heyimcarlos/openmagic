@@ -17,6 +17,7 @@ from uuid import UUID
 import sqlalchemy as sa
 from sqlalchemy.orm import aliased
 
+from .authority import current_workflow_access_predicate
 from .database import WorkflowDatabase
 from .errors import (
     InvalidWorkflowSearchError,
@@ -25,7 +26,6 @@ from .errors import (
     WorkflowNotFoundError,
 )
 from .identity_models import (
-    OrganizationMembershipRow,
     PartyIdentifierRow,
     PartyRow,
     WorkflowParticipantRoleRow,
@@ -340,38 +340,12 @@ class WorkflowRetrieval:
                 PartyIdentifierRow.revoked_at.is_(None),
             )
         )
-        current_broker_scope = sa.and_(
-            sa.exists(
-                sa.select(WorkflowParticipantRoleRow.id).where(
-                    WorkflowParticipantRoleRow.workflow_id == WorkflowRow.id,
-                    WorkflowParticipantRoleRow.party_id == actor_party_id,
-                    WorkflowParticipantRoleRow.role == "Broker",
-                    WorkflowParticipantRoleRow.revoked_at.is_(None),
-                )
-            ),
-            sa.exists(
-                sa.select(OrganizationMembershipRow.id).where(
-                    OrganizationMembershipRow.person_party_id == actor_party_id,
-                    OrganizationMembershipRow.organization_party_id
-                    == WorkflowRow.organization_party_id,
-                    OrganizationMembershipRow.revoked_at.is_(None),
-                )
-            ),
-        )
-        current_policyholder_scope = sa.exists(
-            sa.select(WorkflowParticipantRoleRow.id).where(
-                WorkflowParticipantRoleRow.workflow_id == WorkflowRow.id,
-                WorkflowParticipantRoleRow.party_id == actor_party_id,
-                WorkflowParticipantRoleRow.role == "Policyholder",
-                WorkflowParticipantRoleRow.revoked_at.is_(None),
-            )
-        )
         return (
             sa.select(WorkflowRow, PartyRow.display_name)
             .join(PartyRow, PartyRow.id == WorkflowRow.organization_party_id)
             .where(
                 verified_identifier,
-                sa.or_(current_broker_scope, current_policyholder_scope),
+                current_workflow_access_predicate(actor_party_id),
             )
         )
 

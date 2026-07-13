@@ -153,10 +153,12 @@ class ComposioGmailSendAdapter(_InvokeOnce):
             )
         except Exception as exc:
             return _uncertain_result("provider_communication_lost", type(exc).__name__)
-        return _normalize_response(response)
+        return normalize_composio_gmail_response(response)
 
 
-def _normalize_response(response: object) -> RunResult:
+def normalize_composio_gmail_response(response: object) -> RunResult:
+    """Normalize one pinned Composio Gmail response into the common Run envelope."""
+
     if not isinstance(response, Mapping):
         return _uncertain_result("malformed_provider_response", type(response).__name__)
     successful = response.get("successful")
@@ -212,4 +214,5 @@ __all__ = [
     "DuplicateEmailSendError",
     "EmailAdapterValidationError",
     "EmailSendAdapter",
+    "normalize_composio_gmail_response",
 ]

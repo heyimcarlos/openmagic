@@ -236,6 +236,16 @@ class VerificationChallengeRow(Base):
 
     __tablename__ = "verification_challenges"
     __table_args__ = (
+        sa.ForeignKeyConstraint(
+            ["delivery_workflow_id", "delivery_job_id"],
+            ["workflow_jobs.workflow_id", "workflow_jobs.id"],
+            name="fk_verification_challenges_delivery_job",
+        ),
+        sa.ForeignKeyConstraint(
+            ["workflow_id", "created_event_id"],
+            ["workflow_events.workflow_id", "workflow_events.id"],
+            name="fk_verification_challenges_created_event",
+        ),
         sa.CheckConstraint(
             "status IN ('pending', 'verified', 'superseded', 'expired', 'failed')",
             name="status",
@@ -247,11 +257,18 @@ class VerificationChallengeRow(Base):
         sa.CheckConstraint("failed_attempts >= 0", name="failed_attempts_nonnegative"),
         sa.CheckConstraint("max_attempts > 0", name="max_attempts_positive"),
         sa.CheckConstraint("failed_attempts <= max_attempts", name="attempt_budget"),
+        sa.UniqueConstraint(
+            "delivery_workflow_id",
+            "delivery_job_id",
+            name="uq_verification_challenges_delivery_job",
+        ),
         sa.CheckConstraint(
             "(status = 'verified' AND verified_at IS NOT NULL "
-            "AND verified_cause_id IS NOT NULL AND authorization_expires_at IS NOT NULL) "
+            "AND verified_cause_id IS NOT NULL "
+            "AND verification_session_expires_at IS NOT NULL) "
             "OR (status <> 'verified' AND verified_at IS NULL "
-            "AND verified_cause_id IS NULL AND authorization_expires_at IS NULL)",
+            "AND verified_cause_id IS NULL "
+            "AND verification_session_expires_at IS NULL)",
             name="verification_shape",
         ),
         sa.Index(
@@ -265,9 +282,7 @@ class VerificationChallengeRow(Base):
             "ix_verification_challenges_authorization",
             "actor_party_id",
             "interaction_id",
-            "workflow_id",
-            "purpose",
-            "authorization_expires_at",
+            "verification_session_expires_at",
             postgresql_where=sa.text("status = 'verified'"),
         ),
     )
@@ -279,11 +294,8 @@ class VerificationChallengeRow(Base):
         nullable=False,
     )
     interaction_id: Mapped[str] = mapped_column(sa.Text, nullable=False)
-    workflow_id: Mapped[UUID] = mapped_column(
-        PGUUID(as_uuid=True),
-        sa.ForeignKey("workflows.id", name="fk_verification_challenges_workflow"),
-        nullable=False,
-    )
+    workflow_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), nullable=False)
+    delivery_workflow_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), nullable=False)
     purpose: Mapped[str] = mapped_column(sa.Text, nullable=False)
     operation_name: Mapped[str] = mapped_column(sa.Text, nullable=False)
     operation_arguments: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
@@ -297,18 +309,15 @@ class VerificationChallengeRow(Base):
         ),
         nullable=False,
     )
-    created_event_id: Mapped[UUID] = mapped_column(
-        PGUUID(as_uuid=True),
-        sa.ForeignKey("workflow_events.id", name="fk_verification_challenges_created_event"),
-        nullable=False,
-    )
+    delivery_job_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), nullable=False)
+    created_event_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), nullable=False)
     status: Mapped[str] = mapped_column(sa.Text, nullable=False)
     expires_at: Mapped[datetime] = mapped_column(sa.DateTime(timezone=True), nullable=False)
     failed_attempts: Mapped[int] = mapped_column(sa.Integer, nullable=False, server_default="0")
     max_attempts: Mapped[int] = mapped_column(sa.Integer, nullable=False, server_default="5")
     verified_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True), nullable=True)
     verified_cause_id: Mapped[str | None] = mapped_column(sa.Text, nullable=True)
-    authorization_expires_at: Mapped[datetime | None] = mapped_column(
+    verification_session_expires_at: Mapped[datetime | None] = mapped_column(
         sa.DateTime(timezone=True), nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(
