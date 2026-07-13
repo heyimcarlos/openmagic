@@ -41,7 +41,9 @@ from ...workflows import (
 _ACTIVITY_LABELS = {
     InteractionActivityAction.SEARCH_WORKFLOWS: "Searched authorized Workflows",
     InteractionActivityAction.READ_WORKFLOW_PACKET: "Read bounded Workflow context",
+    InteractionActivityAction.PROPOSE_WORKFLOW: "Created a new Workflow",
     InteractionActivityAction.PROPOSE_WORKFLOW_WORK: "Proposed business work",
+    InteractionActivityAction.REVISE_WORKFLOW_WORK: "Revised business work",
     InteractionActivityAction.APPROVE_JOB: "Submitted exact Job approval",
 }
 
@@ -49,6 +51,13 @@ _JOB_LABELS = {
     DRAFT_RENEWAL_EMAIL_KIND: "Draft renewal email",
     GMAIL_SEND_EMAIL_KIND: "Send approved email",
     VERIFICATION_EMAIL_JOB_KIND: "Send verification code",
+}
+
+_STATE_CHANGE_ACTIONS = {
+    InteractionActivityAction.PROPOSE_WORKFLOW,
+    InteractionActivityAction.PROPOSE_WORKFLOW_WORK,
+    InteractionActivityAction.REVISE_WORKFLOW_WORK,
+    InteractionActivityAction.APPROVE_JOB,
 }
 
 
@@ -119,6 +128,21 @@ class WorkflowTelemetryProjector:
             workflows = [self._workflow(packet) for packet in visible_packets]
             if not activity and not workflows:
                 continue
+            preferred_cockpit_id = next(
+                (
+                    receipt.workflow_id
+                    for receipt in reversed(receipts_by_cause[cause_id])
+                    if receipt.status is InteractionActivityStatus.SUCCEEDED
+                    and receipt.action in _STATE_CHANGE_ACTIONS
+                    and receipt.workflow_id in packets_by_id
+                ),
+                None,
+            )
+            cockpit_packet = (
+                packets_by_id[preferred_cockpit_id]
+                if preferred_cockpit_id is not None
+                else (visible_packets[0] if visible_packets else None)
+            )
             projected[cause_id] = ChatTurnTelemetry(
                 activity_summary=self._activity_summary(activity, workflows),
                 activity=activity,
@@ -135,7 +159,7 @@ class WorkflowTelemetryProjector:
                     if cause_id.startswith("notification:")
                     else None
                 ),
-                cockpit=self._cockpit(visible_packets[0]) if visible_packets else None,
+                cockpit=self._cockpit(cockpit_packet) if cockpit_packet is not None else None,
             )
         return projected
 
@@ -374,6 +398,8 @@ class WorkflowTelemetryProjector:
 
     @staticmethod
     def _approval_status(job: WorkflowPacketJob) -> WorkflowCheckpointStatus:
+        if job.status in {"cancelled", "failed"}:
+            return "unavailable"
         if any(reason.kind == "dependency" for reason in job.waiting_reasons):
             return "unavailable"
         if job.approval is not None and job.approval.outcome in {"usable", "consumed"}:

@@ -37,6 +37,8 @@ from server.workflows import (
     NotificationWorker,
     RecordInteractionCauseCommand,
     ReportRunResultCommand,
+    ReviseAndApproveWorkflowEmailCommand,
+    RevisedEmailContent,
     RevokeWorkflowAuthorityCommand,
     RunResult,
     RunResultConflictError,
@@ -44,6 +46,7 @@ from server.workflows import (
     WorkflowCommandContext,
     WorkflowControlPlane,
     WorkflowDatabase,
+    WorkflowInspectionContext,
     WorkflowLifecycleError,
     WorkflowRetrieval,
     WorkflowWorker,
@@ -1028,6 +1031,7 @@ async def test_membership_revocation_invalidates_every_affected_workflow(
     )
 
     assert result.invalidated_grants == 2
+
     for created, presentation in (
         (first, first_presentation),
         (second, second_presentation),
@@ -1295,4 +1299,187 @@ async def test_send_confirmation_uses_fresh_packet_driven_interaction(
     trace = await control_plane.read_workflow_trace(created.workflow.id, broker)
     send_notification = next(item for item in trace.notifications if item.kind == "send_confirmed")
     assert send_notification.status == "delivered"
+    await database.dispose()
+
+
+async def test_inline_revision_replaces_work_and_approves_the_exact_edit(
+    control_plane: WorkflowControlPlane,
+):
+    created, presentation = await presented_send(control_plane)
+    broker = create_command().context
+    cause_id = "inline-email-revision"
+    await record_cause(
+        control_plane,
+        cause_id,
+        "Approve the email with these edits.",
+        context=broker.model_copy(update={"cause_type": "ui_action"}),
+    )
+    command = ReviseAndApproveWorkflowEmailCommand(
+        context=broker.model_copy(update={"cause_type": "ui_action", "cause_id": cause_id}),
+        workflow_id=created.workflow.id,
+        job_id=presentation.send_job_id,
+        expected_draft_revision_id=presentation.draft_job_id,
+        email=RevisedEmailContent(
+            to=("john@example.com",),
+            subject="Updated 2026 renewal",
+            body="Dear John,\n\nHere is the corrected renewal email.",
+        ),
+    )
+
+    first = await control_plane.revise_and_approve_email(command)
+    replay = await control_plane.revise_and_approve_email(command)
+
+    assert replay == first
+    assert first.job_id != presentation.send_job_id
+    assert first.draft_job_id != presentation.draft_job_id
+    trace = await control_plane.read_workflow_trace(created.workflow.id, broker)
+    jobs = {job.id: job for job in trace.jobs}
+    old_draft = jobs[presentation.draft_job_id]
+    old_send = jobs[presentation.send_job_id]
+    revised_draft = jobs[first.draft_job_id]
+    revised_send = jobs[first.job_id]
+
+    assert old_draft.status == "succeeded"
+    assert old_draft.output == successful_draft().data
+    assert old_send.status == "cancelled"
+    assert revised_draft.status == "succeeded"
+    assert revised_draft.revises_job_id == old_draft.id
+    assert revised_draft.output == {
+        "subject": "Updated 2026 renewal",
+        "body": "Dear John,\n\nHere is the corrected renewal email.",
+    }
+    assert revised_send.status == "queued"
+    assert revised_send.revises_job_id == old_send.id
+    assert revised_send.depends_on_job_ids == (revised_draft.id,)
+    assert revised_send.input["subject"] == {
+        "job_output": str(revised_draft.id),
+        "field": "subject",
+    }
+    assert [event.event_type for event in trace.events].count("workflow_work_revised") == 1
+    assert [event.event_type for event in trace.events if event.cause_id == cause_id] == [
+        "job_replaced",
+        "draft_ready",
+        "workflow_work_revised",
+        "approval_presentation_committed",
+        "approval_granted",
+    ]
+    assert any(
+        event.event_type == "approval_granted" and event.job_id == revised_send.id
+        for event in trace.events
+    )
+
+
+async def test_inline_revision_loses_to_dispatch_without_changing_work(
+    control_plane: WorkflowControlPlane,
+):
+    created, presentation = await presented_send(control_plane)
+    broker = create_command().context
+    await control_plane.approve_job(
+        ApproveWorkflowJobCommand(
+            context=broker.model_copy(update={"cause_id": "approval-message-1"}),
+            job_id=presentation.send_job_id,
+            expected_draft_revision_id=presentation.draft_job_id,
+        )
+    )
+    run = await control_plane.claim_job(
+        ClaimWorkflowJobCommand(
+            worker_id="dispatch-winner",
+            application_build=APPLICATION_BUILD,
+            lease_duration=timedelta(minutes=5),
+            executor_keys=("composio_gmail_send",),
+        )
+    )
+    assert run is not None
+    await control_plane.begin_external_effect_dispatch(
+        BeginExternalEffectDispatchCommand(run_id=run.run_id)
+    )
+    cause_id = "late-inline-email-revision"
+    await record_cause(
+        control_plane,
+        cause_id,
+        "Approve my last-minute edit.",
+        context=broker.model_copy(update={"cause_type": "ui_action"}),
+    )
+
+    with pytest.raises(WorkflowLifecycleError, match="already dispatched"):
+        await control_plane.revise_and_approve_email(
+            ReviseAndApproveWorkflowEmailCommand(
+                context=broker.model_copy(update={"cause_type": "ui_action", "cause_id": cause_id}),
+                workflow_id=created.workflow.id,
+                job_id=presentation.send_job_id,
+                expected_draft_revision_id=presentation.draft_job_id,
+                email=RevisedEmailContent(
+                    to=("john@example.com",),
+                    subject="Too late",
+                    body="This must become correction work.",
+                ),
+            )
+        )
+
+    trace = await control_plane.read_workflow_trace(created.workflow.id, broker)
+    assert len(trace.jobs) == 2
+    assert not any(event.event_type == "workflow_work_revised" for event in trace.events)
+
+
+async def test_interaction_revision_creates_reviewable_replacement_without_approval(
+    control_plane: WorkflowControlPlane,
+    migrated_postgres_url: str,
+):
+    created, presentation = await presented_send(control_plane)
+    broker = create_command().context
+    database = WorkflowDatabase(migrated_postgres_url)
+    toolbox = WorkflowInteractionToolbox(
+        retrieval=WorkflowRetrieval(database=database, cursor_secret=b"revision-tool"),
+        control_plane=control_plane,
+    )
+    context = InteractionToolContext(
+        actor_party_id=broker.actor_party_id,
+        organization_party_id=broker.organization_party_id,
+        cause_id="interaction-email-revision",
+        trusted_workflow_id=created.workflow.id,
+    )
+    await toolbox.record_interaction_cause(
+        context,
+        "Change the greeting to Dear John and show it to me again.",
+    )
+    context.loaded_packet = await WorkflowRetrieval(
+        database=database,
+        cursor_secret=b"revision-packet",
+    ).read_workflow_packet(
+        WorkflowInspectionContext(actor_party_id=broker.actor_party_id),
+        created.workflow.id,
+    )
+
+    result = await toolbox.invoke(
+        "revise_workflow_work",
+        {
+            "workflow_id": str(created.workflow.id),
+            "operation": {
+                "type": "revise_email",
+                "job_id": str(presentation.send_job_id),
+                "expected_draft_revision_id": str(presentation.draft_job_id),
+                "email": {
+                    "to": ["john@example.com"],
+                    "subject": "Your 2026 policy renewal",
+                    "body": "Dear John,\n\nLet's review your 2026 renewal options.",
+                },
+            },
+        },
+        context,
+    )
+
+    assert result.success is True
+    trace = await control_plane.read_workflow_trace(created.workflow.id, broker)
+    old_send = next(job for job in trace.jobs if job.id == presentation.send_job_id)
+    revised_send = next(job for job in trace.jobs if str(job.id) == result.payload["job_id"])
+    assert old_send.status == "cancelled"
+    assert revised_send.status == "waiting"
+    assert not any(
+        event.event_type == "approval_granted" and event.job_id == revised_send.id
+        for event in trace.events
+    )
+    assert any(
+        notification.kind == "approval_required" and notification.status == "queued"
+        for notification in trace.notifications
+    )
     await database.dispose()

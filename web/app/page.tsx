@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import SettingsModal, { useSettings } from '@/components/SettingsModal';
 import { ChatInput } from '@/components/chat/ChatInput';
 import { ChatMessages } from '@/components/chat/ChatMessages';
+import type { ApprovalEmail } from '@/components/workflows/ApprovalRequestCard';
 import { ErrorBanner } from '@/components/chat/ErrorBanner';
 import {
   SIMULATED_SMS_SENDERS,
@@ -22,6 +23,9 @@ const RESPONSE_POLL_INTERVAL_MS = 1000;
 const RESPONSE_POLL_ATTEMPTS = 30;
 
 const wait = (milliseconds: number) => new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+const parseAddresses = (value?: string) => (
+  value?.split(',').map((address) => address.trim()).filter(Boolean) ?? []
+);
 
 export default function Page() {
   const { settings, setSettings } = useSettings();
@@ -226,7 +230,10 @@ export default function Page() {
 
   const clearError = useCallback(() => setError(null), [setError]);
 
-  const approveExactEmail = useCallback(async (approval: ApprovalRequest) => {
+  const approveExactEmail = useCallback(async (
+    approval: ApprovalRequest,
+    revision?: ApprovalEmail,
+  ) => {
     setError(null);
     const response = await fetch('/api/chat/approval', {
       method: 'POST',
@@ -237,6 +244,15 @@ export default function Page() {
         workflow_id: approval.workflowId,
         job_id: approval.jobId,
         expected_draft_revision_id: approval.draftRevisionId,
+        ...(revision ? {
+          revised_email: {
+            to: parseAddresses(revision.to),
+            cc: parseAddresses(revision.cc),
+            bcc: parseAddresses(revision.bcc),
+            subject: revision.subject.trim(),
+            body: revision.body,
+          },
+        } : {}),
       }),
     });
     const payload = await response.json().catch(() => ({}));
@@ -257,11 +273,6 @@ export default function Page() {
     await loadHistory();
   }, [loadHistory, sender.phone]);
 
-  const requestEmailChanges = useCallback((_approval: ApprovalRequest) => {
-    setInput('Please revise the email: ');
-    setError(null);
-  }, []);
-
   return (
     <main className="min-h-screen bg-[radial-gradient(circle_at_top,_color-mix(in_oklch,var(--primary)_10%,transparent),_transparent_35%)] p-0 sm:p-6">
       <div className="mx-auto flex min-h-screen w-full max-w-3xl flex-col bg-card sm:min-h-0 sm:overflow-hidden sm:rounded-2xl sm:border sm:shadow-xl sm:shadow-foreground/5">
@@ -277,7 +288,6 @@ export default function Page() {
             messages={showTelemetryDemo ? workflowTelemetryDemoMessages : messages}
             isWaitingForResponse={showTelemetryDemo ? false : isWaitingForResponse}
             onApprove={approveExactEmail}
-            onRequestChanges={requestEmailChanges}
           />
 
           <div className="border-t bg-background/80 p-3 backdrop-blur sm:p-4">

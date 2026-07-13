@@ -53,11 +53,13 @@ test('renders tool activity and exact approval together in assistant chat', () =
       messages,
       isWaitingForResponse: false,
       onApprove: async () => undefined,
-      onRequestChanges: () => undefined,
     }),
   );
 
   assert.match(html, /Review before sending/);
+  assert.match(html, /Request changes/);
+  assert.match(html, />Approve</);
+  assert.doesNotMatch(html, /Approve exact email/);
   assert.match(html, /Found context for 1 Workflow/);
   assert.match(html, /John Smith renewal outreach/);
 });

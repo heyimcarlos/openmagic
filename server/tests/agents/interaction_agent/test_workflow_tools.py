@@ -19,6 +19,7 @@ from server.agents.interaction_agent.workflow_agent import (
 )
 from server.agents.interaction_agent.workflow_tools import WorkflowInteractionToolbox
 from server.config import Settings
+from server.services.conversation import WorkflowTelemetryProjector
 from server.tests.workflows.retrieval_fixtures import (
     ACME_ID,
     BROKER_ID,
@@ -111,6 +112,7 @@ def test_workflow_tool_surface_omits_delegation_and_execution_configuration(
 
     assert "search_workflows" in encoded
     assert "read_workflow_packet" in encoded
+    assert "propose_workflow" in encoded
     assert "propose_workflow_work" in encoded
     for forbidden in (
         "send_message_to_agent",
@@ -132,6 +134,14 @@ def test_workflow_tool_surface_omits_delegation_and_execution_configuration(
     )
     assert set(proposal_schema["required"]) == {"workflow_id", "operation"}
     operation_schema = proposal_schema["$defs"]["PrepareRenewalEmailOperation"]
+    create_schema = next(
+        schema["function"]["parameters"]
+        for schema in workflow_toolbox.schemas
+        if schema["function"]["name"] == "propose_workflow"
+    )
+    workflow_input_schema = create_schema["$defs"]["RenewalOutreachInput"]
+    assert set(workflow_input_schema["properties"]) == {"renewal_period"}
+    assert workflow_input_schema["additionalProperties"] is False
     assert operation_schema["properties"]["type"]["const"] == "prepare_renewal_email"
     assert operation_schema["additionalProperties"] is False
     assert "status" not in proposal_schema["properties"]
@@ -210,6 +220,214 @@ async def test_workflow_tools_search_read_one_packet_then_propose(
     assert proposal.success is True
     assert proposal.payload["workflow_id"] == str(TARGET_ID)
     assert len(proposal.payload["job_ids"]) == 2
+
+
+async def test_workflow_tools_create_a_repeatable_workflow_from_one_packet(
+    workflow_toolbox: WorkflowInteractionToolbox,
+    migrated_postgres_url: str,
+):
+    context = InteractionToolContext(
+        actor_party_id=BROKER_ID,
+        organization_party_id=ACME_ID,
+        cause_id="create-repeatable-renewal",
+    )
+    await workflow_toolbox.record_interaction_cause(
+        context,
+        "Create a new 2027 renewal outreach for John Smith.",
+    )
+    await workflow_toolbox.invoke(
+        "search_workflows",
+        {
+            "query": "John Smith renewal",
+            "workflow_kind": "renewal_outreach.v1",
+            "status": "active",
+            "organization": "Acme Brokerage",
+            "renewal_period": "2026",
+        },
+        context,
+    )
+    await workflow_toolbox.invoke(
+        "read_workflow_packet",
+        {"workflow_id": str(TARGET_ID)},
+        context,
+    )
+
+    created = await workflow_toolbox.invoke(
+        "propose_workflow",
+        {
+            "source_workflow_id": str(TARGET_ID),
+            "workflow_kind": "renewal_outreach.v1",
+            "objective": "2027 renewal outreach for John Smith",
+            "input": {"renewal_period": "2027"},
+            "operation": {"type": "prepare_renewal_email"},
+        },
+        context,
+    )
+
+    assert created.success is True
+    assert created.payload["workflow_id"] != str(TARGET_ID)
+    assert len(created.payload["job_ids"]) == 2
+    database = WorkflowDatabase(migrated_postgres_url)
+    packet = await WorkflowRetrieval(
+        database=database,
+        cursor_secret=b"repeatable-workflow-test",
+    ).read_workflow_packet(
+        WorkflowInspectionContext(actor_party_id=BROKER_ID),
+        UUID(created.payload["workflow_id"]),
+    )
+    assert packet.workflow.objective == "2027 renewal outreach for John Smith"
+    assert packet.workflow.input == {"renewal_period": "2027"}
+    assert any(
+        participant.party_id == JOHN_ACME_ID and "Policyholder" in participant.roles
+        for participant in packet.participants
+    )
+    assert len(packet.jobs) == 2
+    activity_store = InteractionActivityStore(database)
+    receipt = await activity_store.start(
+        cause_id=context.cause_id,
+        action=InteractionActivityAction.PROPOSE_WORKFLOW,
+    )
+    created_workflow_id = InteractionAgentRuntime._trusted_activity_workflow_id(
+        InteractionActivityAction.PROPOSE_WORKFLOW,
+        created,
+        context,
+    )
+    assert created_workflow_id == packet.workflow.workflow_id
+    await activity_store.finish(
+        receipt.id,
+        status=InteractionActivityStatus.SUCCEEDED,
+        workflow_id=created_workflow_id,
+    )
+    projected = await WorkflowTelemetryProjector(
+        retrieval=WorkflowRetrieval(
+            database=database,
+            cursor_secret=b"repeatable-workflow-telemetry",
+        ),
+        activity_store=activity_store,
+        registry=default_workflow_registry(),
+    ).project(
+        actor_party_id=BROKER_ID,
+        cause_ids=[context.cause_id],
+    )
+    assert projected[context.cause_id].cockpit is not None
+    assert projected[context.cause_id].cockpit.workflow.id == str(packet.workflow.workflow_id)
+    await database.dispose()
+
+
+async def test_workflow_tools_link_a_correction_without_reopening_the_source(
+    workflow_toolbox: WorkflowInteractionToolbox,
+    migrated_postgres_url: str,
+):
+    engine = create_async_engine(migrated_postgres_url)
+    async with engine.begin() as connection:
+        await connection.execute(
+            sa.text("UPDATE workflows SET status = 'completed' WHERE id = :workflow_id"),
+            {"workflow_id": TARGET_ID},
+        )
+    await engine.dispose()
+
+    context = InteractionToolContext(
+        actor_party_id=BROKER_ID,
+        organization_party_id=ACME_ID,
+        cause_id="create-linked-correction",
+    )
+    await workflow_toolbox.record_interaction_cause(
+        context,
+        "Draft a correction to the completed renewal email.",
+    )
+    await workflow_toolbox.invoke(
+        "search_workflows",
+        {
+            "query": "John Smith renewal",
+            "workflow_kind": "renewal_outreach.v1",
+            "status": "completed",
+            "organization": "Acme Brokerage",
+            "renewal_period": "2026",
+        },
+        context,
+    )
+    await workflow_toolbox.invoke(
+        "read_workflow_packet",
+        {"workflow_id": str(TARGET_ID)},
+        context,
+    )
+
+    created = await workflow_toolbox.invoke(
+        "propose_workflow",
+        {
+            "source_workflow_id": str(TARGET_ID),
+            "corrects_workflow_id": str(TARGET_ID),
+            "workflow_kind": "renewal_outreach.v1",
+            "objective": "Correction to 2026 renewal outreach for John Smith",
+            "input": {"renewal_period": "2026"},
+            "operation": {"type": "prepare_renewal_email"},
+        },
+        context,
+    )
+
+    assert created.success is True
+    created_id = UUID(created.payload["workflow_id"])
+    database = WorkflowDatabase(migrated_postgres_url)
+    async with database.transaction() as session:
+        rows = (
+            await session.execute(
+                sa.text(
+                    "SELECT id, status, corrects_workflow_id FROM workflows "
+                    "WHERE id IN (:source_id, :created_id) ORDER BY id"
+                ),
+                {"source_id": TARGET_ID, "created_id": created_id},
+            )
+        ).all()
+    by_id = {row.id: row for row in rows}
+    assert by_id[TARGET_ID].status == "completed"
+    assert by_id[created_id].status == "active"
+    assert by_id[created_id].corrects_workflow_id == TARGET_ID
+    await database.dispose()
+
+
+async def test_workflow_creation_rejects_a_different_target_kind(
+    workflow_toolbox: WorkflowInteractionToolbox,
+):
+    context = InteractionToolContext(
+        actor_party_id=BROKER_ID,
+        organization_party_id=ACME_ID,
+        cause_id="reject-cross-kind-creation",
+    )
+    await workflow_toolbox.record_interaction_cause(
+        context,
+        "Create unrelated work from this renewal.",
+    )
+    await workflow_toolbox.invoke(
+        "search_workflows",
+        {
+            "query": "John Smith renewal",
+            "workflow_kind": "renewal_outreach.v1",
+            "status": "active",
+            "organization": "Acme Brokerage",
+            "renewal_period": "2026",
+        },
+        context,
+    )
+    await workflow_toolbox.invoke(
+        "read_workflow_packet",
+        {"workflow_id": str(TARGET_ID)},
+        context,
+    )
+
+    rejected = await workflow_toolbox.invoke(
+        "propose_workflow",
+        {
+            "source_workflow_id": str(TARGET_ID),
+            "workflow_kind": "claim_intake.v1",
+            "objective": "Unrelated claim intake",
+            "input": {"renewal_period": "2026"},
+            "operation": {"type": "prepare_renewal_email"},
+        },
+        context,
+    )
+
+    assert rejected.success is False
+    assert rejected.payload["code"] == "WorkflowAuthorizationError"
 
 
 async def test_protected_packet_read_returns_verification_required_from_actual_tool(
@@ -477,12 +695,15 @@ async def test_verified_resume_uses_session_for_follow_on_proposal_with_actual_t
         assert str(TARGET_ID) in json.dumps(kwargs["messages"])
         assert "$1,284" in json.dumps(kwargs["messages"])
         assert "Prepare John Smith's renewal email" in json.dumps(kwargs["messages"])
-        assert {schema["function"]["name"] for schema in kwargs["tools"]} == {
-            "propose_workflow_work",
-            "send_message_to_user",
-            "wait",
-        }
+        names = {schema["function"]["name"] for schema in kwargs["tools"]}
         if completion_calls == 1:
+            assert names == {
+                "propose_workflow",
+                "propose_workflow_work",
+                "revise_workflow_work",
+                "send_message_to_user",
+                "wait",
+            }
             return _tool_call(
                 "propose_workflow_work",
                 {
@@ -490,6 +711,7 @@ async def test_verified_resume_uses_session_for_follow_on_proposal_with_actual_t
                     "operation": {"type": "prepare_renewal_email"},
                 },
             )
+        assert names == {"send_message_to_user", "wait"}
         return {
             "choices": [
                 {
@@ -539,7 +761,13 @@ async def test_verified_resume_uses_session_for_follow_on_proposal_with_actual_t
 
 
 async def test_verified_resume_can_continue_a_draft_request_without_search_or_approval_tools():
-    tool_names = ("read_workflow_packet", "propose_workflow_work", "send_message_to_user", "wait")
+    tool_names = (
+        "read_workflow_packet",
+        "propose_workflow",
+        "propose_workflow_work",
+        "send_message_to_user",
+        "wait",
+    )
     invoked: list[str] = []
 
     class Toolbox:
@@ -594,9 +822,14 @@ async def test_verified_resume_can_continue_a_draft_request_without_search_or_ap
         nonlocal calls
         calls += 1
         names = {schema["function"]["name"] for schema in kwargs["tools"]}
-        assert names == {"propose_workflow_work", "send_message_to_user", "wait"}
         assert "Prepare John Smith's renewal email" in json.dumps(kwargs["messages"])
         if calls == 1:
+            assert names == {
+                "propose_workflow",
+                "propose_workflow_work",
+                "send_message_to_user",
+                "wait",
+            }
             return {
                 "choices": [
                     {
@@ -615,12 +848,29 @@ async def test_verified_resume_can_continue_a_draft_request_without_search_or_ap
                                             }
                                         ),
                                     },
-                                }
+                                },
+                                {
+                                    "id": "second-write",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "propose_workflow",
+                                        "arguments": json.dumps(
+                                            {
+                                                "source_workflow_id": str(TARGET_ID),
+                                                "workflow_kind": "renewal_outreach.v1",
+                                                "objective": "Duplicate renewal",
+                                                "input": {"renewal_period": "2026"},
+                                                "operation": {"type": "prepare_renewal_email"},
+                                            }
+                                        ),
+                                    },
+                                },
                             ],
                         }
                     }
                 ]
             }
+        assert names == {"send_message_to_user", "wait"}
         return {
             "choices": [
                 {
