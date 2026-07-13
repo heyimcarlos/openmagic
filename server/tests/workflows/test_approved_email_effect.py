@@ -4,7 +4,7 @@ import asyncio
 import json
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
@@ -72,7 +72,18 @@ def successful_draft() -> RunResult:
 
 
 async def presented_send(control_plane: WorkflowControlPlane):
-    created = await control_plane.create_workflow(create_command())
+    base = create_command()
+    cause_id = f"renewal-request-{uuid4()}"
+    command = base.model_copy(
+        update={"context": base.context.model_copy(update={"cause_id": cause_id})}
+    )
+    await record_cause(
+        control_plane,
+        cause_id,
+        "Prepare a new renewal email.",
+        context=command.context,
+    )
+    created = await control_plane.create_workflow(command)
     draft_run = await control_plane.claim_job(draft_claim())
     assert draft_run is not None
     await control_plane.report_run_result(

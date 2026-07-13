@@ -292,6 +292,15 @@ class WorkflowEventRow(Base):
             unique=True,
             postgresql_where=sa.text("event_type = 'approval_granted'"),
         ),
+        sa.Index(
+            "uq_workflow_events_proposal_cause",
+            "cause_type",
+            "cause_id",
+            unique=True,
+            postgresql_where=sa.text(
+                "event_type = 'workflow_jobs_proposed' AND data ? 'proposal_digest'"
+            ),
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)

@@ -268,7 +268,12 @@ class WorkflowTraceRun(WorkflowContract):
     id: UUID
     job_id: UUID
     status: str
+    worker_id: str
+    application_build: str
     runtime_instance_id: UUID | None
+    lease_expires_at: datetime
+    result: dict[str, Any] | None
+    finished_at: datetime | None
 
 
 class WorkflowTraceEvent(WorkflowContract):
@@ -276,6 +281,7 @@ class WorkflowTraceEvent(WorkflowContract):
     workflow_id: UUID
     job_id: UUID | None
     run_id: UUID | None
+    approval_grant_id: UUID | None
     event_type: str
     actor_type: str
     actor_id: str
