@@ -1,3 +1,4 @@
+import * as React from 'react';
 import { ArrowRightIcon, CheckIcon, SparklesIcon } from 'lucide-react';
 
 import { ApprovalRequestCard, type ApprovalEmail } from './ApprovalRequestCard';
@@ -57,8 +58,8 @@ export function CockpitConversation({
           <>
             {stage === 'reapproval' && (
               <ConversationBubble>
-                Revision 2 is ready. The earlier Send Job was safely replaced. Please approve
-                this exact email.
+                {revisionReadyMessage(revision)} The earlier Send Job was safely replaced. Please
+                approve this exact email.
               </ConversationBubble>
             )}
             <ApprovalRequestCard
@@ -161,4 +162,8 @@ function ConversationBubble({
       </div>
     </div>
   );
+}
+
+export function revisionReadyMessage(revision: number): string {
+  return `Revision ${revision} is ready.`;
 }
