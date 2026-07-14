@@ -65,6 +65,10 @@
 }
 
 @layer components {
+  .workflow-reuse-canvas .react-flow__edgelabel-renderer {
+    z-index: 10;
+  }
+
   .btn {
     @apply inline-flex items-center justify-center rounded-md border border-transparent bg-brand-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-brand-700 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50;
   }
