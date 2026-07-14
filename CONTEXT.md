@@ -93,20 +93,36 @@ The typed result of one Agent Run. For Agent Delivery it is candidate Message co
 _Avoid_: Message, Workflow Job Run Result, free-form agent output
 
 **Command**:
-A typed request expressing intent to change application state or begin work.
+A trusted, immutable typed request expressing intent to change application state or begin work. It carries an opaque Command ID, stable Command Type, separate positive schema version, typed Actor and Cause, and typed input with exact target identities where applicable; it contains no authorization claim, Policy decision, Workflow Definition structure, Route, Step kind, prompt, or kernel instruction.
 _Avoid_: Operation Variant, event, prompt instruction
 
+**Command ID**:
+The caller-owned immutable identity of one Command and its application-level idempotency scope. Exact replay returns the original result, while conflicting reuse is rejected.
+_Avoid_: Cause ID, Message ID, kernel operation ID
+
 **Command Type**:
-The stable discriminator identifying the action requested by a Command.
-_Avoid_: Operation Variant Type, Event Type
+The stable lowercase dotted discriminator identifying the action requested by a Command, such as `renewal.request_revision`. Version information is not embedded in the Command Type.
+_Avoid_: Operation Variant Type, Event Type, version-suffixed Command name
+
+**Command Schema Version**:
+The positive integer that pins one Command Type's complete typed input and Command Result compatibility contract. A breaking input or result change requires a new version, while implementation and Workflow Definition versions remain independent.
+_Avoid_: Command Type suffix, deployment version, Workflow Definition Version
 
 **Workflow Command**:
 A Command submitted to the Workflow Control Plane. Not every Command targets a Workflow.
 _Avoid_: Workflow Event, general Command Handler
 
 **Command Handler**:
-The deterministic application boundary that validates a Command, applies the relevant Policies, and commits the result.
+The deterministic application-owned behavior for one Command Type and schema version. It applies the relevant qualified Policies and prepares application and kernel changes, while the reusable application-configured Command Dispatcher owns idempotency and atomic commit.
 _Avoid_: Agent tool, prompt router
+
+**Command Result**:
+The immutable application-owned typed outcome produced by a Command Handler. Its contract is pinned by the Command Type and schema version.
+_Avoid_: Command Receipt, Domain Event, kernel receipt
+
+**Command Receipt**:
+The immutable acknowledgement that one Command Result committed atomically with its application changes, kernel transitions, and Domain Events. Exact Command replay returns the value-identical receipt without reevaluating the Command.
+_Avoid_: Command Result, Domain Event, execution log
 
 **Policy**:
 A deterministic rule used to make an application decision and qualified by its owner or purpose, such as Workflow Policy, Delivery Policy, or Approval Policy.
@@ -129,7 +145,7 @@ A durable business objective that may span many Messages and kernel transitions.
 _Avoid_: Agent, conversation, run
 
 **Workflow Definition**:
-An immutable, versioned, closed declarative transition system for one class of Workflow. Its identity is a stable Definition Key and Definition Version. Its canonical declarative manifest is durably registered with a content digest: registering the same identity and digest is idempotent, while the same identity with different content is an integrity failure. Registration validates the complete canonical manifest before the Definition becomes selectable, including unique keys, known references, one typed activation contract per Route, finite non-empty output batches, acyclic AND-only dependencies, schema-compatible bindings, and compatible Wait and Signal contracts. Unknown fields, references, and constructs fail closed. An Instance is permanently pinned to one exact Definition identity when created and never upgrades in place. The Definition declares stable Step Templates, Wait Templates, and named Routes. Typed Commands, accepted Step outcomes, and Signals may activate runtime occurrences only through those predefined Routes. Business Policy authorizes and selects a Route; the kernel validates it against the Instance's pinned Definition version and atomically materializes the resulting finite occurrences. Callers, Agents, Workers, and Executors cannot invent templates, Step kinds, edges, or Routes. A Workflow's human-readable objective is searchable context, not executable logic.
+An immutable, versioned, closed declarative transition system for one class of Workflow. Its identity is a stable Definition Key and Definition Version. Its canonical declarative manifest is durably registered with a content digest: registering the same identity and digest is idempotent, while the same identity with different content is an integrity failure. Registration validates the complete canonical manifest before the Definition becomes selectable, including unique keys, known references, one typed activation contract per Route, finite non-empty output batches, acyclic AND-only dependencies, schema-compatible bindings, compatible Wait and Signal contracts, and positive Step lease and maximum Attempt durations with the lease no longer than the maximum. Unknown fields, references, and constructs fail closed. An Instance is permanently pinned to one exact Definition identity when created and never upgrades in place. The Definition declares stable Step Templates, Wait Templates, and named Routes. Typed Commands, accepted Step outcomes, and Signals may activate runtime occurrences only through those predefined Routes. Business Policy authorizes and selects a Route; the kernel validates it against the Instance's pinned Definition version and atomically materializes the resulting finite occurrences. Callers, Agents, Workers, and Executors cannot invent templates, Step kinds, edges, or Routes. A Workflow's human-readable objective is searchable context, not executable logic.
 _Avoid_: Workflow Kind, interpreted objective prompt, caller-provided graph, mutable definition, arbitrary durable Python
 
 **Workflow Definition Identity**:
@@ -141,7 +157,7 @@ One durable execution of an exact Workflow Definition Identity. Its kernel lifec
 _Avoid_: Workflow, business completion status, queue state, Agent Run
 
 **Step Template**:
-A stable key within one Workflow Definition that describes an allowed kind of Step occurrence. A Route may materialize the same Step Template more than once, but each occurrence has its own durable identity.
+A stable key within one Workflow Definition that describes an allowed kind of Step occurrence and pins its typed contracts, Executor key, Retry Policy, renewable lease duration, and immutable maximum Attempt duration. A Route may materialize the same Step Template more than once, but each occurrence has its own durable identity.
 _Avoid_: Runtime Step ID, caller-created node, loop body
 
 **Step**:
