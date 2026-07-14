@@ -1,0 +1,3 @@
+# Use per-Instance serialized durable kernel state
+
+OpenMagic stores authoritative current state in normalized Definition, Instance, Step, Step Dependency, Attempt, Wait, and Signal records, then appends one Instance-ordered Trace Event receipt for each successful mutation. Every mutation locks the Instance first, derives Step claimability instead of duplicating queue and running states, and grants execution authority only to one strictly fenced leased Attempt with bounded retry and execution deadlines. This favors auditable PostgreSQL correctness over same-Instance parallelism or event-sourced replay, while Business Policy continues to own completion, authorization, External Effects, uncertainty, evidence, and Domain Events above the kernel.

@@ -117,7 +117,7 @@ The typed output of evaluating a Policy. It becomes durable history only when co
 _Avoid_: Domain Event, agent verdict
 
 **Verification Challenge**:
-A durable, single-use request for a Party to prove current control of an on-file identifier through a second channel. It binds one Party, Thread, protected Workflow, purpose, and exact waiting protected Command, expires after 10 minutes, and creates delivery through a typed External Effect Job in a separate system Workflow. Verification delivery therefore cannot change the protected business Workflow's cancellation or completion semantics.
+A durable, single-use request for a Party to prove current control of an on-file identifier through a second channel. It binds one Party, Thread, protected Workflow, purpose, and exact waiting protected Command, expires after 10 minutes, and creates delivery through a typed side-effecting Step in a separate system Workflow. Verification delivery therefore cannot change the protected business Workflow's cancellation or completion semantics.
 _Avoid_: Verification tool, global Party verification, Workflow authority grant
 
 **Verification Session**:
@@ -125,43 +125,59 @@ The short-lived assurance established when a Verification Challenge succeeds. Fo
 _Avoid_: Login session, reusable approval, role assignment
 
 **Workflow**:
-A durable business objective that may span many messages, waits, Workflow Jobs, and Workflow Job Runs. Its lifecycle records whether that objective is active, completed, or cancelled independently of any individual Job or Run. Completed and cancelled are terminal. Cancellation succeeds atomically only while every unfinished Job and Run remains safely cancelable; it cancels that work and revokes its execution authority, while completed work remains permanent history. If any External Effect has crossed its dispatch boundary or remains uncertain, cancellation is too late and changes nothing.
+A durable business objective that may span many Messages and kernel transitions. Every Workflow owns exactly one Instance for its lifetime, while the kernel has no dependency back to the Workflow; its active, completed, or cancelled business lifecycle remains independent of Instance execution state, with completed and cancelled terminal. Cancellation succeeds atomically only while unfinished work remains safely cancelable; it closes the Instance and revokes execution authority, while completed work remains permanent history. If any External Effect has crossed its dispatch boundary or remains uncertain, cancellation is too late and changes nothing.
 _Avoid_: Agent, conversation, run
 
 **Workflow Definition**:
-An immutable, versioned, closed declarative transition system for one class of Workflow. Its identity is a stable Definition Key and Definition Version. Its canonical declarative manifest is durably registered with a content digest: registering the same identity and digest is idempotent, while the same identity with different content is an integrity failure. Registration validates the complete canonical manifest before the Definition becomes selectable, including unique keys, known references, one typed activation contract per Route, finite non-empty output batches, acyclic AND-only dependencies, schema-compatible bindings, and compatible Wait and Signal contracts. Unknown fields, references, and constructs fail closed. A Workflow is permanently pinned to one exact Definition identity when created and never upgrades in place. The Definition declares stable Step Templates, Wait Templates, and named Routes. Typed Commands, accepted Step outcomes, and Signals may activate runtime occurrences only through those predefined Routes. Business Policy authorizes and selects a Route; the kernel validates it against the Workflow's pinned Definition version and atomically materializes the resulting finite occurrences. Callers, Agents, Workers, and Executors cannot invent templates, Step kinds, edges, or Routes. A Workflow's human-readable objective is searchable context, not executable logic.
+An immutable, versioned, closed declarative transition system for one class of Workflow. Its identity is a stable Definition Key and Definition Version. Its canonical declarative manifest is durably registered with a content digest: registering the same identity and digest is idempotent, while the same identity with different content is an integrity failure. Registration validates the complete canonical manifest before the Definition becomes selectable, including unique keys, known references, one typed activation contract per Route, finite non-empty output batches, acyclic AND-only dependencies, schema-compatible bindings, and compatible Wait and Signal contracts. Unknown fields, references, and constructs fail closed. An Instance is permanently pinned to one exact Definition identity when created and never upgrades in place. The Definition declares stable Step Templates, Wait Templates, and named Routes. Typed Commands, accepted Step outcomes, and Signals may activate runtime occurrences only through those predefined Routes. Business Policy authorizes and selects a Route; the kernel validates it against the Instance's pinned Definition version and atomically materializes the resulting finite occurrences. Callers, Agents, Workers, and Executors cannot invent templates, Step kinds, edges, or Routes. A Workflow's human-readable objective is searchable context, not executable logic.
 _Avoid_: Workflow Kind, interpreted objective prompt, caller-provided graph, mutable definition, arbitrary durable Python
 
 **Workflow Definition Identity**:
-The immutable pair of a stable lowercase Definition Key and positive integer Definition Version pinned to a Workflow for its complete lifetime. Version is a separate field and is never parsed from the Definition Key. Any manifest change creates a new version; deployment changes never alter the rulebook of an existing Workflow. The registered manifest remains available while any Workflow references it, and exact executable support remains installed while any referencing Workflow is nonterminal. Missing support fails deployment readiness and runtime transitions closed; the kernel never falls back to a newer version or silently upgrades a Workflow.
+The immutable pair of a stable lowercase Definition Key and positive integer Definition Version pinned to an Instance for its complete lifetime. Version is a separate field and is never parsed from the Definition Key. Any manifest change creates a new version; deployment changes never alter the rulebook of an existing Instance. The registered manifest remains available while any Instance references it, and exact executable support remains installed while any referencing Instance is open. Missing support fails deployment readiness and runtime transitions closed; the kernel never falls back to a newer version or silently upgrades an Instance.
 _Avoid_: Version-suffixed Kind name, latest Definition, deployment version, in-place Workflow upgrade
+
+**Instance**:
+One durable execution of an exact Workflow Definition Identity. Its kernel lifecycle is only open or closed: an open Instance may be active, waiting, retry-delayed, blocked, or quiescent, while closing atomically cancels its pending Steps, leased Attempts, and unsatisfied Waits; a closed Instance is terminal and accepts no further transitions, quiescence never closes it, and Business Policy separately owns the meaning of Workflow completion, cancellation, or failure.
+_Avoid_: Workflow, business completion status, queue state, Agent Run
 
 **Step Template**:
 A stable key within one Workflow Definition that describes an allowed kind of Step occurrence. A Route may materialize the same Step Template more than once, but each occurrence has its own durable identity.
 _Avoid_: Runtime Step ID, caller-created node, loop body
 
 **Step**:
-One durable runtime occurrence of a Step Template with its own opaque Step ID. The Template Key describes what the Step is but does not identify the occurrence. Route materialization is idempotent within a Workflow by the unique source-scoped tuple of Route Key, activation source kind, activation source ID, and Route output slot. Replaying the same activation returns the same Step; a later activation of the same Template creates a new Step. Step dependencies reference exact runtime Step IDs and use AND-success semantics: every prerequisite Step must succeed before the dependent Step becomes eligible. Only an accepted durable Step outcome may activate a Route. Attempt results are classified and applied to the Step first; retryable or provisional Attempt results never create downstream work. A successful Step exposes one canonical output, while a terminal non-success outcome may activate only a predefined recovery Route.
+One durable runtime occurrence of a Step Template with its own opaque Step ID and a lifecycle of pending, succeeded, failed, or cancelled. Pending covers every unresolved condition, while claimability is derived from the open Instance, exact AND-success dependencies, retry timing and budget, and absence of a current Attempt; terminal state is write-once and carries either one canonical typed success output or one canonical typed failure, never both, and only that accepted terminal outcome may activate a predefined Route. Route materialization is idempotent within an Instance by the unique source-scoped tuple of Route Key, activation source kind, activation source ID, and Route output slot, so replay returns the same Step while a later activation of the same Template creates a new occurrence.
 _Avoid_: Step Template, sequence-derived identity, timestamp-derived identity, Workflow Job
+
+**Attempt**:
+One isolated execution of a Step with an opaque Attempt ID for exact authority identity and a strictly increasing, never-reused per-Step Attempt Number for ordering and fencing generation. It also records Worker provenance, lease, timing, and a write-once typed result, with a lifecycle of leased, completed, abandoned, or cancelled: completed means a valid result was accepted regardless of its reported outcome, abandoned is reserved for lease or Worker loss, cancelled records deliberate authority revocation, and every terminal state permanently ends execution authority.
+_Avoid_: Agent Run, Delivery Attempt, result outcome, Workflow Job Run
+
+**Lease**:
+A bounded grant of execution authority held by one current Attempt until its renewable lease deadline or immutable hard execution deadline, whichever arrives first. Renewal is allowed only before expiry and never extends the hard deadline; expiry ends authority immediately without a grace period, while durable recovery subsequently records the Attempt as abandoned.
+_Avoid_: Worker ownership, heartbeat, process liveness, execution result
+
+**Retry Policy**:
+The immutable, finite Attempt budget and exact delay schedule declared by a Step Template. It bounds and times retries that Business Policy has classified as safe, while the kernel never infers retry safety from an error, lost Worker, or provisional outcome.
+_Avoid_: Business retry classification, unbounded retry, Worker backoff, in-process sleep
 
 **Wait Template**:
 A stable key within one Workflow Definition that describes an allowed kind of Wait occurrence.
 _Avoid_: Timer callback, blocking Worker, arbitrary subscription
 
 **Wait**:
-A durable, non-executable occurrence of a Wait Template that gates predefined progression. It has its own opaque Wait ID and no Executor, Attempt, lease, Retry Policy, business output, deadline, timer, or expiry scheduler. Its replay-safe materialization identity uses the same Workflow, Route, activation source, and output slot tuple as a Step, so replay returns the same Wait ID rather than creating another acceptance surface. An accepted Signal may atomically satisfy it, and the Wait records the exact Signal as satisfaction provenance. A Wait may be satisfied only once by one Signal; that Signal may be consumed by only that Wait. Replay of the same Signal identity returns the recorded result, while another Signal cannot replace it. Every Signal targets one exact Wait ID; Business Policy performs domain correlation and authorization before submission. The kernel verifies the Wait's Instance and declared Signal contract but does not search by business data or buffer a Signal before its target Wait exists. Time-based progression occurs when Business Policy authorizes a typed Signal produced through Trigger; competing Signals serialize against the Wait and only the first valid one satisfies it.
+A durable, non-executable occurrence of a Wait Template with its own opaque Wait ID and a lifecycle of unsatisfied, satisfied, or cancelled. It has no Executor, Attempt, lease, Retry Policy, business output, deadline, timer, or expiry scheduler; an accepted Signal may atomically satisfy it with permanent Signal provenance, while Instance closure cancels an unsatisfied Wait. Its replay-safe materialization identity uses the same Instance, Route, activation source, and output slot tuple as a Step, so replay returns the same Wait ID rather than creating another acceptance surface. A Wait may be satisfied only once by one Signal; that Signal may be consumed by only that Wait. Replay of the same Signal identity returns the recorded result, while another Signal cannot replace it. Every Signal targets one exact Wait ID; Business Policy performs domain correlation and authorization before submission. The kernel verifies the Wait's Instance and declared Signal contract but does not search by business data or buffer a Signal before its target Wait exists. Time-based progression occurs when Business Policy authorizes a typed Signal produced through Trigger; competing Signals serialize against the Wait and only the first valid one satisfies it.
 _Avoid_: Step, dependency edge, sleeping Worker, business approval record
 
 **Route**:
-A stable, named transition declared by a Workflow Definition. A Route maps one allowed typed activation, such as a Command, accepted Step outcome, or Signal, to one finite batch of predefined Step or Wait occurrences. Every Definition declares exactly one `start` Route that may activate only while atomically creating a Workflow: the same transaction pins the Definition identity, validates Workflow Input, materializes the complete initial occurrence batch, and records its Trace Event. Replay returns the same Workflow and occurrences, so no empty unstarted Workflow can survive. Applying any Route is one atomic transition that validates the pinned Definition, activation source, typed input, bindings, and dependencies; satisfies a targeted Wait when applicable; materializes the complete finite occurrence batch; records concrete dependencies and a Trace Event; and commits all or nothing. One activation source may select at most one Route. Replay of the same source, Route, and input returns the same occurrences, while reuse of that source with conflicting Route or input is an integrity failure. Route bindings may copy only Definition literals, immutable Workflow Input, typed Route input prepared by Business Policy, accepted Signal payload, or canonical output from an exact prerequisite Step. Computed transformations remain above the kernel. Conditional paths exist only as predefined Routes selected by Business Policy. The kernel does not evaluate callbacks, arbitrary predicates, payload expressions, general path languages, or OR dependency edges.
+A stable, named transition declared by a Workflow Definition. A Route maps one allowed typed activation, such as a Command, accepted Step outcome, or Signal, to one finite batch of predefined Step or Wait occurrences. Every Definition declares exactly one `start` Route that may activate only while atomically creating an Instance: the same transaction pins the Definition identity, validates Instance Input, materializes the complete initial occurrence batch, and records its Trace Event. Replay returns the same Instance and occurrences, so no empty unstarted Instance can survive. Applying any Route is one atomic transition that validates the pinned Definition, activation source, typed input, bindings, and dependencies; satisfies a targeted Wait when applicable; materializes the complete finite occurrence batch; records concrete dependencies and a Trace Event; and commits all or nothing. One activation source may select at most one Route. Replay of the same source, Route, and input returns the same occurrences, while reuse of that source with conflicting Route or input is an integrity failure. Route bindings may copy only Definition literals, immutable Instance Input, typed Route input prepared by Business Policy, accepted Signal payload, or canonical output from an exact prerequisite Step. Computed transformations remain above the kernel. Conditional paths exist only as predefined Routes selected by Business Policy. The kernel does not evaluate callbacks, arbitrary predicates, payload expressions, general path languages, or OR dependency edges.
 _Avoid_: Dynamic graph mutation, Executor-selected branch, arbitrary reducer action
 
-**Workflow Input**:
-The immutable, typed business data validated by a Workflow's pinned Workflow Definition when that Workflow is created. It provides structured objective context such as a renewal period without duplicating relational Participants or Organizations. It is neither executable workflow logic, a prompt, a completion condition, nor a mutable Workflow Definition.
-_Avoid_: Parsed objective text, workflow prompt, duplicated Participant data, mutable workflow definition
+**Instance Input**:
+The immutable, typed data validated by an Instance's pinned Workflow Definition when that Instance is created. It provides structured objective context without duplicating relational application records and is neither executable logic, a prompt, a completion condition, nor a mutable Workflow Definition.
+_Avoid_: Workflow Input, parsed objective text, Workflow prompt, duplicated application data
 
 **Workflow Completion Condition**:
-The objective-specific, evidence-backed predicate that the Workflow Control Plane evaluates after relevant Workflow Job or evidence transitions. It represents satisfaction of the business objective, not an empty queue or a human override. Completion requires all completion-relevant work to be terminal and every relevant External Effect to be certain. A human may provide evidence, authorize replacement work, or cancel the Workflow, but may not bypass the predicate to declare it completed.
+The objective-specific, evidence-backed predicate that the Workflow Control Plane evaluates after relevant Step or evidence transitions. It represents satisfaction of the business objective, not kernel quiescence or a human override. Completion requires all completion-relevant work to be terminal and every relevant External Effect to be certain. A human may provide evidence, authorize replacement work, or cancel the Workflow, but may not bypass the predicate to declare it completed.
 _Avoid_: Empty queue, manual completion override
 
 **Workflow Participant**:
@@ -188,92 +204,68 @@ _Avoid_: Customer, Reporter
 A Workflow Role for the Party whose claimed loss is represented in a claim-intake Workflow. It does not imply that the Party is the Policyholder or Reporter.
 _Avoid_: Reporter, Policyholder
 
-**Workflow Job**:
-One durable, bounded unit of required work belonging to a Workflow that owns dependencies and retry policy, may have many Workflow Job Runs, and represents exactly one External Effect when it is side-effecting. While unfinished, it is waiting when a non-temporal prerequisite is unresolved, queued when those prerequisites are satisfied but its next eligible time may not have arrived, or running; it terminates as succeeded, failed, or cancelled.
-_Avoid_: Agent, workflow
-
-**Workflow Job Output**:
-The single canonical result a Workflow Job publishes when its durable obligation succeeds. It normally comes from validated successful Run data, but authoritative reconciliation may publish it independently when that evidence satisfies the obligation. Failed or uncertain attempts publish no Workflow Job Output; a Draft Revision is the Workflow Job Output of a successful Draft Job.
-_Avoid_: Provisional Run data, mutable result, output projector
-
-**Workflow Job Kind**:
-A recognized, versioned contract for one class of Workflow Job. It defines the persisted input, published output, Run Result data, and trusted execution semantics that the Workflow Control Plane and Worker resolve through the application-owned registry. Its version changes only for a breaking contract change, and a referenced Kind remains supported while unfinished Workflow Jobs use it. A Party may be authorized to propose some recognized Kinds but not others.
-_Avoid_: Executor name, deployment version, model version, provider version
-
-**Workflow Job Run**:
-One isolated attempt to execute a Workflow Job. It carries the execution-specific worker, lease, timing, and result and may cross its Workflow Job's dispatch boundary at most once; after crossing, the External Effect is treated as possibly applied until an authoritative outcome is durably recorded from the attempt or through reconciliation. It is cancelled when the Workflow Control Plane deliberately revokes its Execution Authority before completion, while abandoned is reserved for Worker or lease loss.
-_Avoid_: Execution Attempt, agent run
-
-**Workflow Job Run Result**:
-The typed, evidence-bearing final report produced for one Workflow Job Run by its Executor and Worker. Every Kind uses the same outcome, evidence, data, and error envelope while validating its own data contract. The outcome is succeeded when the obligation was satisfied, failed when the attempt ended with a known failure, or uncertain when an External Effect may have occurred but remains unresolved. Uncertain is never treated as probably failed. Deterministic application code validates the conclusion and evidence, applies the Workflow Job Kind's retry classification, and transitions the Run and Job; an Execution Agent may supply observations but never decides retry safety.
-_Avoid_: Agent verdict, untyped completion message
-
 **Execution Authority**:
-The temporary, revocable permission held by one current Workflow Job Run to mutate its Run or cross its Workflow Job's dispatch boundary. Cancellation, completion, failure, or abandonment revokes it durably; interrupting the live Worker or Execution Agent afterward is best-effort cleanup and is never the authority boundary.
+The temporary, revocable permission held by one current leased Attempt to report its result or participate in a policy-owned External Effect fence. Attempt completion, abandonment, cancellation, lease expiry, hard-deadline expiry, or Instance closure ends it durably; interrupting the live Worker or Execution Agent afterward is best-effort cleanup and is never the authority boundary.
 _Avoid_: Process liveness, agent ownership
 
 **Workflow Control Plane**:
-The deterministic application boundary that alone validates Workflow Commands, grants or revokes Execution Authority, applies Workflow Policies, and commits Workflow, Workflow Job, Workflow Job Run, and Domain Event transitions. Parties, Agents, Workers, adapters, reconcilers, and human reviewers submit Commands, typed results, evidence, or decisions through this boundary rather than writing lifecycle state directly.
+The deterministic application boundary that validates Workflow Commands, applies qualified Business Policies, and atomically coordinates policy-owned Workflow and Domain Event changes with kernel Instance, Step, Attempt, Wait, Signal, and Trace Event transitions. Parties, Agents, Workers, Executors, adapters, reconcilers, and human reviewers submit Commands, typed results, evidence, or decisions through this boundary rather than writing lifecycle state directly.
 _Avoid_: Agent orchestration prompt, Worker-owned state
 
-**Workflow Packet**:
-A bounded, point-in-time projection of the durable Workflow facts needed by a Conversation Agent, Worker, or Execution Agent for one Agent Run or Workflow Job Run. It may be reconstructed after process loss and never grants authority or replaces the PostgreSQL record.
-_Avoid_: Durable prompt memory, Workflow ownership, authority token
-
 **External Effect**:
-One logical, materially irreversible change outside OpenMagic requested by a side-effecting Workflow Job. Multiple independent External Effects require separate Workflow Jobs.
-_Avoid_: Tool call, Workflow Job Run
+One logical, materially irreversible change outside OpenMagic requested by a side-effecting Step. Multiple independent External Effects require separate Step occurrences.
+_Avoid_: Tool Call, Attempt
 
 **External Effect Evidence**:
-A durable, typed observation used by the Workflow Control Plane to determine whether an External Effect was applied, was not applied, or remains uncertain. It preserves its source and relationship to the relevant Workflow Job Run; application policy interprets it, while agents never turn an unsupported judgment into evidence.
+A durable, typed observation used by the Workflow Control Plane to determine whether an External Effect was applied, was not applied, or remains uncertain. It preserves its source and relationship to the relevant Step and Attempt; Business Policy interprets it, while Agents never turn an unsupported judgment into evidence.
 _Avoid_: Agent claim, unclassified tool output, retry decision
 
 **Effect-Defining Input**:
-The immutable data and artifact references that specify exactly one External Effect for a Workflow Job. A material change creates a new linked Workflow Job rather than mutating the existing input.
-_Avoid_: Mutable job payload, approval summary
+The immutable data and artifact references that specify exactly one External Effect for a Step. A material change activates a predefined Route that creates a new linked Step rather than mutating the existing input.
+_Avoid_: Mutable Step input, approval summary
 
 **Approval Grant**:
-Immutable evidence that one identified and authorized Party explicitly authorized the exact External Effect represented by one immutable Workflow Job. It binds to that Job's complete Effect-Defining Input rather than its Workflow, any Workflow Job Run, or an integration provider's account permission; it never transfers to a replacement Job. It retains a typed Cause reference to the human message or UI action that expressed approval without duplicating that content. Its usability is derived: at most one invalidating fact may end it permanently before dispatch, while the durable dispatch-started event consumes it even when the provider outcome remains uncertain. Invalidation and dispatch serialize, so whichever commits first decides whether the External Effect may start. An input-fingerprint mismatch is an integrity failure that blocks dispatch rather than something a new approval can repair. Job failure alone does not invalidate the Grant, and the Grant remains historical evidence after invalidation or consumption.
-_Avoid_: Workflow approval, Run approval, tool permission, agent consent
+Immutable evidence that one identified and authorized Party explicitly authorized the exact External Effect represented by one immutable Step. It binds to that Step's complete Effect-Defining Input rather than its Workflow, any Attempt, or an integration provider's account permission; it never transfers to a replacement Step. It retains a typed Cause reference to the human Message or UI action that expressed approval without duplicating that content. Its usability is derived: at most one invalidating fact may end it permanently before dispatch, while the durable dispatch-started Domain Event consumes it even when the provider outcome remains uncertain. Invalidation and dispatch serialize, so whichever commits first decides whether the External Effect may start. An input-fingerprint mismatch is an integrity failure that blocks dispatch rather than something a new approval can repair. Step failure alone does not invalidate the Grant, and the Grant remains historical evidence after invalidation or consumption.
+_Avoid_: Workflow approval, Attempt approval, Tool permission, Agent consent
 
 **Draft Revision**:
-The single canonical, frozen content revision published when a Draft Workflow Job succeeds. A Draft Job may have multiple Workflow Job Runs and provisional Run outputs, but it publishes at most one Draft Revision; the producing Draft Job identifies that revision. Downstream Workflow Jobs reference the Draft Revision rather than any individual Run's provisional output.
-_Avoid_: Mutable draft, provisional Run output
+The single canonical, frozen content revision published when a Draft Step succeeds. A Draft Step may have multiple Attempts and provisional results, but it publishes at most one Draft Revision; downstream Steps reference that revision rather than any individual Attempt result.
+_Avoid_: Mutable draft, provisional Attempt result
 
-**Revision Job**:
-A new immutable Workflow Job linked to an earlier Workflow Job after a material change to Effect-Defining Input. When the earlier Job is safely undispatched, the Revision Job replaces its obligation and the earlier Job is cancelled; otherwise it represents an additional External Effect and cannot erase or reverse the earlier one.
-_Avoid_: Mutated job, overwritten job
+**Revision Step**:
+A new immutable Step occurrence created through a predefined revision Route after a material change to Effect-Defining Input. When the earlier Step is safely undispatched, the Revision Step replaces its obligation; otherwise it represents an additional External Effect and cannot erase or reverse the earlier one.
+_Avoid_: Mutated Step, overwritten Step, Revision Job
 
 **Correction Workflow**:
-A new Workflow linked to a terminal Workflow when a Party chooses to pursue a distinct corrective business objective after an earlier External Effect is confirmed. Its Workflow Jobs create new External Effects rather than retrying or replacing completed work, and it never reopens or changes the original Workflow.
-_Avoid_: Retry, Revision Job, reopened Workflow
+A new Workflow linked to a terminal Workflow when a Party chooses to pursue a distinct corrective business objective after an earlier External Effect is confirmed. Its Steps create new External Effects rather than retrying or replacing completed work, and it never reopens or changes the original Workflow or Instance.
+_Avoid_: Retry, Revision Step, reopened Workflow
 
-**Reconciliation Job**:
-An externally read-only but internally stateful and auditable Workflow Job that determines whether another Workflow Job's External Effect occurred after an ambiguous Run. Its relationship to the original Workflow Job is the authoritative representation of unresolved effect certainty.
-_Avoid_: Retry, effect replay
+**Reconciliation Step**:
+An externally read-only but internally stateful and auditable Step that determines whether another Step's External Effect occurred after an ambiguous Attempt result. Its policy-owned relationship to the original Step is the authoritative representation of unresolved effect certainty.
+_Avoid_: Retry, effect replay, Reconciliation Job
 
 **Worker**:
-A replaceable process that claims and performs a Workflow Job Run. It does not own the Workflow Job or Workflow.
-_Avoid_: Job owner, agent
+A replaceable process that claims and performs an Attempt. It does not own the Step, Instance, or Workflow.
+_Avoid_: Step owner, Agent
 
 **Executor**:
-The trusted code a Worker uses to perform one Workflow Job Run, either a deterministic adapter or a fresh Execution Agent runtime selected by the Workflow Job Kind. It may perform Tool Calls and produce a Workflow Job Run Result, but it cannot commit lifecycle state.
-_Avoid_: Worker, Workflow Job, caller-selected handler
+The trusted code a Worker uses to perform one Attempt, either a deterministic adapter or a fresh Execution Agent runtime selected by the pinned Step Template. It may perform Tool Calls and produce a typed Attempt result, but it cannot commit lifecycle state or select its own retry disposition.
+_Avoid_: Worker, Step, caller-selected handler
 
 **Execution Agent**:
-An optional AI reasoning implementation used within a Workflow Job Run. It is neither the Worker nor the durable unit of work.
-_Avoid_: Workflow, Workflow Job, Worker
+An optional AI reasoning implementation used within an Attempt. It is neither the Worker nor the durable unit of work.
+_Avoid_: Workflow, Step, Worker
 
 **Tool Call**:
-One operation an Executor performs during a Workflow Job Run, such as invoking Composio Gmail send. It is not the durable Workflow Job, the attempt, or the final Workflow Job Run Result; an externally irreversible Tool Call may cross the Workflow Job's External Effect dispatch boundary.
-_Avoid_: Workflow Job, Workflow Job Run, External Effect
+One operation an Executor performs during an Attempt, such as invoking Composio Gmail send. It is not the durable Step, Attempt, or final Attempt result; an externally irreversible Tool Call may cross the Step's policy-owned External Effect dispatch boundary.
+_Avoid_: Step, Attempt, External Effect
 
 **Actor**:
 The Party, System, or authorized execution that performed the action recorded by a Domain Event. An unknown Actor is reserved for incomplete legacy provenance, not normal automation.
 _Avoid_: Initiator, cause
 
 **Cause**:
-The Command, Message, schedule, prior Domain Event, job, or other typed source that directly led to a Domain Event.
+The Command, Message, Trigger, prior Domain Event, Step, or other typed source that directly led to a Domain Event.
 _Avoid_: Actor, initiator
 
 **Domain Event**:
@@ -297,12 +289,12 @@ The integer identifying the compatibility contract of an Event Payload independe
 _Avoid_: Event Type suffix, deployment version
 
 **Trace Event**:
-Kernel-owned operational history about execution mechanics. It carries no application-domain meaning.
-_Avoid_: Domain Event, audit log, Message
+An immutable, kernel-owned record of one successful state mutation, ordered by a strictly increasing Instance-local sequence and carrying its typed source identity, input digest, schema version, and committed receipt. Trace Events provide operational history and idempotent replay but are not the source of current state and carry no application-domain meaning.
+_Avoid_: Domain Event, event-sourced state, timestamp order, Message
 
 **Signal**:
-A kernel wake-up or correlation primitive.
-_Avoid_: Domain Event, Delivery, Message
+An accepted, durable, typed kernel correlation record that targets and satisfies one exact Wait. It is persisted atomically with Wait satisfaction and predefined Route materialization; exact Signal identity replays the recorded result, conflicting reuse fails, and rejected or early input is never buffered as a Signal.
+_Avoid_: Domain Event, Delivery, Message, pending subscription
 
 **Delivery**:
 A durable obligation to communicate one Domain Event to an exact Delivery Destination by appending at most one Message. Delivery ID and Message ID remain distinct; multiple Messages require separate Deliveries.
