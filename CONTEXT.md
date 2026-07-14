@@ -24,16 +24,104 @@ _Avoid_: Anonymous user, guest Party
 A non-destructive relationship from a Provisional Party to the established Party it was later verified to represent. Historical references remain on the Provisional Party, while future identity resolution uses the established Party.
 _Avoid_: Party merge, rewritten Actor
 
-**Interaction**:
-A channel-scoped sequence of messages with stable continuity, such as one simulated SMS conversation. Its sender identifier may resolve a Party, but the Interaction itself grants no Workflow authority and provides no step-up proof.
-_Avoid_: Account session, global login, authorization role
+**Thread**:
+A durable, ordered conversation continuity whose Messages may come from Parties, Systems, Templates, or Agent Runs. It has exactly one immutable Channel Reference and grants no identity proof, Workflow authority, approval, or execution authority.
+_Avoid_: Interaction, account session, global login, authorization role
+
+**OpenMagic Thread**:
+The product-facing name for a Thread. Internal domain contracts use Thread.
+_Avoid_: Chat session, Interaction
+
+**Thread ID**:
+The immutable identity that correlates Messages, Deliveries, Agent Runs, Verification Challenges, and one Channel Reference to a Thread.
+_Avoid_: Interaction ID, latest conversation, Party ID
+
+**Channel Reference**:
+The immutable typed reference to the one external conversation represented by a Thread, such as an SMS conversation or Slack thread. Different external conversations create different Threads even when they resolve to the same Party or concern the same Workflow.
+_Avoid_: Channel Binding, Thread identity, Party Identifier
+
+**Message**:
+An immutable user-visible item appended to a Thread with an independent Message ID, typed Message Author, Message Sequence, content, Message Source, and descriptive creation timestamp.
+_Avoid_: Event, Notification, mutable chat entry
+
+**Message ID**:
+The immutable identity of one Message, independent of its Thread, Delivery, Agent Run, or external channel identity.
+_Avoid_: Delivery ID, Agent Run ID, sequence number
+
+**Message Sequence**:
+The Thread-local number assigned atomically when a Message is appended and used as the authoritative order within that Thread. A Message timestamp is descriptive and does not determine order.
+_Avoid_: Timestamp order, global message order
+
+**Message Author**:
+The typed origin of a Message, such as a Party, Agent, or System.
+_Avoid_: Actor, sender string
+
+**Message Source**:
+The typed stable identity that caused one Message append and provides its idempotency scope. Source kinds are `channel`, `delivery`, `agent_run`, and `system`; a Message produced for an Agent Delivery uses the Delivery as its source while the Agent Run remains execution provenance.
+_Avoid_: Message Author, timestamp, correlation ID
+
+**Thread Context**:
+Reconstructed Thread history supplied to an Agent Run from the exact Thread through an immutable Message Sequence cutoff. It excludes later Messages, other Threads, process memory, and mutable summaries, and it grants no authority.
+_Avoid_: Prompt memory, Workflow Packet, authority token
+
+**Agent**:
+A configured reasoning component distinct from its executions, runtime process, and Threads.
+_Avoid_: Agent Run, Agent Runtime, Thread
+
+**Conversation Agent**:
+The user-facing Agent role that reasons within a Thread.
+_Avoid_: Interaction Agent, Workflow, Thread owner
+
+**Agent Runtime**:
+The disposable in-process implementation that executes an Agent. It has no durable identity or authority of its own.
+_Avoid_: Agent, Agent Run, Worker
+
+**Agent Run**:
+One bounded contextual execution of an Agent against an exact Thread ID and immutable Agent Run Input. It has durable identity and belongs to one Delivery Attempt, but it has no independent delivery authority.
+_Avoid_: Run, Workflow Job Run, kernel Attempt
+
+**Agent Run ID**:
+The durable identity of one Agent Run, distinct from Delivery ID and Delivery Attempt identity.
+_Avoid_: Run ID, Delivery Attempt ID, runtime instance ID
+
+**Agent Run Input**:
+Immutable typed input containing a versioned Agent and typed task, exact Thread ID and Thread Context cutoff, bounded Domain Event context, audience context, and locale. Delivery Policy creates it without free-form prompts or unrestricted database access.
+_Avoid_: Prompt, Event Payload, mutable context
+
+**Agent Run Result**:
+The typed result of one Agent Run. For Agent Delivery it is candidate Message content that only the current Delivery Attempt may append.
+_Avoid_: Message, Workflow Job Run Result, free-form agent output
+
+**Command**:
+A typed request expressing intent to change application state or begin work.
+_Avoid_: Operation Variant, event, prompt instruction
+
+**Command Type**:
+The stable discriminator identifying the action requested by a Command.
+_Avoid_: Operation Variant Type, Event Type
+
+**Workflow Command**:
+A Command submitted to the Workflow Control Plane. Not every Command targets a Workflow.
+_Avoid_: Workflow Event, general Command Handler
+
+**Command Handler**:
+The deterministic application boundary that validates a Command, applies the relevant Policies, and commits the result.
+_Avoid_: Agent tool, prompt router
+
+**Policy**:
+A deterministic rule used to make an application decision and qualified by its owner or purpose, such as Workflow Policy, Delivery Policy, or Approval Policy.
+_Avoid_: Global Policy, agent judgment
+
+**Policy Decision**:
+The typed output of evaluating a Policy. It becomes durable history only when committed as a Domain Event.
+_Avoid_: Domain Event, agent verdict
 
 **Verification Challenge**:
-A durable, single-use request for a Party to prove current control of an on-file identifier through a second channel. It binds one Party, Interaction, protected Workflow, purpose, and exact waiting protected operation, expires after 10 minutes, and creates delivery through a typed External Effect Job in a separate system Workflow. Verification delivery therefore cannot change the protected business Workflow's cancellation or completion semantics.
+A durable, single-use request for a Party to prove current control of an on-file identifier through a second channel. It binds one Party, Thread, protected Workflow, purpose, and exact waiting protected Command, expires after 10 minutes, and creates delivery through a typed External Effect Job in a separate system Workflow. Verification delivery therefore cannot change the protected business Workflow's cancellation or completion semantics.
 _Avoid_: Verification tool, global Party verification, Workflow authority grant
 
 **Verification Session**:
-The short-lived assurance established when a Verification Challenge succeeds. For 15 minutes, it proves control of the current on-file email for the same Party and Interaction, so another protected operation does not require another code. Every protected operation still revalidates its own Workflow authority, lifecycle, and exact Approval Grant requirements. Expiry blocks new protected operations, but it does not erase private facts already shown in that Interaction's transcript.
+The short-lived assurance established when a Verification Challenge succeeds. For 15 minutes, it proves control of the current on-file email for the same Party and Thread, so another protected Command does not require another code. Every protected Command still revalidates its own Workflow authority, lifecycle, and exact Approval Grant requirements. Expiry blocks new protected Commands, but it does not erase private facts already shown in that Thread.
 _Avoid_: Login session, reusable approval, role assignment
 
 **Workflow**:
@@ -101,11 +189,11 @@ The temporary, revocable permission held by one current Workflow Job Run to muta
 _Avoid_: Process liveness, agent ownership
 
 **Workflow Control Plane**:
-The deterministic application boundary that alone validates commands, grants or revokes Execution Authority, applies Workflow Job policy, and commits Workflow, Workflow Job, Workflow Job Run, and Workflow Event transitions. Parties, agents, Workers, adapters, reconcilers, and human reviewers submit commands, typed results, evidence, or decisions through this boundary rather than writing lifecycle state directly.
+The deterministic application boundary that alone validates Workflow Commands, grants or revokes Execution Authority, applies Workflow Policies, and commits Workflow, Workflow Job, Workflow Job Run, and Domain Event transitions. Parties, Agents, Workers, adapters, reconcilers, and human reviewers submit Commands, typed results, evidence, or decisions through this boundary rather than writing lifecycle state directly.
 _Avoid_: Agent orchestration prompt, Worker-owned state
 
 **Workflow Packet**:
-A bounded, point-in-time projection of the durable Workflow facts needed by an Interaction Agent, Worker, or Execution Agent for one interaction or Workflow Job Run. It may be reconstructed after process loss and never grants authority or replaces the PostgreSQL record.
+A bounded, point-in-time projection of the durable Workflow facts needed by a Conversation Agent, Worker, or Execution Agent for one Agent Run or Workflow Job Run. It may be reconstructed after process loss and never grants authority or replaces the PostgreSQL record.
 _Avoid_: Durable prompt memory, Workflow ownership, authority token
 
 **External Effect**:
@@ -157,21 +245,105 @@ One operation an Executor performs during a Workflow Job Run, such as invoking C
 _Avoid_: Workflow Job, Workflow Job Run, External Effect
 
 **Actor**:
-The Party, System, or Workflow Job Run that performed the action recorded by a Workflow Event. An unknown Actor is reserved for incomplete legacy provenance, not normal automation.
+The Party, System, or authorized execution that performed the action recorded by a Domain Event. An unknown Actor is reserved for incomplete legacy provenance, not normal automation.
 _Avoid_: Initiator, cause
 
 **Cause**:
-The message, schedule, prior event, job, or other typed source that directly led to a Workflow Event.
+The Command, Message, schedule, prior Domain Event, job, or other typed source that directly led to a Domain Event.
 _Avoid_: Actor, initiator
 
-**Workflow Event**:
-An immutable fact about a meaningful Workflow transition, decision, or outcome, recorded with separate typed Actor and Cause references.
-_Avoid_: Log line, notification
+**Domain Event**:
+An immutable, policy-owned fact about something meaningful that happened in the application domain, recorded with a typed Event Envelope and Event Payload.
+_Avoid_: Business Event, Workflow Event, Trace Event, log line, Delivery
 
-**Notification**:
-A durable delivery obligation created when a Workflow Event or due reminder must be communicated to a destination. It has delivery and acknowledgement state independent of the immutable fact that caused it. A Workflow Notification wakes a fresh Interaction Agent with durable identifiers so that agent reads a new Workflow Packet rather than receiving free-form execution output.
-_Avoid_: Workflow Event, Trigger, agent result injection
+**Event Type**:
+A stable lowercase dotted identifier describing a completed fact, such as `renewal.draft.ready`. Payload versioning is not part of the Event Type.
+_Avoid_: Command Type, version-suffixed event name
+
+**Event Envelope**:
+The common immutable metadata for a Domain Event, including event ID, Event Type, Event Schema Version, timestamp, optional Workflow ID, Actor, Cause, and Event Payload.
+_Avoid_: Event Payload, rendered Message
+
+**Event Payload**:
+The immutable, typed facts specific to one Event Type. It contains neither prose prompts nor rendered Messages.
+_Avoid_: Agent Run Input, Template Input, untyped data bag
+
+**Event Schema Version**:
+The integer identifying the compatibility contract of an Event Payload independently of its Event Type. Breaking payload changes increment it, unknown versions are rejected, and referenced historical versions remain readable.
+_Avoid_: Event Type suffix, deployment version
+
+**Trace Event**:
+Kernel-owned operational history about execution mechanics. It carries no application-domain meaning.
+_Avoid_: Domain Event, audit log, Message
+
+**Signal**:
+A kernel wake-up or correlation primitive.
+_Avoid_: Domain Event, Delivery, Message
+
+**Delivery**:
+A durable obligation to communicate one Domain Event to an exact Delivery Destination by appending at most one Message. Delivery ID and Message ID remain distinct; multiple Messages require separate Deliveries.
+_Avoid_: Notification, Domain Event, Trigger
+
+**Suppressed Delivery**:
+A terminal Delivery whose Message was intentionally withheld because Delivery Policy confirmed that its Audience was no longer authorized. It is neither delivered nor an operational failure, cannot retry or revive, and creates no Delivery Acknowledgement.
+_Avoid_: Failed Delivery, cancelled Message, temporary authorization error
+
+**Delivery Destination**:
+The typed destination for Delivery content. A conversation Delivery contains one exact immutable Thread ID.
+_Avoid_: Audience, latest conversation, Party ID
+
+**Audience**:
+The intended Party or recipient role for a Delivery, distinct from its Delivery Destination.
+_Avoid_: Delivery Destination, Thread ID
+
+**Content Mode**:
+The Delivery Policy-selected method for producing content, either `template` or `agent`.
+_Avoid_: Presentation Mode, deterministic mode, contextual mode
+
+**Template Delivery**:
+A Delivery that freezes a Template key, separate version, locale, and immutable typed Template Input. Its Message content is produced without contextual reasoning or an LLM.
+_Avoid_: Deterministic Message, Agent Delivery
+
+**Agent Delivery**:
+A Delivery permitted only when producing its Message requires prior Thread meaning that no suitable Template can express. Its restricted Conversation Agent Run may produce one candidate Message but cannot select destination or Audience, make domain decisions, submit Commands, or perform External Effects.
+_Avoid_: Template Delivery, context-free agent result
+
+**Template**:
+An immutable, version-addressed specification for deterministic Message generation whose referenced version remains available while a Delivery can execute.
+_Avoid_: Prompt, mutable formatter
+
+**Template Input**:
+The typed immutable facts supplied to a Template Renderer for one Template Delivery.
+_Avoid_: Event Payload, Agent Run Input, mutable Workflow projection
+
+**Template Renderer**:
+The pure deterministic function that produces Message content from a Template and Template Input.
+_Avoid_: LLM, Conversation Agent
+
+**Contextual Reasoning**:
+Delivery Policy-authorized use of an Agent Run after rehydrating the exact destination Thread.
+_Avoid_: Default rendering, context-free agent invocation
+
+**Delivery Attempt**:
+A durably identified, leased attempt to complete a Delivery and the fence for its Worker's authority. At most one Attempt is running for a Delivery; lease loss abandons it, stale results are rejected, and retries create new Delivery Attempts rather than new Deliveries.
+_Avoid_: Delivery, Workflow Job Run, kernel Attempt
+
+**Delivery Retry Policy**:
+The immutable versioned policy that gives a Delivery its finite attempt budget, backoff schedule, and deterministic classification of typed failures as retryable or terminal. Every claimed Attempt consumes the budget, while Workers and Agents never choose retry safety.
+_Avoid_: Agent retry judgment, mutable retry settings, infinite retry
+
+**Delivery Worker**:
+A disposable Worker that claims and performs Delivery Attempts without owning the Delivery or Thread.
+_Avoid_: Notification Worker, Conversation Agent
+
+**Delivery Acknowledgement**:
+The atomic transition that appends the intended Message, succeeds the current Delivery Attempt, and marks the Delivery delivered with the resulting Message identity. It is idempotent for the successful Attempt and does not prove that a human read the Message.
+_Avoid_: Recipient Acknowledgement, delivery claim
+
+**Recipient Acknowledgement**:
+Optional later evidence that a recipient read, accepted, or responded to a Message, distinct from Delivery Acknowledgement. It does not control Delivery retries, acknowledgement, or completion.
+_Avoid_: Delivery Acknowledgement
 
 **Trigger**:
-A durable schedule that determines when a Notification or typed Workflow work should become due, including recurrence where applicable. It owns time and recurrence, not execution instructions, business work, or delivery state.
-_Avoid_: Workflow Event, Notification, raw named-agent instruction
+A durable schedule that determines when a Delivery or typed Workflow work should become due, including recurrence where applicable. It owns time and recurrence, not execution instructions, business work, or delivery state.
+_Avoid_: Domain Event, Delivery, raw named-agent instruction
