@@ -77,7 +77,7 @@ The disposable in-process implementation that executes an Agent. It has no durab
 _Avoid_: Agent, Agent Run, Worker
 
 **Agent Run**:
-One bounded contextual execution of an Agent against an exact Thread ID and immutable Agent Run Input. It has durable identity and belongs to one Delivery Attempt, but it has no independent delivery authority.
+One bounded contextual execution of an Agent against an exact Thread ID and immutable Agent Run Input. Every Agent Run reconstructs Thread Context through an immutable Message Sequence cutoff, while its separate durable identity does not create a new conversational continuity. An Agent Run started for Agent Delivery belongs to one Delivery Attempt and has no independent delivery authority.
 _Avoid_: Run, Workflow Job Run, kernel Attempt
 
 **Agent Run ID**:

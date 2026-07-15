@@ -28,17 +28,43 @@ is an in-memory prototype and does not call the existing demo API.
 The canvas folds the complete interaction into one editable view:
 
 ```text
-Thread -> Conversation Agent -> Command + Policy -> Workflow Kernel
-                                                   <-> Executor
-                                                    -> Domain Event
-                                                    -> Delivery
-Delivery -> deterministic template ---------------------> Thread
-Delivery -> contextual Agent rendering -> Conversation Agent -> Thread
-Thread confirmation -> Conversation Agent -> Command + Policy -> exact Wait
+Thread <-> Conversation Agent
+                | typed Command
+                v
+       Workflow Control Plane -> Workflow Kernel <-> Workflow Worker
+                |                                      |
+                |                                      v
+                |                               Executor Interface
+                |                                /      |       \
+                |                    deterministic   Agent   external effect
+                |
+                +-> Domain Event Record + Delivery Record
+                                            |
+                                            v
+                                      Delivery Worker
+
+Template Delivery: Delivery Worker renders frozen Template -> Thread
+Agent Delivery:    Delivery Worker -> Conversation Agent -> Thread
 ```
 
-The return paths are conversation and delivery cycles. They do not introduce
-runtime graph cycles, arbitrary loops, or mutable Workflow structure.
+Every Agent Run reconstructs immutable Thread Context. The Conversation Agent
+and Thread provide conversational continuity while each bounded Agent Run keeps
+its own durable execution identity. Agent Delivery returns candidate content to
+the current Delivery Attempt, and Delivery retains authority to append the final
+Message. The return paths do not introduce runtime graph cycles, arbitrary
+loops, or mutable Workflow structure.
+
+The visual grammar distinguishes system nature. Stacked square records are
+durable, rounded cards are disposable runtimes, double borders mark an
+Interface, dashed cards mark optional runtimes, and dotted cards sit outside
+OpenMagic. Blue routes are calls, pink routes are returns, orange routes are
+atomic commits, and teal routes are claims or leases.
+
+The presentation intentionally folds the pure Template Renderer into the
+Delivery Worker card. The renderer remains a separate contract, but it is too
+low-level to earn a canvas primitive. Numbered active-route pills provide a
+short talk-through order. A toggleable white trace panel shows every committed
+trace entry in sequence and explains the current state in plain language.
 
 Cards may be dragged, the canvas may be panned or zoomed, and connected arrows
 reroute immediately. Layout can be locked or organized back to the reviewed
@@ -58,7 +84,8 @@ external conversation
   -> application Policy authorizes the business transition
   -> generic kernel progresses the pinned Definition
   -> application records a Domain Event and durable Delivery
-  -> deterministic template or bounded Agent Run renders content
+  -> Delivery Worker renders a frozen Template or invokes a same-Thread Conversation Agent Run
+  -> Agent candidate content returns to the current Delivery Attempt
   -> Delivery appends idempotently at the next Thread Sequence
   -> acknowledgement targets the same immutable Channel Reference
 ```

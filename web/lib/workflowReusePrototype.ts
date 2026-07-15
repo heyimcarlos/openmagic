@@ -60,7 +60,7 @@ export interface PrototypeDelivery {
   mode: 'template' | 'agent';
   contentKey: string;
   threadId: string;
-  state: 'queued' | 'delivering' | 'delivered';
+  state: 'queued' | 'running' | 'ready' | 'appending' | 'delivered';
   attemptNumber: number;
   messageSequence?: number;
   agentRunId?: string;
@@ -442,12 +442,24 @@ function advanceIngress(state: PrototypeState): PrototypeState {
     const mode = scenario.interpretationMode === 'contextual_agent'
       ? 'Bounded Agent Run rehydrated only this exact Thread'
       : 'Typed deterministic adapter read the inbound Message';
-    let next = { ...state, ingressIndex: 2 };
+    const messageSequence = state.messageSequence + 1;
+    const agentRunId = `agent-run-${state.scenarioKey}-conversation-1`;
+    let next = { ...state, ingressIndex: 2, messageSequence };
     next = appendTrace(next, [
       {
         layer: 'application',
         type: 'thread_context.prepared',
         detail: `${mode} through immutable sequence ${scenario.inboundMessage.sequence}; context grants no authority`,
+      },
+      {
+        layer: 'application',
+        type: 'agent_run.completed',
+        detail: `${agentRunId} used the same Conversation Agent and exact Thread through sequence ${scenario.inboundMessage.sequence}`,
+      },
+      {
+        layer: 'thread',
+        type: 'message.appended',
+        detail: `Source agent_run:${agentRunId} continued the same Thread at sequence ${messageSequence}`,
       },
       {
         layer: 'command',
@@ -648,7 +660,7 @@ function advanceDelivery(state: PrototypeState): PrototypeState {
     const attemptNumber = delivery.attemptNumber + 1;
     deliveries[index] = {
       ...delivery,
-      state: 'delivering',
+      state: 'running',
       attemptNumber,
       agentRunId: delivery.mode === 'agent' ? `agent-run-${delivery.id}-${attemptNumber}` : undefined,
     };
@@ -661,16 +673,43 @@ function advanceDelivery(state: PrototypeState): PrototypeState {
       delivery.mode === 'agent'
         ? {
             layer: 'application',
+            type: 'agent_run.started',
+            detail: `Same Conversation Agent invoked for exact Thread ${delivery.threadId} through sequence ${state.messageSequence}`,
+          }
+        : {
+            layer: 'delivery',
+            type: 'delivery.rendering_started',
+            detail: `Delivery Worker started rendering ${delivery.contentKey} without an LLM`,
+          },
+    ];
+    return appendTrace({ ...state, deliveries }, attemptTrace);
+  }
+  if (delivery.state === 'running') {
+    deliveries[index] = {
+      ...delivery,
+      state: delivery.mode === 'agent' ? 'ready' : 'appending',
+    };
+    return appendTrace({ ...state, deliveries }, [
+      delivery.mode === 'agent'
+        ? {
+            layer: 'application',
             type: 'agent_run.completed',
-            detail: `Agent Run rehydrated exact Thread ${delivery.threadId} through sequence ${state.messageSequence}; candidate content grants no delivery authority`,
+            detail: `${delivery.agentRunId} returned candidate content to Delivery Attempt ${delivery.attemptNumber}; the Agent Run has no append authority`,
           }
         : {
             layer: 'delivery',
             type: 'delivery.rendered_deterministically',
-            detail: `${delivery.contentKey} rendered without an LLM`,
+            detail: `${delivery.contentKey} rendered without an LLM and is ready for the Delivery-owned append`,
           },
-    ];
-    return appendTrace({ ...state, deliveries }, attemptTrace);
+    ]);
+  }
+  if (delivery.state === 'ready') {
+    deliveries[index] = { ...delivery, state: 'appending' };
+    return appendTrace({ ...state, deliveries }, [{
+      layer: 'delivery',
+      type: 'delivery.candidate_accepted',
+      detail: `Current Delivery Attempt accepted candidate content from ${delivery.agentRunId}`,
+    }]);
   }
   const messageSequence = state.messageSequence + 1;
   deliveries[index] = { ...delivery, state: 'delivered', messageSequence };
@@ -693,13 +732,14 @@ export function prototypeReducer(state: PrototypeState, action: PrototypeAction)
   const current = scenario.stages[state.activeIndex];
   switch (action.type) {
     case 'advance':
-      return advanceDelivery(
-        state.ingressIndex < 3
-          ? advanceIngress(state)
-          : state.closed
-            ? state
-            : completeCurrent(state),
-      );
+      if (state.deliveries.some((delivery) => delivery.state !== 'delivered')) {
+        return advanceDelivery(state);
+      }
+      return state.ingressIndex < 3
+        ? advanceIngress(state)
+        : state.closed
+          ? state
+          : completeCurrent(state);
     case 'reset':
       return createPrototypeState(action.scenarioKey ?? state.scenarioKey);
     case 'select':
