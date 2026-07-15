@@ -216,7 +216,7 @@ def test_verification_receipts_and_code_capability_reject_invalid_public_states(
     with pytest.raises(ValueError, match="inconsistent outcomes"):
         SubmitVerificationCodeResult(
             verification_outcome="wrong_party",
-            protected_outcome="wrong_thread",
+            protected_outcome="wrong_party",
             challenge_id=uuid4(),
             protected_command_id=uuid4(),
             session_id=None,
@@ -225,31 +225,35 @@ def test_verification_receipts_and_code_capability_reject_invalid_public_states(
 
 
 @pytest.mark.parametrize(
-    "outcome",
+    ("protected_outcome", "verification_outcome"),
     [
-        "approval_required",
-        "authority_revoked",
-        "identifier_revoked",
-        "workflow_closed",
-        "wrong_party",
-        "wrong_purpose",
-        "wrong_thread",
+        ("approval_required", "approval_required"),
+        ("authority_revoked", "authority_revoked"),
+        ("identifier_revoked", "identifier_revoked"),
+        ("workflow_closed", "workflow_closed"),
+        ("wrong_party", "protected_wrong_party"),
+        ("wrong_purpose", "protected_wrong_purpose"),
+        ("wrong_thread", "protected_wrong_thread"),
     ],
 )
-def test_terminal_policy_receipts_preserve_every_named_rejection(outcome: str) -> None:
-    decoded_outcome = json.loads(json.dumps(outcome))
+def test_terminal_policy_receipts_preserve_every_named_rejection(
+    protected_outcome: str,
+    verification_outcome: str,
+) -> None:
+    decoded_protected_outcome = json.loads(json.dumps(protected_outcome))
+    decoded_verification_outcome = json.loads(json.dumps(verification_outcome))
 
     receipt = SubmitVerificationCodeResult(
-        verification_outcome=decoded_outcome,
-        protected_outcome=decoded_outcome,
+        verification_outcome=decoded_verification_outcome,
+        protected_outcome=decoded_protected_outcome,
         challenge_id=uuid4(),
         protected_command_id=uuid4(),
         session_id=None,
         authorized_delivery_id=None,
     )
 
-    assert receipt.verification_outcome == outcome
-    assert receipt.protected_outcome == outcome
+    assert receipt.verification_outcome == verification_outcome
+    assert receipt.protected_outcome == protected_outcome
 
 
 def test_verification_code_is_single_use_replay_safe_and_serialized() -> None:

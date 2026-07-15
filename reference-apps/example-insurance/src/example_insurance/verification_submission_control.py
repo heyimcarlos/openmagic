@@ -29,6 +29,7 @@ from example_insurance.verification_commands import (
     SubmitVerificationCodeResult,
     VerificationCodeOutcome,
     protected_policy_rejection,
+    verification_rejection,
 )
 from example_insurance.verification_policy import (
     MAX_FAILED_CODE_ATTEMPTS,
@@ -225,7 +226,7 @@ class VerificationSubmissionControl:
 
     @staticmethod
     def _verification_rejection(outcome: ProtectedPolicyRejection) -> VerificationCodeOutcome:
-        return outcome
+        return verification_rejection(outcome)
 
     @staticmethod
     def _terminal_protected_outcome(value: str | None) -> ProtectedPolicyRejection:

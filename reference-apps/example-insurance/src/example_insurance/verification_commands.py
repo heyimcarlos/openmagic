@@ -32,6 +32,9 @@ VerificationCodeOutcome = Literal[
     "identifier_revoked",
     "authority_revoked",
     "workflow_closed",
+    "protected_wrong_party",
+    "protected_wrong_thread",
+    "protected_wrong_purpose",
     "wrong_party",
     "wrong_protected_command",
     "wrong_thread",
@@ -47,21 +50,6 @@ ChallengeTerminalResolution = (
     ]
 )
 ProtectedCommandOutcome = Literal["authorized"] | ChallengeTerminalResolution
-_PROTECTED_POLICY_REJECTIONS = {
-    "approval_required",
-    "authority_revoked",
-    "identifier_revoked",
-    "workflow_closed",
-    "wrong_party",
-    "wrong_purpose",
-    "wrong_thread",
-}
-_TERMINAL_ONLY_VERIFICATION_REJECTIONS = {
-    "approval_required",
-    "authority_revoked",
-    "identifier_revoked",
-    "workflow_closed",
-}
 
 
 def protected_policy_rejection(value: object) -> ProtectedPolicyRejection:
@@ -123,6 +111,12 @@ def verification_code_outcome(value: object) -> VerificationCodeOutcome:
         return "authority_revoked"
     if value == "workflow_closed":
         return "workflow_closed"
+    if value == "protected_wrong_party":
+        return "protected_wrong_party"
+    if value == "protected_wrong_thread":
+        return "protected_wrong_thread"
+    if value == "protected_wrong_purpose":
+        return "protected_wrong_purpose"
     if value == "wrong_party":
         return "wrong_party"
     if value == "wrong_protected_command":
@@ -134,6 +128,36 @@ def verification_code_outcome(value: object) -> VerificationCodeOutcome:
     if value == "wrong_purpose":
         return "wrong_purpose"
     raise ValueError("Verification receipt has an invalid outcome")
+
+
+def verification_rejection(outcome: ProtectedPolicyRejection) -> VerificationCodeOutcome:
+    if outcome == "wrong_party":
+        return "protected_wrong_party"
+    if outcome == "wrong_thread":
+        return "protected_wrong_thread"
+    if outcome == "wrong_purpose":
+        return "protected_wrong_purpose"
+    return outcome
+
+
+def verification_terminal_protected_outcome(
+    outcome: VerificationCodeOutcome,
+) -> ProtectedPolicyRejection | None:
+    if outcome == "approval_required":
+        return "approval_required"
+    if outcome == "authority_revoked":
+        return "authority_revoked"
+    if outcome == "identifier_revoked":
+        return "identifier_revoked"
+    if outcome == "workflow_closed":
+        return "workflow_closed"
+    if outcome == "protected_wrong_party":
+        return "wrong_party"
+    if outcome == "protected_wrong_thread":
+        return "wrong_thread"
+    if outcome == "protected_wrong_purpose":
+        return "wrong_purpose"
+    return None
 
 
 @dataclass(frozen=True)
@@ -277,17 +301,14 @@ class SubmitVerificationCodeResult:
             return
         if self.session_id is not None or self.authorized_delivery_id is not None:
             raise ValueError("A rejected verification receipt cannot contain assurance IDs")
-        if self.verification_outcome in _TERMINAL_ONLY_VERIFICATION_REJECTIONS:
-            if self.protected_outcome != self.verification_outcome:
+        terminal_outcome = verification_terminal_protected_outcome(self.verification_outcome)
+        if terminal_outcome is not None:
+            if self.protected_outcome != terminal_outcome:
                 raise ValueError("A terminal verification receipt needs its protected outcome")
             return
         if self.protected_outcome is None:
             return
-        if (
-            self.verification_outcome not in _PROTECTED_POLICY_REJECTIONS
-            or self.protected_outcome != self.verification_outcome
-        ):
-            raise ValueError("A rejected verification receipt has inconsistent outcomes")
+        raise ValueError("A rejected verification receipt has inconsistent outcomes")
 
 
 def _validate_lineage(actor: Actor, cause: Cause) -> None:
@@ -371,4 +392,6 @@ __all__ = [
     "validate_protected_request",
     "validate_provision",
     "verification_code_outcome",
+    "verification_rejection",
+    "verification_terminal_protected_outcome",
 ]
