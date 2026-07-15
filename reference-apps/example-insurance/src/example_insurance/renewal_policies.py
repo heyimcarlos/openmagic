@@ -27,7 +27,7 @@ class RecoveryDecision:
 
 class RenewalWorkflowPolicy:
     definition_key = "example_insurance.renewal_outreach"
-    definition_version = 1
+    definition_version = 2
 
     def facts_succeeded(
         self,
@@ -42,20 +42,44 @@ class RenewalWorkflowPolicy:
             route_input={
                 "workflow_id": str(workflow_id),
                 "thread_id": str(thread_id),
+                "revision_instruction": "",
                 **observation,
             },
         )
 
-    def draft_succeeded(self, *, workflow_id: UUID, draft_id: UUID) -> RouteDecision:
+    def draft_succeeded(
+        self,
+        *,
+        workflow_id: UUID,
+        draft_id: UUID,
+        presentation_fingerprint: str,
+        recipient_email: str,
+        subject: str,
+        body: str,
+    ) -> RouteDecision:
         return RouteDecision(
             outcome_route="await_approval",
-            output={"draft_id": str(draft_id)},
-            route_input={"workflow_id": str(workflow_id), "draft_id": str(draft_id)},
+            output={
+                "draft_id": str(draft_id),
+                "presentation_fingerprint": presentation_fingerprint,
+            },
+            route_input={
+                "workflow_id": str(workflow_id),
+                "draft_id": str(draft_id),
+                "presentation_fingerprint": presentation_fingerprint,
+                "recipient_email": recipient_email,
+                "subject": subject,
+                "body": body,
+            },
         )
 
     @staticmethod
     def expired_attempt(*, template_key: str, attempt_number: int) -> RecoveryDecision:
-        if template_key not in {"gather_renewal_facts", "draft_renewal_email"}:
+        if template_key not in {
+            "gather_renewal_facts",
+            "draft_renewal_email",
+            "reconcile_renewal_email",
+        }:
             return RecoveryDecision(
                 action="fail",
                 failure={"class": "unknown_step_template"},
@@ -100,11 +124,62 @@ class RenewalDeliveryPolicy:
 
 
 class RenewalCompletionPolicy:
-    """Defines completion without granting External Effect authority."""
+    @staticmethod
+    def is_complete(
+        *,
+        required_step_states: tuple[str, ...],
+        effect_certainties: tuple[str, ...],
+    ) -> bool:
+        return (
+            bool(required_step_states)
+            and all(state == "succeeded" for state in required_step_states)
+            and bool(effect_certainties)
+            and all(certainty == "applied" for certainty in effect_certainties)
+        )
+
+
+class RenewalExternalEffectPolicy:
+    @staticmethod
+    def authorize_dispatch(*, lifecycle: str, existing_certainty: str | None) -> None:
+        if lifecycle != "active":
+            raise RuntimeError("Renewal Workflow no longer authorizes dispatch")
+        if existing_certainty not in {None, "not_applied"}:
+            raise RuntimeError("External Effect is not safe to dispatch")
 
     @staticmethod
-    def is_complete(*, approval_wait_state: str, external_effect_count: int) -> bool:
-        return approval_wait_state == "satisfied" and external_effect_count > 0
+    def result_disposition(
+        *, classification: str, attempt_number: int, maximum_attempts: int
+    ) -> Literal["succeed", "retry", "fail", "defer"]:
+        if classification == "applied":
+            return "succeed"
+        if classification == "not_applied":
+            return "retry" if attempt_number < maximum_attempts else "fail"
+        return "defer"
+
+    @staticmethod
+    def reconciliation_disposition(
+        *,
+        classification: str,
+        effect_attempt_number: int,
+        reconciliation_attempt_number: int,
+        maximum_effect_attempts: int,
+        maximum_reconciliation_attempts: int,
+    ) -> Literal[
+        "confirm",
+        "retry_effect",
+        "fail_effect",
+        "retry_reconciliation",
+        "defer",
+    ]:
+        if classification == "applied":
+            return "confirm"
+        if classification == "not_applied":
+            if effect_attempt_number < maximum_effect_attempts:
+                return "retry_effect"
+            return "fail_effect"
+        if reconciliation_attempt_number < maximum_reconciliation_attempts:
+            return "retry_reconciliation"
+        return "defer"
 
 
 __all__ = [
@@ -112,6 +187,7 @@ __all__ = [
     "RecoveryDecision",
     "RenewalCompletionPolicy",
     "RenewalDeliveryPolicy",
+    "RenewalExternalEffectPolicy",
     "RenewalWorkflowPolicy",
     "RouteDecision",
 ]

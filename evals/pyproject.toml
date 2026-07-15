@@ -11,6 +11,9 @@ dependencies = [
     "testcontainers[postgres]>=4.10.0,<5.0.0",
 ]
 
+[project.scripts]
+openmagic-local-email-provider = "openmagic_evals.harness.email_provider:main"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

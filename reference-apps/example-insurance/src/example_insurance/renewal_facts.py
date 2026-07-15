@@ -19,11 +19,12 @@ class RenewalFacts:
     policy_id: UUID
     policy_number: str
     policyholder_name: str
+    policyholder_email: str
     renewal_date: str
     expiring_premium_cents: int
 
     def __post_init__(self) -> None:
-        if not self.policy_number or not self.policyholder_name:
+        if not self.policy_number or not self.policyholder_name or not self.policyholder_email:
             raise ValueError("Renewal fact identity and policyholder must be non-empty")
         date.fromisoformat(self.renewal_date)
         if self.expiring_premium_cents <= 0:
@@ -40,12 +41,14 @@ class RenewalFactSource:
             connection.execute(
                 "INSERT INTO example_insurance.policy_renewal_facts "
                 "(policy_id, policy_number, policyholder_name, renewal_date, "
-                "expiring_premium_cents, revision) VALUES (%s, %s, %s, %s, %s, 1) "
+                "expiring_premium_cents, revision, policyholder_email) "
+                "VALUES (%s, %s, %s, %s, %s, 1, %s) "
                 "ON CONFLICT (policy_id) DO UPDATE SET "
                 "policy_number = EXCLUDED.policy_number, "
                 "policyholder_name = EXCLUDED.policyholder_name, "
                 "renewal_date = EXCLUDED.renewal_date, "
                 "expiring_premium_cents = EXCLUDED.expiring_premium_cents, "
+                "policyholder_email = EXCLUDED.policyholder_email, "
                 "revision = example_insurance.policy_renewal_facts.revision + 1, "
                 "updated_at = clock_timestamp()",
                 (
@@ -54,6 +57,7 @@ class RenewalFactSource:
                     facts.policyholder_name,
                     facts.renewal_date,
                     facts.expiring_premium_cents,
+                    facts.policyholder_email,
                 ),
             )
 
@@ -63,7 +67,8 @@ class RenewalFactSource:
             connection.execute("SET TRANSACTION READ ONLY")
             row = connection.execute(
                 "SELECT policy_number, policyholder_name, renewal_date, "
-                "expiring_premium_cents FROM example_insurance.policy_renewal_facts "
+                "expiring_premium_cents, policyholder_email "
+                "FROM example_insurance.policy_renewal_facts "
                 "WHERE policy_id = %s",
                 (policy_id,),
             ).fetchone()
@@ -74,6 +79,7 @@ class RenewalFactSource:
             "policyholder_name": str(row[1]),
             "renewal_date": row[2].isoformat(),
             "expiring_premium_cents": int(row[3]),
+            "policyholder_email": str(row[4]),
         }
         asserted = {key: assertion[key] for key in durable}
         if asserted != durable:

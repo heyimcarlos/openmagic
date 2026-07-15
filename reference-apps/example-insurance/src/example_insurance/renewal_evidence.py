@@ -25,8 +25,8 @@ class RenewalEvidenceProjector:
                 raise KeyError(f"Renewal Workflow not found: {workflow_id}")
             runtime = RuntimeEvidenceReader(connection).instance(UUID(str(workflow[1])))
             events = connection.execute(
-                "SELECT event_id FROM example_insurance.domain_events "
-                "WHERE workflow_id = %s AND event_type = 'renewal.draft.ready' "
+                "SELECT event_id, event_type FROM example_insurance.domain_events "
+                "WHERE workflow_id = %s "
                 "ORDER BY occurred_at, event_id",
                 (workflow_id,),
             ).fetchall()
@@ -39,12 +39,35 @@ class RenewalEvidenceProjector:
             deliveries = tuple(
                 delivery
                 for event in events
+                if str(event[1]) == "renewal.draft.ready"
                 for delivery in evidence_reader.deliveries(UUID(str(event[0])))
             )
-            effect_events = connection.execute(
-                "SELECT count(*) FROM example_insurance.domain_events WHERE workflow_id = %s "
-                "AND event_type LIKE 'external_effect.%%'",
+            effects = connection.execute(
+                "SELECT logical_effect_id, certainty FROM example_insurance.external_effects "
+                "WHERE workflow_id = %s ORDER BY fenced_at, logical_effect_id",
                 (workflow_id,),
+            ).fetchall()
+            effect_evidence = connection.execute(
+                "SELECT e.evidence_id, e.classification, e.source "
+                "FROM example_insurance.external_effect_evidence e "
+                "JOIN example_insurance.external_effects x "
+                "ON x.logical_effect_id = e.logical_effect_id WHERE x.workflow_id = %s "
+                "ORDER BY e.observed_at, e.evidence_id",
+                (workflow_id,),
+            ).fetchall()
+            decisions = connection.execute(
+                "SELECT decision_id FROM example_insurance.renewal_decisions "
+                "WHERE workflow_id = %s ORDER BY decided_at, decision_id",
+                (workflow_id,),
+            ).fetchall()
+            grants = connection.execute(
+                "SELECT approval_grant_id FROM example_insurance.approval_grants "
+                "WHERE workflow_id = %s ORDER BY created_at, approval_grant_id",
+                (workflow_id,),
+            ).fetchall()
+            instance_state = connection.execute(
+                "SELECT state FROM openmagic_runtime.instances WHERE instance_id = %s",
+                (workflow[1],),
             ).fetchone()
         correlations: dict[str, Any] = {
             "command_id": str(workflow[0]),
@@ -62,19 +85,22 @@ class RenewalEvidenceProjector:
                 if delivery.delivered_message_id is not None
             ],
             "draft_agent_run_ids": [str(draft[0]) for draft in drafts],
+            "decision_ids": [str(decision[0]) for decision in decisions],
+            "approval_grant_ids": [str(grant[0]) for grant in grants],
+            "logical_effect_ids": [str(effect[0]) for effect in effects],
+            "effect_evidence_ids": [str(item[0]) for item in effect_evidence],
         }
         approval_waits = tuple(
             wait for wait in runtime.waits if wait.template_key == "renewal_draft_approval"
         )
-        if len(approval_waits) > 1:
-            raise RuntimeError("Renewal has more than one approval Wait")
-        approval_wait = approval_waits[0] if approval_waits else None
+        approval_wait = approval_waits[-1] if approval_waits else None
         return EvidenceRecord(
             schema_version="openmagic.evidence.v1",
             scenario="renewal_drafting",
             correlations=correlations,
             outcomes={
                 "workflow_lifecycle": str(workflow[3]),
+                "instance_state": str(instance_state[0]) if instance_state is not None else None,
                 "step_states": {step.template_key: step.state for step in runtime.steps},
                 "attempt_states": [state for _, state in runtime.attempts],
                 "agent_run_states": [state for _, _, state in runtime.agent_runs],
@@ -85,8 +111,18 @@ class RenewalEvidenceProjector:
                     str(approval_wait.wait_id) if approval_wait is not None else None
                 ),
                 "approval_wait_state": (approval_wait.state if approval_wait is not None else None),
+                "approval_wait_ids": [str(wait.wait_id) for wait in approval_waits],
+                "approval_wait_states": [wait.state for wait in approval_waits],
                 "delivery_states": [delivery.status for delivery in deliveries],
-                "external_email_effect_count": int(effect_events[0]) if effect_events else 0,
+                "external_email_effect_count": len(effects),
+                "external_effect_certainties": [str(effect[1]) for effect in effects],
+                "effect_evidence": [
+                    {"classification": str(item[1]), "source": str(item[2])}
+                    for item in effect_evidence
+                ],
+                "completion_event_count": sum(
+                    str(event[1]) == "renewal.outreach.completed" for event in events
+                ),
             },
             invariant_violations=(),
             redacted=True,

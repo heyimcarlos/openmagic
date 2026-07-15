@@ -25,11 +25,19 @@ def test_cold_migrations_create_independently_owned_schemas_without_reverse_fore
         assert [(bundle.schema, bundle.versions) for bundle in first] == [
             (
                 "openmagic_runtime",
-                ("0001_runtime_baseline", "0002_renewal_drafting_runtime"),
+                (
+                    "0001_runtime_baseline",
+                    "0002_renewal_drafting_runtime",
+                    "0003_fenced_effect_kernel",
+                ),
             ),
             (
                 "example_insurance",
-                ("0001_example_insurance_baseline", "0002_renewal_drafting_application"),
+                (
+                    "0001_example_insurance_baseline",
+                    "0002_renewal_drafting_application",
+                    "0003_renewal_approval_effect",
+                ),
             ),
         ]
         assert all(not bundle.versions for bundle in second)
@@ -71,8 +79,10 @@ def test_cold_migrations_create_independently_owned_schemas_without_reverse_fore
         assert histories == [
             ("example_insurance", "0001_example_insurance_baseline"),
             ("example_insurance", "0002_renewal_drafting_application"),
+            ("example_insurance", "0003_renewal_approval_effect"),
             ("openmagic_runtime", "0001_runtime_baseline"),
             ("openmagic_runtime", "0002_renewal_drafting_runtime"),
+            ("openmagic_runtime", "0003_fenced_effect_kernel"),
         ]
         assert reverse_foreign_keys == []
         assert invalid_singleton_constraints == []

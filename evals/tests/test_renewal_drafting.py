@@ -115,6 +115,7 @@ def _record_command_facts(application: ExampleInsurance, command: StartRenewalOu
             policy_id=value.policy_id,
             policy_number=value.policy_number,
             policyholder_name=value.policyholder_name,
+            policyholder_email=value.policyholder_email,
             renewal_date=value.renewal_date,
             expiring_premium_cents=value.expiring_premium_cents,
         )
@@ -146,6 +147,7 @@ def _renewal_command(
             policy_id=uuid4(),
             policy_number=policy_number,
             policyholder_name=policyholder_name,
+            policyholder_email="policyholder@example.test",
             renewal_date=renewal_date,
             expiring_premium_cents=expiring_premium_cents,
         ),
@@ -504,7 +506,7 @@ def test_start_command_commits_and_replays_value_identically() -> None:
         assert first.result.workflow_id == command.input.workflow_id
         assert first.result.thread_id == thread.thread_id
         assert snapshot.definition_key == "example_insurance.renewal_outreach"
-        assert snapshot.definition_version == 1
+        assert snapshot.definition_version == 2
         assert snapshot.state == "open"
         assert [(step.template_key, step.state) for step in snapshot.steps] == [
             ("gather_renewal_facts", "pending")
@@ -529,6 +531,7 @@ def test_command_validation_rejects_nested_types_and_semantics_before_commit() -
                 policy_id=uuid4(),
                 policy_number="OM-TYPE",
                 policyholder_name="Validation",
+                policyholder_email="validation@example.test",
                 renewal_date="2027-01-31",
                 expiring_premium_cents="100000",  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
             ),
@@ -572,6 +575,7 @@ def test_exact_attempt_result_replay_does_not_repeat_route_effects() -> None:
         observation = {
             "policy_number": "OM-REPLAY",
             "policyholder_name": "Replay Test",
+            "policyholder_email": "policyholder@example.test",
             "renewal_date": "2027-03-31",
             "expiring_premium_cents": 100_000,
         }
@@ -731,6 +735,7 @@ def test_gather_facts_rejects_stale_command_assertions_against_durable_business_
                 policy_id=command.input.policy_id,
                 policy_number=command.input.policy_number,
                 policyholder_name=command.input.policyholder_name,
+                policyholder_email=command.input.policyholder_email,
                 renewal_date=command.input.renewal_date,
                 expiring_premium_cents=275_000,
             )
@@ -788,7 +793,7 @@ def test_start_route_replay_returns_the_same_complete_occurrence_batch() -> None
         request = StartInstance(
             command_id=command_id,
             definition_key="example_insurance.renewal_outreach",
-            definition_version=1,
+            definition_version=2,
             instance_input={
                 "workflow_id": str(uuid4()),
                 "thread_id": str(uuid4()),
@@ -798,6 +803,7 @@ def test_start_route_replay_returns_the_same_complete_occurrence_batch() -> None
                 "policy_id": str(uuid4()),
                 "policy_number": "OM-ROUTE-1",
                 "policyholder_name": "Route Replay",
+                "policyholder_email": "route-replay@example.test",
                 "renewal_date": "2027-06-30",
                 "expiring_premium_cents": 100_000,
             },
@@ -1145,12 +1151,16 @@ def test_fresh_worker_processes_recover_the_complete_sanitized_evidence_chain(tm
         assert evidence["outcomes"]["approval_wait_state"] == "unsatisfied"
         assert set(evidence["correlations"]) == {
             "agent_run_ids",
+            "approval_grant_ids",
             "attempt_ids",
             "command_id",
+            "decision_ids",
             "delivery_ids",
             "domain_event_ids",
             "draft_agent_run_ids",
+            "effect_evidence_ids",
             "instance_id",
+            "logical_effect_ids",
             "message_ids",
             "step_ids",
             "thread_id",

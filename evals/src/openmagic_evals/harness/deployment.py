@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import socket
 import subprocess
 import sys
 import time
@@ -17,6 +16,7 @@ from uuid import uuid4
 from example_insurance.migrations import apply_migrations
 from testcontainers.postgres import PostgresContainer
 
+from openmagic_evals.harness._network import free_port
 from openmagic_evals.harness._postgres import postgres_container
 
 ProcessRole = Literal["api", "workflow-worker", "delivery-worker"]
@@ -36,20 +36,21 @@ class _RunningProcess:
     log_handle: object
 
 
-def _free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as candidate:
-        candidate.bind(("127.0.0.1", 0))
-        return int(candidate.getsockname()[1])
-
-
 class TestDeployment:
     """Own one PostgreSQL deployment and three installed OS processes."""
 
     __test__ = False
 
-    def __init__(self, *, working_directory: Path, readiness_timeout: float = 30.0) -> None:
+    def __init__(
+        self,
+        *,
+        working_directory: Path,
+        readiness_timeout: float = 30.0,
+        email_provider_url: str | None = None,
+    ) -> None:
         self.working_directory = working_directory.resolve()
         self.readiness_timeout = readiness_timeout
+        self.email_provider_url = email_provider_url
         self.database_url = ""
         self.database_name = ""
         self.processes: tuple[ManagedProcess, ...] = ()
@@ -140,13 +141,15 @@ class TestDeployment:
             close()
 
     def _start_process(self, role: ProcessRole, script_name: str) -> None:
-        port = _free_port()
+        port = free_port()
         script = Path(sys.executable).parent / script_name
         if not script.is_file():
             raise RuntimeError(f"installed process entry point is missing: {script_name}")
         worker_arguments = []
         if role != "api":
             worker_arguments = ["--worker-id", f"{role}-{uuid4().hex}"]
+        if role == "workflow-worker" and self.email_provider_url is not None:
+            worker_arguments.extend(["--email-provider-url", self.email_provider_url])
         command = [
             str(script),
             "--database-url",
