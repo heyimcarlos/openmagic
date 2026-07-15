@@ -5,10 +5,6 @@ description = "Reusable durable workflow runtime for OpenMagic"
 requires-python = ">=3.11,<3.15"
 dependencies = ["psycopg[binary]>=3.3.0,<4.0.0"]
 
-[project.scripts]
-openmagic-workflow-worker = "openmagic_runtime.workers:workflow_worker_main"
-openmagic-delivery-worker = "openmagic_runtime.workers:delivery_worker_main"
-
 [project.entry-points."openmagic.migrations"]
 openmagic_runtime = "openmagic_runtime._persistence:bundle"
 

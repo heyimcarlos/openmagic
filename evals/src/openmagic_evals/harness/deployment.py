@@ -91,25 +91,53 @@ class TestDeployment:
             raise
 
     def stop(self) -> None:
-        for running in reversed(self._running):
-            if running.process.poll() is None:
-                running.process.terminate()
-        deadline = time.monotonic() + 5
-        for running in reversed(self._running):
-            remaining = max(0.0, deadline - time.monotonic())
-            try:
-                running.process.wait(timeout=remaining)
-            except subprocess.TimeoutExpired:
-                running.process.kill()
-                running.process.wait(timeout=5)
-            close = getattr(running.log_handle, "close", None)
-            if close is not None:
-                close()
+        for running in tuple(reversed(self._running)):
+            self._stop_running(running, force=False)
         self._running.clear()
         self.processes = ()
         if self._container is not None:
             self._container.stop()
             self._container = None
+
+    def terminate_role(self, role: ProcessRole) -> ManagedProcess:
+        running = next(item for item in self._running if item.public.role == role)
+        public = running.public
+        self._stop_running(running, force=True)
+        self._running.remove(running)
+        self.processes = tuple(item.public for item in self._running)
+        return public
+
+    def restart_role(self, role: ProcessRole) -> ManagedProcess:
+        for running in tuple(self._running):
+            if running.public.role == role:
+                self._stop_running(running, force=False)
+                self._running.remove(running)
+        scripts = {
+            "api": "openmagic-api",
+            "workflow-worker": "openmagic-workflow-worker",
+            "delivery-worker": "openmagic-delivery-worker",
+        }
+        self._start_process(role, scripts[role])
+        public = self._running[-1].public
+        self.processes = tuple(item.public for item in self._running)
+        self._wait_ready(public)
+        return public
+
+    @staticmethod
+    def _stop_running(running: _RunningProcess, *, force: bool) -> None:
+        if running.process.poll() is None:
+            if force:
+                running.process.kill()
+            else:
+                running.process.terminate()
+        try:
+            running.process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            running.process.kill()
+            running.process.wait(timeout=5)
+        close = getattr(running.log_handle, "close", None)
+        if close is not None:
+            close()
 
     def _start_process(self, role: ProcessRole, script_name: str) -> None:
         port = _free_port()

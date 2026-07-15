@@ -23,8 +23,14 @@ def test_cold_migrations_create_independently_owned_schemas_without_reverse_fore
         second = apply_migrations(database_url)
 
         assert [(bundle.schema, bundle.versions) for bundle in first] == [
-            ("openmagic_runtime", ("0001_runtime_baseline",)),
-            ("example_insurance", ("0001_example_insurance_baseline",)),
+            (
+                "openmagic_runtime",
+                ("0001_runtime_baseline", "0002_renewal_drafting_runtime"),
+            ),
+            (
+                "example_insurance",
+                ("0001_example_insurance_baseline", "0002_renewal_drafting_application"),
+            ),
         ]
         assert all(not bundle.versions for bundle in second)
 
@@ -36,17 +42,16 @@ def test_cold_migrations_create_independently_owned_schemas_without_reverse_fore
                 "ORDER BY 1"
             ).fetchall()
             reverse_foreign_keys = connection.execute(
-                "SELECT tc.constraint_name FROM information_schema.referential_constraints AS rc "
-                "JOIN information_schema.table_constraints AS tc "
-                "ON tc.constraint_catalog = rc.constraint_catalog "
-                "AND tc.constraint_schema = rc.constraint_schema "
-                "AND tc.constraint_name = rc.constraint_name "
-                "WHERE tc.constraint_schema = 'openmagic_runtime'"
+                "SELECT constraint_name FROM information_schema.referential_constraints "
+                "WHERE constraint_schema = 'openmagic_runtime' "
+                "AND unique_constraint_schema = 'example_insurance'"
             ).fetchall()
 
         assert histories == [
             ("example_insurance", "0001_example_insurance_baseline"),
+            ("example_insurance", "0002_renewal_drafting_application"),
             ("openmagic_runtime", "0001_runtime_baseline"),
+            ("openmagic_runtime", "0002_renewal_drafting_runtime"),
         ]
         assert reverse_foreign_keys == []
 
