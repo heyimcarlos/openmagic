@@ -9,7 +9,7 @@ from openmagic_runtime.commands import Actor, Cause
 from openmagic_runtime.delivery import DeliveryControl
 from openmagic_runtime.kernel.control import KernelControl
 from openmagic_runtime.kernel.transitions import CloseInstance
-from openmagic_runtime.kernel.work import ClaimedAttempt, KernelWork
+from openmagic_runtime.kernel.work import ClaimedAttempt, DispositionRequired, KernelWork
 from psycopg import Connection
 
 from example_insurance.renewal_commands import WorkflowAttemptResult
@@ -61,11 +61,12 @@ class VerificationAttemptControl:
         if workflow.lifecycle == "completed":
             return self._result(attempt)
         if challenge.state != "pending":
-            KernelControl(connection).fail(
-                required,
-                failure={"class": "verification_challenge_terminal"},
+            self._fail_and_close(
+                connection,
+                required=required,
+                workflow_id=workflow.workflow_id,
+                failure_class="verification_challenge_terminal",
             )
-            fail_verification_workflow(connection, workflow_id=workflow.workflow_id)
             return self._result(attempt)
         destination = lock_identifier_destination(connection, party_id=challenge.party_id)
         if (
@@ -74,11 +75,12 @@ class VerificationAttemptControl:
             or destination.party_id != challenge.party_id
             or destination.delivery_thread_id != challenge.destination_thread_id
         ):
-            KernelControl(connection).fail(
-                required,
-                failure={"class": "verification_identifier_unavailable"},
+            self._fail_and_close(
+                connection,
+                required=required,
+                workflow_id=workflow.workflow_id,
+                failure_class="verification_identifier_unavailable",
             )
-            fail_verification_workflow(connection, workflow_id=workflow.workflow_id)
             mark_challenge_terminal(connection, challenge.challenge_id, "rejected")
             resolve_protected_command(
                 connection,
@@ -101,7 +103,7 @@ class VerificationAttemptControl:
         delivery = DeliveryControl(connection).create(
             domain_event_id=event_id,
             thread_id=challenge.destination_thread_id,
-            audience={"kind": "email", "identifier": destination.canonical_email},
+            audience={"kind": "party", "identifier": str(challenge.party_id)},
             message_author={"kind": "system", "identifier": "example-insurance"},
             content_descriptor={
                 "template_key": "example_insurance.verification_code.v1",
@@ -143,13 +145,11 @@ class VerificationAttemptControl:
             if required.attempt_number < VERIFICATION_ATTEMPT_RETRY_POLICY.max_attempts:
                 KernelControl(connection).retry(required)
             else:
-                KernelControl(connection).fail(
-                    required,
-                    failure={"class": "verification_delivery_attempts_exhausted"},
-                )
-                fail_verification_workflow(
+                self._fail_and_close(
                     connection,
+                    required=required,
                     workflow_id=workflow.workflow_id,
+                    failure_class="verification_delivery_attempts_exhausted",
                 )
                 mark_challenge_terminal(connection, challenge.challenge_id, "delivery_failed")
                 resolve_protected_command(
@@ -160,6 +160,24 @@ class VerificationAttemptControl:
                 )
             return True
         return False
+
+    @staticmethod
+    def _fail_and_close(
+        connection: Connection[tuple[Any, ...]],
+        *,
+        required: DispositionRequired,
+        workflow_id: UUID,
+        failure_class: str,
+    ) -> None:
+        control = KernelControl(connection)
+        control.fail(required, failure={"class": failure_class})
+        control.close(
+            CloseInstance(
+                command_id=uuid5(_CLOSURE_NAMESPACE, str(required.attempt_id)),
+                instance_id=required.instance_id,
+            )
+        )
+        fail_verification_workflow(connection, workflow_id=workflow_id)
 
     @staticmethod
     def _result(attempt: ClaimedAttempt) -> WorkflowAttemptResult:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import replace
 from uuid import UUID, uuid4
@@ -8,6 +9,7 @@ import pytest
 from example_insurance.renewals import (
     CancelRenewalOutreach,
     CancelRenewalOutreachInput,
+    ExampleInsurance,
     ProvisionVerificationAuthority,
     ProvisionVerificationAuthorityInput,
     RequestProtectedRenewalDetails,
@@ -19,6 +21,7 @@ from example_insurance.renewals import (
 )
 from openmagic_evals.harness import (
     issue_verification_challenge,
+    prepare_renewal_approval,
     renewal_context,
 )
 from openmagic_runtime.commands import Actor, Cause
@@ -84,9 +87,9 @@ def test_current_authority_is_revalidated_after_code_delivery(
         assert result.result.session_id is None
 
 
-def test_delivery_rejects_a_superseded_identifier_and_rebinds_to_current_email() -> None:
+def test_worker_rejects_a_superseded_identifier_and_rebinds_to_current_email() -> None:
     with renewal_context(verification_code_secret=b"issue-70-current-identifier") as (
-        _,
+        database_url,
         application,
         threads,
     ):
@@ -111,6 +114,13 @@ def test_delivery_rejects_a_superseded_identifier_and_rebinds_to_current_email()
         )
 
         application.run_workflow_worker_once(worker_id="superseded-identifier-worker")
+        verification_instance_id = scenario.challenge_receipt.result.verification_instance_id
+        assert verification_instance_id is not None
+        assert (
+            KernelInspection(database_url=database_url).snapshot(verification_instance_id).state
+            == "closed"
+        )
+        ExampleInsurance(database_url=database_url).prepare_workflow_worker()
         old_result = application.submit_verification_code(
             SubmitVerificationCode(
                 command_id=uuid4(),
@@ -142,6 +152,172 @@ def test_delivery_rejects_a_superseded_identifier_and_rebinds_to_current_email()
         assert delivered is not None
         assert delivered.thread_id == replacement_thread.thread_id
         assert threads.read(scenario.identifier_thread_id).messages == ()
+
+
+def test_authority_provisioning_rejects_a_non_party_workflow_actor() -> None:
+    with renewal_context(verification_code_secret=b"issue-70-actor-kind") as (
+        _,
+        application,
+        threads,
+    ):
+        actor = Actor("system", str(uuid4()))
+        renewal, _ = prepare_renewal_approval(application, threads, actor=actor)
+        email = f"broker-{actor.identifier}@example.test"
+        identifier_thread = threads.create(CreateThread(uuid4(), "email", email))
+
+        with pytest.raises(ValueError, match="authorized Actor"):
+            application.provision_verification_authority(
+                ProvisionVerificationAuthority(
+                    command_id=uuid4(),
+                    actor=Actor("system", "authority-administrator"),
+                    cause=Cause("command", str(uuid4())),
+                    input=ProvisionVerificationAuthorityInput(
+                        party_id=UUID(actor.identifier),
+                        organization_party_id=uuid4(),
+                        workflow_id=renewal.input.workflow_id,
+                        email=email,
+                        delivery_thread_id=identifier_thread.thread_id,
+                    ),
+                )
+            )
+
+
+def test_authority_provisioning_rejects_an_organization_as_the_person_party() -> None:
+    with renewal_context(verification_code_secret=b"issue-70-party-kinds") as (
+        _,
+        application,
+        threads,
+    ):
+        original = issue_verification_challenge(application, threads)
+        organization_actor = Actor("party", str(original.organization_party_id))
+
+        with pytest.raises(ValueError, match="exact person and organization Parties"):
+            issue_verification_challenge(
+                application,
+                threads,
+                actor=organization_actor,
+                organization_party_id=uuid4(),
+            )
+
+
+def test_delivered_code_is_rejected_after_identifier_replacement() -> None:
+    with renewal_context(verification_code_secret=b"issue-70-delivered-supersession") as (
+        _,
+        application,
+        threads,
+    ):
+        scenario = issue_verification_challenge(application, threads)
+        old_challenge_id = scenario.challenge_receipt.result.challenge_id
+        assert old_challenge_id is not None
+        assert scenario.code is not None
+        replacement_email = f"replacement-{scenario.actor.identifier}@example.test"
+        replacement_thread = threads.create(CreateThread(uuid4(), "email", replacement_email))
+        application.provision_verification_authority(
+            ProvisionVerificationAuthority(
+                command_id=uuid4(),
+                actor=Actor("system", "authority-administrator"),
+                cause=Cause("command", str(uuid4())),
+                input=ProvisionVerificationAuthorityInput(
+                    party_id=UUID(scenario.actor.identifier),
+                    organization_party_id=scenario.organization_party_id,
+                    workflow_id=scenario.renewal.input.workflow_id,
+                    email=replacement_email,
+                    delivery_thread_id=replacement_thread.thread_id,
+                ),
+            )
+        )
+        rejected = application.submit_verification_code(
+            SubmitVerificationCode(
+                command_id=uuid4(),
+                actor=scenario.actor,
+                cause=Cause("message", str(uuid4())),
+                input=SubmitVerificationCodeInput(
+                    challenge_id=old_challenge_id,
+                    protected_command_id=scenario.protected_command.command_id,
+                    workflow_id=scenario.renewal.input.workflow_id,
+                    thread_id=scenario.renewal.input.thread_id,
+                    purpose="renewal.read_approved_details",
+                    code=scenario.code,
+                ),
+            )
+        )
+        replacement = application.request_protected_renewal_details(
+            RequestProtectedRenewalDetails(
+                command_id=uuid4(),
+                actor=scenario.actor,
+                cause=Cause("message", str(uuid4())),
+                input=scenario.protected_command.input,
+            )
+        )
+        application.run_workflow_worker_once(worker_id="replacement-identifier-worker")
+        delivered = application.run_delivery_worker_once(
+            worker_id="replacement-identifier-delivery"
+        )
+        replacement_message = threads.read(replacement_thread.thread_id).messages[-1].content
+        replacement_code = re.search(r"\b(\d{6})\b", replacement_message)
+
+        assert rejected.result.verification_outcome == "identifier_revoked"
+        assert replacement.result.outcome == "verification_required"
+        assert delivered is not None
+        assert delivered.thread_id == replacement_thread.thread_id
+        assert replacement_code is not None
+
+
+@pytest.mark.parametrize(
+    ("channel_kind", "channel_reference"),
+    [("email", "other@example.test"), ("sms", "replacement@example.test")],
+)
+def test_identifier_provisioning_rejects_mismatched_public_email_thread(
+    channel_kind: str,
+    channel_reference: str,
+) -> None:
+    with renewal_context(verification_code_secret=b"issue-70-thread-binding") as (
+        _,
+        application,
+        threads,
+    ):
+        scenario = issue_verification_challenge(application, threads)
+        wrong_thread = threads.create(CreateThread(uuid4(), channel_kind, channel_reference))
+        with pytest.raises(ValueError, match="exact public email Thread"):
+            application.provision_verification_authority(
+                ProvisionVerificationAuthority(
+                    command_id=uuid4(),
+                    actor=Actor("system", "authority-administrator"),
+                    cause=Cause("command", str(uuid4())),
+                    input=ProvisionVerificationAuthorityInput(
+                        party_id=UUID(scenario.actor.identifier),
+                        organization_party_id=scenario.organization_party_id,
+                        workflow_id=scenario.renewal.input.workflow_id,
+                        email="replacement@example.test",
+                        delivery_thread_id=wrong_thread.thread_id,
+                    ),
+                )
+            )
+
+
+def test_identifier_provisioning_rejects_the_protected_thread_as_second_channel() -> None:
+    with renewal_context(verification_code_secret=b"issue-70-distinct-thread") as (
+        _,
+        application,
+        threads,
+    ):
+        scenario = issue_verification_challenge(application, threads)
+        protected_thread = threads.read(scenario.renewal.input.thread_id)
+        with pytest.raises(ValueError, match="distinct identifier email Thread"):
+            application.provision_verification_authority(
+                ProvisionVerificationAuthority(
+                    command_id=uuid4(),
+                    actor=Actor("system", "authority-administrator"),
+                    cause=Cause("command", str(uuid4())),
+                    input=ProvisionVerificationAuthorityInput(
+                        party_id=UUID(scenario.actor.identifier),
+                        organization_party_id=scenario.organization_party_id,
+                        workflow_id=scenario.renewal.input.workflow_id,
+                        email=protected_thread.channel_reference,
+                        delivery_thread_id=protected_thread.thread_id,
+                    ),
+                )
+            )
 
 
 def test_expired_challenge_and_closed_workflow_fail_without_mutating_lifecycle() -> None:

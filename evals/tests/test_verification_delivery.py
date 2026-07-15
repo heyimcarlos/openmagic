@@ -223,3 +223,47 @@ def test_verification_attempt_recovers_after_worker_loss_from_fresh_application(
             )
         )
         assert accepted.result.verification_outcome == "verified"
+
+
+def test_verification_attempt_exhaustion_closes_only_its_instance() -> None:
+    secret = b"issue-70-attempt-exhaustion"
+    with renewal_context(verification_code_secret=secret) as (
+        database_url,
+        application,
+        threads,
+    ):
+        scenario = issue_verification_challenge(application, threads, run_workflow=False)
+        verification_instance_id = scenario.challenge_receipt.result.verification_instance_id
+        assert verification_instance_id is not None
+        protected_instance_id = application.start_renewal_outreach(
+            scenario.renewal
+        ).result.instance_id
+        protected_before = KernelInspection(database_url=database_url).snapshot(
+            protected_instance_id
+        )
+        evidence_before = application.renewal_evidence_json(scenario.renewal.input.workflow_id)
+
+        for attempt_number in range(1, 4):
+            claimed = application.claim_workflow_attempt(
+                worker_id=f"lost-verification-worker-{attempt_number}",
+                claim_request_id=uuid4(),
+            )
+            assert claimed is not None
+            assert claimed.attempt_number == attempt_number
+            time.sleep(1.05)
+            assert application.recover_expired_workflow_attempt() is True
+
+        verification_after = KernelInspection(database_url=database_url).snapshot(
+            verification_instance_id
+        )
+        protected_after = KernelInspection(database_url=database_url).snapshot(
+            protected_instance_id
+        )
+
+        assert verification_after.state == "closed"
+        assert verification_after.steps[0].state == "failed"
+        assert protected_after == protected_before
+        assert (
+            application.renewal_evidence_json(scenario.renewal.input.workflow_id) == evidence_before
+        )
+        ExampleInsurance(database_url=database_url).prepare_workflow_worker()

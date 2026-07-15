@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from typing import Literal
 from uuid import UUID
 
 from openmagic_runtime.delivery import DeliveryRetryPolicy
 from openmagic_runtime.kernel.definitions import RetryPolicy
 
-from example_insurance.verification_authority_records import AuthoritySnapshot
 from example_insurance.verification_commands import ProtectedOutcome, VerificationPurpose
 
 VERIFICATION_ATTEMPT_RETRY_POLICY = RetryPolicy((0, 0))
@@ -22,12 +23,29 @@ VERIFICATION_DELIVERY_RETRY_POLICY = DeliveryRetryPolicy(
 )
 
 
+@dataclass(frozen=True)
+class VerificationAuthorityFacts:
+    workflow_id: UUID
+    instance_id: UUID
+    thread_id: UUID
+    lifecycle: Literal["active", "cancelled", "completed"]
+    authorized_actor_kind: str
+    authorized_actor_id: str
+    workflow_authority_revoked: bool
+    party_is_person: bool
+    identifier_id: UUID | None
+    identifier_delivery_thread_id: UUID | None
+    identifier_current_and_verified: bool
+    active_broker_authority: bool
+    exact_approval_grant: bool
+
+
 class VerificationPolicy:
     purpose: VerificationPurpose = "renewal.read_approved_details"
 
     def authorize(
         self,
-        authority: AuthoritySnapshot,
+        authority: VerificationAuthorityFacts,
         *,
         party_id: UUID,
         thread_id: UUID,
@@ -37,7 +55,11 @@ class VerificationPolicy:
             return "wrong_purpose"
         if authority.thread_id != thread_id:
             return "wrong_thread"
-        if authority.authorized_actor_id != str(party_id) or not authority.party_exists:
+        if (
+            authority.authorized_actor_kind != "party"
+            or authority.authorized_actor_id != str(party_id)
+            or not authority.party_is_person
+        ):
             return "wrong_party"
         if authority.lifecycle != "active":
             return "workflow_closed"
@@ -54,5 +76,6 @@ __all__ = [
     "MAX_FAILED_CODE_ATTEMPTS",
     "VERIFICATION_ATTEMPT_RETRY_POLICY",
     "VERIFICATION_DELIVERY_RETRY_POLICY",
+    "VerificationAuthorityFacts",
     "VerificationPolicy",
 ]

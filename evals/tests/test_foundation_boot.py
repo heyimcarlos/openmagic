@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 
 from openmagic_evals.harness import DeploymentVerifier, TestDeployment
 
@@ -37,3 +39,29 @@ def test_known_bad_control_is_rejected_by_independent_verifier(tmp_path) -> None
 
         assert not verdict.passed
         assert verdict.violations == ("required schema is missing: known_bad_control",)
+
+
+def test_delivery_worker_process_rejects_verification_secret_capability() -> None:
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from example_insurance.workers import delivery_worker_main; delivery_worker_main()",
+            "--database-url",
+            "postgresql://unused:unused@127.0.0.1:1/unused",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "1",
+            "--worker-id",
+            "delivery-with-secret",
+            "--verification-code-secret-file",
+            "/not/read/by/delivery-worker",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 2
+    assert "Delivery Worker does not accept --verification-code-secret-file" in completed.stderr

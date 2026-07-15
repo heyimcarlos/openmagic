@@ -87,7 +87,14 @@ class ProtectedRenewalDeliveryControl:
             content_descriptor={
                 "template_key": "example_insurance.renewal_protected_details.v1",
                 "template_version": 1,
-                "purpose": context.purpose,
+                "locale": "en-CA",
+                "input": {
+                    "protected_command_id": str(context.protected_command_id),
+                    "purpose": context.purpose,
+                    "policy_number": details.policy_number,
+                    "policyholder_name": details.policyholder_name,
+                    "renewal_date": details.renewal_date,
+                },
             },
             message_content=(
                 f"Approved renewal details for policy {details.policy_number}: "

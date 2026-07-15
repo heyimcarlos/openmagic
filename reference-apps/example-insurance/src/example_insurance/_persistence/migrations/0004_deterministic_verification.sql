@@ -44,15 +44,23 @@ CREATE TABLE example_insurance.workflow_participants (
     workflow_id uuid NOT NULL REFERENCES example_insurance.renewal_workflows(workflow_id),
     party_id uuid NOT NULL REFERENCES example_insurance.parties(party_id),
     membership_id uuid NOT NULL,
+    assigned_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    FOREIGN KEY (membership_id, party_id)
+        REFERENCES example_insurance.organization_memberships(membership_id, party_id),
+    UNIQUE (workflow_id, party_id)
+);
+
+CREATE TABLE example_insurance.workflow_role_assignments (
+    role_assignment_id uuid PRIMARY KEY,
+    participant_id uuid NOT NULL
+        REFERENCES example_insurance.workflow_participants(participant_id),
     role text NOT NULL CHECK (role IN ('broker', 'reporter', 'policyholder', 'claimant')),
     assigned_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-    revoked_at timestamptz,
-    FOREIGN KEY (membership_id, party_id)
-        REFERENCES example_insurance.organization_memberships(membership_id, party_id)
+    revoked_at timestamptz
 );
 
 CREATE UNIQUE INDEX one_current_workflow_role
-    ON example_insurance.workflow_participants(workflow_id, party_id, role)
+    ON example_insurance.workflow_role_assignments(participant_id, role)
     WHERE revoked_at IS NULL;
 
 CREATE TABLE example_insurance.protected_commands (
@@ -103,6 +111,7 @@ CREATE TABLE example_insurance.verification_challenges (
         (state = 'accepted' AND accepted_at IS NOT NULL)
         OR (state <> 'accepted' AND accepted_at IS NULL)
     ),
+    CHECK (destination_thread_id <> thread_id),
     FOREIGN KEY (
         protected_command_id, party_id, thread_id, protected_workflow_id, purpose
     ) REFERENCES example_insurance.protected_commands (

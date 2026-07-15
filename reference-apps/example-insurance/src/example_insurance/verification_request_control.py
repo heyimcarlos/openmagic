@@ -7,6 +7,7 @@ from uuid import UUID, uuid4
 
 from openmagic_runtime.commands import StateConflict
 from openmagic_runtime.kernel.control import KernelControl, StartInstance
+from openmagic_runtime.threads import ThreadStore
 from psycopg import Connection
 
 from example_insurance.renewal_records import record_event
@@ -44,17 +45,20 @@ class VerificationRequestControl:
         policy: VerificationPolicy,
         lifecycle: VerificationChallengeLifecycle,
         deliveries: ProtectedRenewalDeliveryControl,
+        threads: ThreadStore,
     ) -> None:
         self._challenge_ttl_seconds = challenge_ttl_seconds
         self._policy = policy
         self._lifecycle = lifecycle
         self._deliveries = deliveries
+        self._threads = threads
 
     def provision(
         self,
         command: ProvisionVerificationAuthority,
         connection: Connection[tuple[Any, ...]],
     ) -> ProvisionVerificationAuthorityResult:
+        self._require_identifier_thread(command)
         self._lifecycle.lock_pending_instances(
             connection,
             party_id=command.input.party_id,
@@ -64,6 +68,12 @@ class VerificationRequestControl:
         if lock_instance_for_workflow(connection, command.input.workflow_id) is None:
             raise StateConflict("Exact protected Workflow does not exist")
         provisioned = provision_authority(connection, command.input)
+        self._lifecycle.reconcile_superseded_identifier(
+            connection,
+            party_id=command.input.party_id,
+            workflow_id=command.input.workflow_id,
+            current_identifier_id=provisioned.identifier_id,
+        )
         return ProvisionVerificationAuthorityResult(
             outcome="provisioned",
             party_id=command.input.party_id,
@@ -71,6 +81,18 @@ class VerificationRequestControl:
             membership_id=provisioned.membership_id,
             participant_id=provisioned.participant_id,
         )
+
+    def _require_identifier_thread(self, command: ProvisionVerificationAuthority) -> None:
+        value = command.input
+        try:
+            thread = self._threads.read(value.delivery_thread_id)
+        except KeyError as error:
+            raise ValueError("Verification identifier Thread is unavailable") from error
+        if (
+            thread.channel_kind != "email"
+            or thread.channel_reference.strip().casefold() != value.email.strip().casefold()
+        ):
+            raise ValueError("Verification identifier must match its exact public email Thread")
 
     def request(
         self,

@@ -161,6 +161,22 @@ def test_verification_persistence_has_canonical_sql_owners_and_named_decoders() 
     assert positional_decodes == []
 
 
+def test_verification_authority_models_participation_and_roles_separately() -> None:
+    migration = (
+        ROOT
+        / "reference-apps/example-insurance/src/example_insurance/_persistence/migrations"
+        / "0004_deterministic_verification.sql"
+    ).read_text(encoding="utf-8")
+    participant_definition = migration.split(
+        "CREATE TABLE example_insurance.workflow_participants (", 1
+    )[1].split("CREATE TABLE example_insurance.workflow_role_assignments (", 1)[0]
+
+    assert "role text" not in participant_definition
+    assert "revoked_at" not in participant_definition
+    assert "UNIQUE (workflow_id, party_id)" in participant_definition
+    assert "CREATE TABLE example_insurance.workflow_role_assignments" in migration
+
+
 def test_workflow_worker_delegates_typed_attempt_routes_without_template_branches() -> None:
     application_root = ROOT / "reference-apps/example-insurance/src/example_insurance"
     worker_source = (application_root / "workflow_worker_control.py").read_text(encoding="utf-8")

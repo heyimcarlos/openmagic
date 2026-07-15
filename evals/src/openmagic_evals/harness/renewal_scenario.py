@@ -56,7 +56,7 @@ def prepare_renewal_approval(
 ) -> tuple[StartRenewalOutreach, Actor]:
     """Start a renewal and advance it to its durable approval Wait."""
     if thread_id is None:
-        thread = threads.create(CreateThread(uuid4(), "email", f"broker-{uuid4()}"))
+        thread = threads.create(CreateThread(uuid4(), "email", f"broker-{uuid4()}@example.test"))
         thread_id = thread.thread_id
     if actor is None:
         actor = Actor(kind="party", identifier=str(uuid4()))

@@ -63,6 +63,40 @@ class VerificationChallengeLifecycle:
         for identity in identities:
             lock_instance(connection, identity.delivery_instance_id)
 
+    def reconcile_superseded_identifier(
+        self,
+        connection: Connection[tuple[Any, ...]],
+        *,
+        party_id: UUID,
+        workflow_id: UUID,
+        current_identifier_id: UUID,
+    ) -> None:
+        identities = pending_challenge_identities(
+            connection,
+            party_id=party_id,
+            thread_id=None,
+            protected_workflow_id=workflow_id,
+        )
+        for identity in identities:
+            if lock_instance(connection, identity.delivery_instance_id) is None:
+                continue
+            locked = lock_challenge_and_command(connection, identity.challenge_id)
+            if locked is None:
+                continue
+            challenge, protected = locked
+            if (
+                challenge.state != "pending"
+                or challenge.destination_identifier_id == current_identifier_id
+            ):
+                continue
+            mark_challenge_terminal(connection, challenge.challenge_id, "rejected")
+            resolve_protected_command(
+                connection,
+                protected_command_id=protected.protected_command_id,
+                outcome="identifier_revoked",
+                delivery_id=None,
+            )
+
     def reconcile_pending(
         self,
         connection: Connection[tuple[Any, ...]],

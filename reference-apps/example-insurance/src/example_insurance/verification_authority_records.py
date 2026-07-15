@@ -13,22 +13,7 @@ from example_insurance.verification_commands import (
     ProvisionVerificationAuthorityInput,
     VerificationAuthorityTarget,
 )
-
-
-@dataclass(frozen=True)
-class AuthoritySnapshot:
-    workflow_id: UUID
-    instance_id: UUID
-    thread_id: UUID
-    lifecycle: Literal["active", "cancelled", "completed"]
-    authorized_actor_id: str
-    workflow_authority_revoked: bool
-    party_exists: bool
-    identifier_id: UUID | None
-    identifier_delivery_thread_id: UUID | None
-    identifier_current_and_verified: bool
-    active_broker_authority: bool
-    exact_approval_grant: bool
+from example_insurance.verification_policy import VerificationAuthorityFacts
 
 
 @dataclass(frozen=True)
@@ -70,17 +55,36 @@ def provision_authority(
 ) -> ProvisionedAuthority:
     with connection.cursor(row_factory=dict_row) as cursor:
         workflow = cursor.execute(
-            "SELECT authorized_actor_id FROM example_insurance.renewal_workflows "
+            "SELECT authorized_actor_kind, authorized_actor_id, thread_id FROM "
+            "example_insurance.renewal_workflows "
             "WHERE workflow_id = %s FOR UPDATE",
             (value.workflow_id,),
         ).fetchone()
-    if workflow is None or str(workflow["authorized_actor_id"]) != str(value.party_id):
+    if (
+        workflow is None
+        or workflow["authorized_actor_kind"] != "party"
+        or str(workflow["authorized_actor_id"]) != str(value.party_id)
+    ):
         raise ValueError("Provisioned Party must be the renewal's authorized Actor")
+    if UUID(str(workflow["thread_id"])) == value.delivery_thread_id:
+        raise ValueError("Verification requires a distinct identifier email Thread")
     connection.execute(
         "INSERT INTO example_insurance.parties (party_id, party_kind) "
         "VALUES (%s, 'person'), (%s, 'organization') ON CONFLICT DO NOTHING",
         (value.party_id, value.organization_party_id),
     )
+    with connection.cursor(row_factory=dict_row) as cursor:
+        parties = cursor.execute(
+            "SELECT party_id, party_kind FROM example_insurance.parties "
+            "WHERE party_id = ANY(%s) FOR UPDATE",
+            ([value.party_id, value.organization_party_id],),
+        ).fetchall()
+    party_kinds = {UUID(str(record["party_id"])): record["party_kind"] for record in parties}
+    if party_kinds != {
+        value.party_id: "person",
+        value.organization_party_id: "organization",
+    }:
+        raise ValueError("Verification authority requires exact person and organization Parties")
     canonical_email = value.email.strip().casefold()
     with connection.cursor(row_factory=dict_row) as cursor:
         identifier = cursor.execute(
@@ -124,21 +128,34 @@ def provision_authority(
         membership_id = UUID(str(membership["membership_id"]))
     with connection.cursor(row_factory=dict_row) as cursor:
         participant = cursor.execute(
-            "SELECT participant_id FROM example_insurance.workflow_participants "
-            "WHERE workflow_id = %s AND party_id = %s AND membership_id = %s "
-            "AND role = 'broker' AND revoked_at IS NULL FOR UPDATE",
-            (value.workflow_id, value.party_id, membership_id),
+            "SELECT participant_id, membership_id FROM "
+            "example_insurance.workflow_participants WHERE workflow_id = %s "
+            "AND party_id = %s FOR UPDATE",
+            (value.workflow_id, value.party_id),
         ).fetchone()
     if participant is None:
         participant_id = uuid4()
         connection.execute(
             "INSERT INTO example_insurance.workflow_participants "
-            "(participant_id, workflow_id, party_id, membership_id, role) "
-            "VALUES (%s, %s, %s, %s, 'broker')",
+            "(participant_id, workflow_id, party_id, membership_id) "
+            "VALUES (%s, %s, %s, %s)",
             (participant_id, value.workflow_id, value.party_id, membership_id),
         )
     else:
         participant_id = UUID(str(participant["participant_id"]))
+        if UUID(str(participant["membership_id"])) != membership_id:
+            raise ValueError("Workflow Participant has a conflicting Organization Membership")
+    role_assignment = connection.execute(
+        "SELECT role_assignment_id FROM example_insurance.workflow_role_assignments "
+        "WHERE participant_id = %s AND role = 'broker' AND revoked_at IS NULL FOR UPDATE",
+        (participant_id,),
+    ).fetchone()
+    if role_assignment is None:
+        connection.execute(
+            "INSERT INTO example_insurance.workflow_role_assignments "
+            "(role_assignment_id, participant_id, role) VALUES (%s, %s, 'broker')",
+            (uuid4(), participant_id),
+        )
     return ProvisionedAuthority(
         identifier_id=identifier_id,
         membership_id=membership_id,
@@ -184,24 +201,31 @@ def revoke_authority(
             "SET revoked_at = clock_timestamp() WHERE membership.membership_id = ("
             "SELECT participant.membership_id FROM "
             "example_insurance.workflow_participants AS participant "
+            "JOIN example_insurance.workflow_role_assignments AS role "
+            "ON role.participant_id = participant.participant_id "
             "JOIN example_insurance.organization_memberships AS linked_membership "
             "ON linked_membership.membership_id = participant.membership_id "
             "AND linked_membership.party_id = participant.party_id "
             "WHERE participant.workflow_id = %s AND participant.party_id = %s "
-            "AND participant.role = 'broker' AND participant.revoked_at IS NULL "
+            "AND role.role = 'broker' AND role.revoked_at IS NULL "
             "AND linked_membership.revoked_at IS NULL "
             "ORDER BY participant.assigned_at, participant.participant_id "
-            "LIMIT 1 FOR UPDATE OF participant, linked_membership) "
+            "LIMIT 1 FOR UPDATE OF participant, role, linked_membership) "
             "RETURNING membership_id",
             (workflow_id, party_id),
         ).fetchone()
     else:
         row = connection.execute(
-            "UPDATE example_insurance.workflow_participants SET revoked_at = clock_timestamp() "
-            "WHERE participant_id = (SELECT participant_id FROM "
-            "example_insurance.workflow_participants WHERE workflow_id = %s AND party_id = %s "
-            "AND role = 'broker' AND revoked_at IS NULL ORDER BY assigned_at, participant_id "
-            "LIMIT 1 FOR UPDATE) RETURNING participant_id",
+            "UPDATE example_insurance.workflow_role_assignments AS role "
+            "SET revoked_at = clock_timestamp() WHERE role.role_assignment_id = ("
+            "SELECT assignment.role_assignment_id FROM "
+            "example_insurance.workflow_role_assignments AS assignment "
+            "JOIN example_insurance.workflow_participants AS participant "
+            "ON participant.participant_id = assignment.participant_id "
+            "WHERE participant.workflow_id = %s AND participant.party_id = %s "
+            "AND assignment.role = 'broker' AND assignment.revoked_at IS NULL "
+            "ORDER BY assignment.assigned_at, assignment.role_assignment_id "
+            "LIMIT 1 FOR UPDATE OF assignment, participant) RETURNING role_assignment_id",
             (workflow_id, party_id),
         ).fetchone()
     return row is not None
@@ -213,20 +237,22 @@ def lock_authority(
     workflow_id: UUID,
     party_id: UUID,
     approval_grant_id: UUID,
-) -> AuthoritySnapshot | None:
+) -> VerificationAuthorityFacts | None:
     with connection.cursor(row_factory=dict_row) as cursor:
         workflow = cursor.execute(
-            "SELECT workflow_id, instance_id, thread_id, lifecycle, authorized_actor_id, "
-            "authority_revoked_at IS NOT NULL AS authority_revoked "
+            "SELECT workflow_id, instance_id, thread_id, lifecycle, authorized_actor_kind, "
+            "authorized_actor_id, authority_revoked_at IS NOT NULL AS authority_revoked "
             "FROM example_insurance.renewal_workflows WHERE workflow_id = %s FOR UPDATE",
             (workflow_id,),
         ).fetchone()
     if workflow is None:
         return None
-    party = connection.execute(
-        "SELECT party_id FROM example_insurance.parties WHERE party_id = %s FOR UPDATE",
-        (party_id,),
-    ).fetchone()
+    with connection.cursor(row_factory=dict_row) as cursor:
+        party = cursor.execute(
+            "SELECT party_id, party_kind FROM example_insurance.parties "
+            "WHERE party_id = %s FOR UPDATE",
+            (party_id,),
+        ).fetchone()
     with connection.cursor(row_factory=dict_row) as cursor:
         identifier = cursor.execute(
             "SELECT identifier_id, delivery_thread_id, verified_at, revoked_at FROM "
@@ -237,11 +263,18 @@ def lock_authority(
         ).fetchone()
     broker_authority = connection.execute(
         "SELECT p.participant_id FROM example_insurance.workflow_participants AS p "
+        "JOIN example_insurance.workflow_role_assignments AS r "
+        "ON r.participant_id = p.participant_id "
         "JOIN example_insurance.organization_memberships AS m "
         "ON m.membership_id = p.membership_id AND m.party_id = p.party_id "
-        "WHERE p.workflow_id = %s AND p.party_id = %s AND p.role = 'broker' "
-        "AND p.revoked_at IS NULL AND m.revoked_at IS NULL "
-        "FOR UPDATE OF p, m",
+        "JOIN example_insurance.parties AS person ON person.party_id = p.party_id "
+        "AND person.party_kind = 'person' "
+        "JOIN example_insurance.parties AS organization "
+        "ON organization.party_id = m.organization_party_id "
+        "AND organization.party_kind = 'organization' "
+        "WHERE p.workflow_id = %s AND p.party_id = %s AND r.role = 'broker' "
+        "AND r.revoked_at IS NULL AND m.revoked_at IS NULL "
+        "FOR UPDATE OF p, r, m, person, organization",
         (workflow_id, party_id),
     ).fetchone()
     grant = connection.execute(
@@ -254,14 +287,15 @@ def lock_authority(
     identifier_thread_id = (
         UUID(str(identifier["delivery_thread_id"])) if identifier is not None else None
     )
-    return AuthoritySnapshot(
+    return VerificationAuthorityFacts(
         workflow_id=UUID(str(workflow["workflow_id"])),
         instance_id=UUID(str(workflow["instance_id"])),
         thread_id=UUID(str(workflow["thread_id"])),
         lifecycle=_renewal_lifecycle(workflow["lifecycle"]),
+        authorized_actor_kind=str(workflow["authorized_actor_kind"]),
         authorized_actor_id=str(workflow["authorized_actor_id"]),
         workflow_authority_revoked=bool(workflow["authority_revoked"]),
-        party_exists=party is not None,
+        party_is_person=party is not None and party["party_kind"] == "person",
         identifier_id=identifier_id,
         identifier_delivery_thread_id=identifier_thread_id,
         identifier_current_and_verified=(
@@ -275,7 +309,6 @@ def lock_authority(
 
 
 __all__ = [
-    "AuthoritySnapshot",
     "IdentifierDestination",
     "ProvisionedAuthority",
     "lock_authority",
