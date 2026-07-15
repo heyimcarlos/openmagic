@@ -19,7 +19,8 @@ from openmagic_evals.evidence.release import run_deterministic_release, run_race
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="openmagic-evidence")
     subcommands = parser.add_subparsers(dest="command", required=True)
-    subcommands.add_parser("schema", help="print the versioned canonical JSON schema")
+    schema = subcommands.add_parser("schema", help="write the versioned canonical JSON schema")
+    schema.add_argument("--output", type=Path)
     audit = subcommands.add_parser("audit-surface", help="audit repository public surfaces")
     audit.add_argument("--repository-root", type=Path, required=True)
     release_commands = {"deterministic", "races"}
@@ -84,7 +85,13 @@ def main() -> None:
     parser = _parser()
     arguments = parser.parse_args()
     if arguments.command == "schema":
-        print(json.dumps(artifact_json_schema(), sort_keys=True, separators=(",", ":")))
+        document = json.dumps(artifact_json_schema(), sort_keys=True, separators=(",", ":"))
+        if arguments.output is None:
+            print(document)
+        else:
+            arguments.output.parent.mkdir(parents=True, exist_ok=True)
+            arguments.output.write_text(document + "\n", encoding="utf-8")
+            print(json.dumps({"schema": str(arguments.output.resolve())}, sort_keys=True))
         return
     if arguments.command == "audit-surface":
         report = audit_repository(arguments.repository_root)

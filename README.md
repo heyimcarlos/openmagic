@@ -62,7 +62,7 @@ a clean checkout:
 
 ```bash
 mkdir -p .artifacts/issue71
-uv run openmagic-evidence schema > .artifacts/issue71/schema.json
+uv run openmagic-evidence schema --output .artifacts/issue71/schema.json
 uv run openmagic-evidence audit-surface --repository-root .
 uv run openmagic-evidence deterministic \
   --repository-root . \
