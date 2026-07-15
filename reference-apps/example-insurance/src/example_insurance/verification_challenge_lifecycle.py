@@ -11,6 +11,7 @@ from psycopg import Connection
 
 from example_insurance.verification_challenge_records import (
     DurableChallenge,
+    PendingChallengeIdentity,
     challenge_is_expired,
     lock_challenge_and_command,
     pending_challenge_identities,
@@ -20,6 +21,7 @@ from example_insurance.verification_commands import ProtectedPolicyRejection
 from example_insurance.verification_workflow_records import verification_delivery_identity
 
 DeliveryStatus = Literal["pending", "delivered", "failed", "unavailable"]
+LockedPendingChallenges = tuple[PendingChallengeIdentity, ...]
 
 
 class VerificationChallengeLifecycle:
@@ -51,33 +53,27 @@ class VerificationChallengeLifecycle:
         party_id: UUID,
         thread_id: UUID | None,
         workflow_id: UUID,
-    ) -> None:
+    ) -> LockedPendingChallenges:
         identities = pending_challenge_identities(
             connection,
             party_id=party_id,
             thread_id=thread_id,
             protected_workflow_id=workflow_id,
         )
+        locked: list[PendingChallengeIdentity] = []
         for identity in identities:
-            lock_instance(connection, identity.delivery_instance_id)
+            if lock_instance(connection, identity.delivery_instance_id) is not None:
+                locked.append(identity)
+        return tuple(locked)
 
     def reconcile_superseded_identifier(
         self,
         connection: Connection[tuple[Any, ...]],
         *,
-        party_id: UUID,
-        workflow_id: UUID,
+        pending: LockedPendingChallenges,
         current_identifier_id: UUID,
     ) -> None:
-        identities = pending_challenge_identities(
-            connection,
-            party_id=party_id,
-            thread_id=None,
-            protected_workflow_id=workflow_id,
-        )
-        for identity in identities:
-            if lock_instance(connection, identity.delivery_instance_id) is None:
-                continue
+        for identity in pending:
             locked = lock_challenge_and_command(connection, identity.challenge_id)
             if locked is None:
                 continue
@@ -97,20 +93,10 @@ class VerificationChallengeLifecycle:
         self,
         connection: Connection[tuple[Any, ...]],
         *,
-        party_id: UUID,
-        thread_id: UUID | None,
-        workflow_id: UUID,
+        pending: LockedPendingChallenges,
         terminal_outcome: ProtectedPolicyRejection | None,
     ) -> None:
-        identities = pending_challenge_identities(
-            connection,
-            party_id=party_id,
-            thread_id=thread_id,
-            protected_workflow_id=workflow_id,
-        )
-        for identity in identities:
-            if lock_instance(connection, identity.delivery_instance_id) is None:
-                continue
+        for identity in pending:
             locked = lock_challenge_and_command(connection, identity.challenge_id)
             if locked is None:
                 continue
@@ -137,4 +123,4 @@ class VerificationChallengeLifecycle:
                 )
 
 
-__all__ = ["DeliveryStatus", "VerificationChallengeLifecycle"]
+__all__ = ["DeliveryStatus", "LockedPendingChallenges", "VerificationChallengeLifecycle"]

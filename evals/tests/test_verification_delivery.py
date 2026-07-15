@@ -180,6 +180,62 @@ def test_public_observation_submission_uses_the_verification_attempt_route() -> 
         assert threads.read(scenario.identifier_thread_id).messages
 
 
+def test_queued_verification_expiry_closes_without_emitting_a_delivery() -> None:
+    with renewal_context(
+        verification_code_secret=b"issue-70-queued-expiry",
+        challenge_ttl_seconds=1,
+    ) as (database_url, application, threads):
+        scenario = issue_verification_challenge(application, threads, run_workflow=False)
+        verification_instance_id = scenario.challenge_receipt.result.verification_instance_id
+        challenge_id = scenario.challenge_receipt.result.challenge_id
+        assert verification_instance_id is not None
+        assert challenge_id is not None
+        protected_instance_id = application.start_renewal_outreach(
+            scenario.renewal
+        ).result.instance_id
+        protected_before = KernelInspection(database_url=database_url).snapshot(
+            protected_instance_id
+        )
+        evidence_before = application.renewal_evidence_json(scenario.renewal.input.workflow_id)
+        time.sleep(1.05)
+
+        worker_result = application.run_workflow_worker_once(worker_id="expired-queue-worker")
+        delivery = application.run_delivery_worker_once(worker_id="expired-queue-delivery")
+        terminal = application.submit_verification_code(
+            SubmitVerificationCode(
+                command_id=uuid4(),
+                actor=scenario.actor,
+                cause=Cause("message", str(uuid4())),
+                input=SubmitVerificationCodeInput(
+                    challenge_id=challenge_id,
+                    protected_command_id=scenario.protected_command.command_id,
+                    workflow_id=scenario.renewal.input.workflow_id,
+                    thread_id=scenario.renewal.input.thread_id,
+                    purpose="renewal.read_approved_details",
+                    code="000000",
+                ),
+            )
+        )
+
+        assert worker_result is not None
+        assert worker_result.template_key == "deliver_verification_challenge"
+        assert terminal.result.verification_outcome == "expired"
+        assert terminal.result.protected_outcome is None
+        assert delivery is None
+        assert threads.read(scenario.identifier_thread_id).messages == ()
+        assert (
+            KernelInspection(database_url=database_url).snapshot(verification_instance_id).state
+            == "closed"
+        )
+        assert (
+            KernelInspection(database_url=database_url).snapshot(protected_instance_id)
+            == protected_before
+        )
+        assert (
+            application.renewal_evidence_json(scenario.renewal.input.workflow_id) == evidence_before
+        )
+
+
 def test_verification_attempt_recovers_after_worker_loss_from_fresh_application() -> None:
     secret = b"issue-70-attempt-restart"
     with renewal_context(verification_code_secret=secret) as (

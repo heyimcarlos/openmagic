@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import suppress
 from typing import Any
 from uuid import UUID
 
@@ -28,6 +29,7 @@ from example_insurance.verification_commands import (
     SubmitVerificationCode,
     SubmitVerificationCodeResult,
     VerificationCodeOutcome,
+    protected_policy_rejection,
 )
 from example_insurance.verification_policy import (
     MAX_FAILED_CODE_ATTEMPTS,
@@ -224,21 +226,16 @@ class VerificationSubmissionControl:
 
     @staticmethod
     def _verification_rejection(outcome: ProtectedPolicyRejection) -> VerificationCodeOutcome:
-        if outcome == "identifier_revoked":
-            return "identifier_revoked"
-        if outcome == "workflow_closed":
-            return "workflow_closed"
-        return "authority_revoked"
+        return outcome
 
     @staticmethod
     def _terminal_protected_outcome(value: str | None) -> ProtectedPolicyRejection:
-        if value == "identifier_revoked":
-            return "identifier_revoked"
-        if value == "authority_revoked":
-            return "authority_revoked"
-        if value == "workflow_closed":
-            return "workflow_closed"
-        raise RuntimeError("Rejected protected Command has no terminal policy outcome")
+        try:
+            return protected_policy_rejection(value)
+        except ValueError as error:
+            raise RuntimeError(
+                "Rejected protected Command has no terminal policy outcome"
+            ) from error
 
     @staticmethod
     def _result(
@@ -246,6 +243,9 @@ class VerificationSubmissionControl:
         verification_outcome: VerificationCodeOutcome,
         protected_outcome: ProtectedOutcome | None = None,
     ) -> SubmitVerificationCodeResult:
+        if protected_outcome is None:
+            with suppress(ValueError):
+                protected_outcome = protected_policy_rejection(verification_outcome)
         return SubmitVerificationCodeResult(
             verification_outcome=verification_outcome,
             protected_outcome=protected_outcome,

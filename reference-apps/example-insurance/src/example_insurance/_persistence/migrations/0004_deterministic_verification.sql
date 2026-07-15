@@ -172,12 +172,6 @@ CREATE TABLE example_insurance.verification_workflows (
     UNIQUE (workflow_id, challenge_id, instance_id, protected_workflow_id)
 );
 
-CREATE UNIQUE INDEX one_pending_exact_verification_challenge
-    ON example_insurance.verification_challenges(
-        party_id, thread_id, protected_workflow_id, purpose, protected_command_id
-    )
-    WHERE state = 'pending';
-
 CREATE TABLE example_insurance.verification_events (
     event_id uuid PRIMARY KEY,
     workflow_id uuid NOT NULL

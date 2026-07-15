@@ -13,6 +13,8 @@ from example_insurance.renewals import (
     ProvisionVerificationAuthority,
     ProvisionVerificationAuthorityInput,
     RequestProtectedRenewalDetails,
+    RevokeRenewalAuthority,
+    RevokeRenewalAuthorityInput,
     RevokeVerificationAuthority,
     RevokeVerificationAuthorityInput,
     SubmitVerificationCode,
@@ -65,19 +67,28 @@ def test_current_authority_is_revalidated_after_code_delivery(
                 ),
             )
         )
+        submission_input = SubmitVerificationCodeInput(
+            challenge_id=required.result.challenge_id,
+            protected_command_id=protected.command_id,
+            workflow_id=renewal.input.workflow_id,
+            thread_id=renewal.input.thread_id,
+            purpose="renewal.read_approved_details",
+            code=code,
+        )
         result = application.submit_verification_code(
             SubmitVerificationCode(
                 command_id=uuid4(),
                 actor=actor,
                 cause=Cause("message", str(uuid4())),
-                input=SubmitVerificationCodeInput(
-                    challenge_id=required.result.challenge_id,
-                    protected_command_id=protected.command_id,
-                    workflow_id=renewal.input.workflow_id,
-                    thread_id=renewal.input.thread_id,
-                    purpose="renewal.read_approved_details",
-                    code=code,
-                ),
+                input=submission_input,
+            )
+        )
+        replay = application.submit_verification_code(
+            SubmitVerificationCode(
+                command_id=uuid4(),
+                actor=actor,
+                cause=Cause("message", str(uuid4())),
+                input=submission_input,
             )
         )
 
@@ -85,6 +96,55 @@ def test_current_authority_is_revalidated_after_code_delivery(
         assert result.result.verification_outcome == expected
         assert result.result.protected_outcome == expected
         assert result.result.session_id is None
+        assert replay.result.verification_outcome == expected
+        assert replay.result.protected_outcome == expected
+
+
+def test_invalidated_approval_grant_rejects_and_replays_without_collapsing_outcome() -> None:
+    with renewal_context(verification_code_secret=b"issue-70-grant-revalidation") as (
+        _,
+        application,
+        threads,
+    ):
+        scenario = issue_verification_challenge(application, threads)
+        challenge_id = scenario.challenge_receipt.result.challenge_id
+        assert challenge_id is not None
+        assert scenario.code is not None
+        revoked = application.revoke_renewal_authority(
+            RevokeRenewalAuthority(
+                command_id=uuid4(),
+                actor=Actor("system", "authority-administrator"),
+                cause=Cause("command", str(uuid4())),
+                input=RevokeRenewalAuthorityInput(
+                    workflow_id=scenario.renewal.input.workflow_id,
+                    actor_id=scenario.actor.identifier,
+                ),
+            )
+        )
+
+        def submission() -> SubmitVerificationCode:
+            return SubmitVerificationCode(
+                command_id=uuid4(),
+                actor=scenario.actor,
+                cause=Cause("message", str(uuid4())),
+                input=SubmitVerificationCodeInput(
+                    challenge_id=challenge_id,
+                    protected_command_id=scenario.protected_command.command_id,
+                    workflow_id=scenario.renewal.input.workflow_id,
+                    thread_id=scenario.renewal.input.thread_id,
+                    purpose="renewal.read_approved_details",
+                    code=scenario.code or "",
+                ),
+            )
+
+        rejected = application.submit_verification_code(submission())
+        replay = application.submit_verification_code(submission())
+
+        assert revoked.result.outcome == "revoked"
+        assert rejected.result.verification_outcome == "approval_required"
+        assert rejected.result.protected_outcome == "approval_required"
+        assert replay.result.verification_outcome == "approval_required"
+        assert replay.result.protected_outcome == "approval_required"
 
 
 def test_revoked_membership_can_be_reprovisioned_for_the_existing_participant() -> None:
@@ -428,21 +488,25 @@ def test_expired_challenge_and_closed_workflow_fail_without_mutating_lifecycle()
                 input=CancelRenewalOutreachInput(second_renewal.input.workflow_id),
             )
         )
-        closed = application.submit_verification_code(
-            SubmitVerificationCode(
+        closed_input = SubmitVerificationCodeInput(
+            challenge_id=second_required.result.challenge_id,
+            protected_command_id=second_protected.command_id,
+            workflow_id=second_renewal.input.workflow_id,
+            thread_id=second_renewal.input.thread_id,
+            purpose="renewal.read_approved_details",
+            code=second_code,
+        )
+
+        def closed_submission() -> SubmitVerificationCode:
+            return SubmitVerificationCode(
                 command_id=uuid4(),
                 actor=second_actor,
                 cause=Cause("message", str(uuid4())),
-                input=SubmitVerificationCodeInput(
-                    challenge_id=second_required.result.challenge_id,
-                    protected_command_id=second_protected.command_id,
-                    workflow_id=second_renewal.input.workflow_id,
-                    thread_id=second_renewal.input.thread_id,
-                    purpose="renewal.read_approved_details",
-                    code=second_code,
-                ),
+                input=closed_input,
             )
-        )
+
+        closed = application.submit_verification_code(closed_submission())
+        closed_replay = application.submit_verification_code(closed_submission())
         snapshot = KernelInspection(database_url=database_url).snapshot(
             cancelled.result.instance_id
         )
@@ -450,6 +514,8 @@ def test_expired_challenge_and_closed_workflow_fail_without_mutating_lifecycle()
         assert cancelled.result.outcome == "cancelled"
         assert closed.result.verification_outcome == "workflow_closed"
         assert closed.result.protected_outcome == "workflow_closed"
+        assert closed_replay.result.verification_outcome == "workflow_closed"
+        assert closed_replay.result.protected_outcome == "workflow_closed"
         assert snapshot.state == "closed"
 
 

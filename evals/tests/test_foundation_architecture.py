@@ -51,6 +51,16 @@ def _dependencies(project: Path) -> set[str]:
     }
 
 
+def _from_imports(path: Path) -> set[tuple[str, str]]:
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    return {
+        (node.module, alias.name)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module is not None
+        for alias in node.names
+    }
+
+
 def test_production_dependency_direction_is_one_way() -> None:
     runtime_imports = _imports(ROOT / "packages/openmagic-runtime/src")
     application_imports = _imports(ROOT / "reference-apps/example-insurance/src")
@@ -178,20 +188,22 @@ def test_verification_authority_models_participation_and_roles_separately() -> N
     assert "CREATE TABLE example_insurance.workflow_role_assignments" in migration
 
 
-def test_workflow_worker_delegates_typed_attempt_routes_without_template_branches() -> None:
+def test_worker_and_verification_control_depend_on_narrow_application_seams() -> None:
     application_root = ROOT / "reference-apps/example-insurance/src/example_insurance"
-    worker_source = (application_root / "workflow_worker_control.py").read_text(encoding="utf-8")
-    registry_source = (application_root / "renewal_registry.py").read_text(encoding="utf-8")
+    worker_imports = _from_imports(application_root / "workflow_worker_control.py")
+    request_imports = _from_imports(application_root / "verification_request_control.py")
 
-    assert "VerificationAttemptControl" not in worker_source
-    assert "deliver_verification_challenge" not in worker_source
-    assert "send_renewal_email" not in worker_source
-    assert "reconcile_renewal_email" not in worker_source
-    assert "verification_attempts" not in worker_source
-    assert "CommandReceipt" not in worker_source
-    assert "ExternalEffectPermit" not in worker_source
-    assert "submit_ordinary_observation" not in worker_source
-    assert "renewal_command_dispatcher" not in registry_source
+    assert all(
+        module
+        not in {
+            "example_insurance.renewal_attempt_control",
+            "example_insurance.renewal_effects",
+            "example_insurance.verification_attempt_control",
+        }
+        for module, _ in worker_imports
+    )
+    assert ("openmagic_runtime.threads", "ThreadAccess") in request_imports
+    assert ("openmagic_runtime.threads", "ThreadStore") not in request_imports
 
 
 def test_playground_safety_is_verified_through_its_process_interface() -> None:

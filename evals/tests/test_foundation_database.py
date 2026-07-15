@@ -13,6 +13,7 @@ from example_insurance.reset import (
     reset_synthetic_deployment,
 )
 from openmagic_evals.harness._postgres import postgres_container
+from openmagic_runtime.threads import CreateThread, ThreadAccess, ThreadStore
 
 
 @pytest.mark.integration
@@ -43,7 +44,13 @@ def test_cold_migrations_create_independently_owned_schemas_without_reverse_fore
         ]
         assert all(not bundle.versions for bundle in second)
 
+        thread_id = uuid4()
+        ThreadStore(database_url=database_url).create(
+            CreateThread(thread_id, "email", "metadata@example.test")
+        )
+
         with psycopg.connect(database_url) as connection:
+            thread_metadata = ThreadAccess(connection).metadata(thread_id)
             histories = connection.execute(
                 "SELECT 'openmagic_runtime', version FROM openmagic_runtime.migration_history "
                 "UNION ALL "
@@ -85,6 +92,18 @@ def test_cold_migrations_create_independently_owned_schemas_without_reverse_fore
                 "AND table_row.relname = 'protected_commands' "
                 "AND constraint_row.contype = 'c'"
             ).fetchall()
+            challenge_constraints = connection.execute(
+                "SELECT constraint_row.contype, pg_get_constraintdef(constraint_row.oid) "
+                "FROM pg_constraint AS constraint_row "
+                "JOIN pg_class AS table_row ON table_row.oid = constraint_row.conrelid "
+                "JOIN pg_namespace AS schema_row ON schema_row.oid = table_row.relnamespace "
+                "WHERE schema_row.nspname = 'example_insurance' "
+                "AND table_row.relname = 'verification_challenges'"
+            ).fetchall()
+            redundant_pending_index = connection.execute(
+                "SELECT indexname FROM pg_indexes WHERE schemaname = 'example_insurance' "
+                "AND indexname = 'one_pending_exact_verification_challenge'"
+            ).fetchall()
 
         assert histories == [
             ("example_insurance", "0001_example_insurance_baseline"),
@@ -96,12 +115,25 @@ def test_cold_migrations_create_independently_owned_schemas_without_reverse_fore
             ("openmagic_runtime", "0003_fenced_effect_kernel"),
         ]
         assert reverse_foreign_keys == []
+        assert thread_metadata.channel_kind == "email"
+        assert thread_metadata.channel_reference == "metadata@example.test"
+        assert not hasattr(thread_metadata, "messages")
         assert invalid_singleton_constraints == []
         assert draft_step_uniqueness == (1,)
         assert any(
             definition.count("outcome IS NOT NULL") == 2
             for (definition,) in protected_command_checks
         )
+        assert ("u", "UNIQUE (protected_command_id)") in challenge_constraints
+        assert any(
+            kind == "f"
+            and definition.startswith(
+                "FOREIGN KEY (protected_command_id, party_id, thread_id, "
+                "protected_workflow_id, purpose)"
+            )
+            for kind, definition in challenge_constraints
+        )
+        assert redundant_pending_index == []
 
 
 @pytest.mark.integration

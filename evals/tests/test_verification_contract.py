@@ -206,6 +206,34 @@ def test_verification_receipts_and_code_capability_reject_invalid_public_states(
         )
 
 
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        "approval_required",
+        "authority_revoked",
+        "identifier_revoked",
+        "workflow_closed",
+        "wrong_party",
+        "wrong_purpose",
+        "wrong_thread",
+    ],
+)
+def test_terminal_policy_receipts_preserve_every_named_rejection(outcome: str) -> None:
+    decoded_outcome = json.loads(json.dumps(outcome))
+
+    receipt = SubmitVerificationCodeResult(
+        verification_outcome=decoded_outcome,
+        protected_outcome=decoded_outcome,
+        challenge_id=uuid4(),
+        protected_command_id=uuid4(),
+        session_id=None,
+        authorized_delivery_id=None,
+    )
+
+    assert receipt.verification_outcome == outcome
+    assert receipt.protected_outcome == outcome
+
+
 def test_verification_code_is_single_use_replay_safe_and_serialized() -> None:
     with renewal_context(verification_code_secret=b"issue-70-code-race-secret") as (
         _,
@@ -443,8 +471,20 @@ def test_challenge_rejects_every_wrong_binding_without_consuming_code() -> None:
             ).result.verification_outcome
             for submission_actor, input_value, _ in submissions
         )
+        replay_outcomes = tuple(
+            application.submit_verification_code(
+                SubmitVerificationCode(
+                    command_id=uuid4(),
+                    actor=submission_actor,
+                    cause=Cause("message", str(uuid4())),
+                    input=input_value,
+                )
+            ).result.verification_outcome
+            for submission_actor, input_value, _ in submissions
+        )
 
         assert outcomes == tuple(expected for _, _, expected in submissions)
+        assert replay_outcomes == outcomes
         request_outcomes = tuple(
             application.request_protected_renewal_details(
                 RequestProtectedRenewalDetails(

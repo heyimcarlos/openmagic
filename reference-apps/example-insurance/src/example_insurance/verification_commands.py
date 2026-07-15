@@ -20,8 +20,10 @@ ProtectedPolicyRejection = Literal[
     "wrong_thread",
 ]
 ProtectedOutcome = Literal["authorized"] | ProtectedPolicyRejection
+ProtectedRequestOutcome = ProtectedOutcome | Literal["verification_required"]
 VerificationCodeOutcome = Literal[
     "verified",
+    "approval_required",
     "invalid_code",
     "expired",
     "already_used",
@@ -45,8 +47,7 @@ ChallengeTerminalResolution = (
     ]
 )
 ProtectedCommandOutcome = Literal["authorized"] | ChallengeTerminalResolution
-_REQUEST_OUTCOMES = {
-    "authorized",
+_PROTECTED_POLICY_REJECTIONS = {
     "approval_required",
     "authority_revoked",
     "identifier_revoked",
@@ -54,24 +55,79 @@ _REQUEST_OUTCOMES = {
     "wrong_party",
     "wrong_purpose",
     "wrong_thread",
-    "verification_required",
 }
-_CODE_OUTCOMES = {
-    "verified",
-    "invalid_code",
-    "expired",
-    "already_used",
-    "delivery_unconfirmed",
-    "delivery_failed",
-    "identifier_revoked",
-    "authority_revoked",
-    "workflow_closed",
-    "wrong_party",
-    "wrong_protected_command",
-    "wrong_thread",
-    "wrong_workflow",
-    "wrong_purpose",
-}
+
+
+def protected_policy_rejection(value: object) -> ProtectedPolicyRejection:
+    if value == "approval_required":
+        return "approval_required"
+    if value == "authority_revoked":
+        return "authority_revoked"
+    if value == "identifier_revoked":
+        return "identifier_revoked"
+    if value == "workflow_closed":
+        return "workflow_closed"
+    if value == "wrong_party":
+        return "wrong_party"
+    if value == "wrong_purpose":
+        return "wrong_purpose"
+    if value == "wrong_thread":
+        return "wrong_thread"
+    raise ValueError("Protected policy rejection is invalid")
+
+
+def protected_outcome(value: object) -> ProtectedOutcome | None:
+    if value is None:
+        return None
+    if value == "authorized":
+        return "authorized"
+    return protected_policy_rejection(value)
+
+
+def protected_request_outcome(value: object) -> ProtectedRequestOutcome:
+    if value == "verification_required":
+        return "verification_required"
+    try:
+        outcome = protected_outcome(value)
+    except ValueError as error:
+        raise ValueError("Protected request receipt has an invalid outcome") from error
+    if outcome is None:
+        raise ValueError("Protected request outcome is invalid")
+    return outcome
+
+
+def verification_code_outcome(value: object) -> VerificationCodeOutcome:
+    if value == "verified":
+        return "verified"
+    if value == "approval_required":
+        return "approval_required"
+    if value == "invalid_code":
+        return "invalid_code"
+    if value == "expired":
+        return "expired"
+    if value == "already_used":
+        return "already_used"
+    if value == "delivery_unconfirmed":
+        return "delivery_unconfirmed"
+    if value == "delivery_failed":
+        return "delivery_failed"
+    if value == "identifier_revoked":
+        return "identifier_revoked"
+    if value == "authority_revoked":
+        return "authority_revoked"
+    if value == "workflow_closed":
+        return "workflow_closed"
+    if value == "wrong_party":
+        return "wrong_party"
+    if value == "wrong_protected_command":
+        return "wrong_protected_command"
+    if value == "wrong_thread":
+        return "wrong_thread"
+    if value == "wrong_workflow":
+        return "wrong_workflow"
+    if value == "wrong_purpose":
+        return "wrong_purpose"
+    raise ValueError("Verification receipt has an invalid outcome")
 
 
 @dataclass(frozen=True)
@@ -141,7 +197,7 @@ class RequestProtectedRenewalDetails:
 
 @dataclass(frozen=True)
 class RequestProtectedRenewalDetailsResult:
-    outcome: ProtectedOutcome | Literal["verification_required"]
+    outcome: ProtectedRequestOutcome
     workflow_id: UUID
     challenge_id: UUID | None
     verification_workflow_id: UUID | None
@@ -149,8 +205,7 @@ class RequestProtectedRenewalDetailsResult:
     authorized_delivery_id: UUID | None
 
     def __post_init__(self) -> None:
-        if self.outcome not in _REQUEST_OUTCOMES:
-            raise ValueError("Protected request receipt has an invalid outcome")
+        protected_request_outcome(self.outcome)
         verification_ids = (
             self.challenge_id,
             self.verification_workflow_id,
@@ -205,8 +260,7 @@ class SubmitVerificationCodeResult:
     authorized_delivery_id: UUID | None
 
     def __post_init__(self) -> None:
-        if self.verification_outcome not in _CODE_OUTCOMES:
-            raise ValueError("Verification receipt has an invalid outcome")
+        verification_code_outcome(self.verification_outcome)
         if self.verification_outcome == "verified":
             if (
                 self.protected_outcome != "authorized"
@@ -217,11 +271,11 @@ class SubmitVerificationCodeResult:
             return
         if self.session_id is not None or self.authorized_delivery_id is not None:
             raise ValueError("A rejected verification receipt cannot contain assurance IDs")
-        required_protected_outcome = {
-            "identifier_revoked": "identifier_revoked",
-            "authority_revoked": "authority_revoked",
-            "workflow_closed": "workflow_closed",
-        }.get(self.verification_outcome)
+        required_protected_outcome = (
+            self.verification_outcome
+            if self.verification_outcome in _PROTECTED_POLICY_REJECTIONS
+            else None
+        )
         if self.protected_outcome != required_protected_outcome:
             raise ValueError("A rejected verification receipt has inconsistent outcomes")
 
@@ -283,6 +337,7 @@ __all__ = [
     "ProtectedCommandOutcome",
     "ProtectedOutcome",
     "ProtectedPolicyRejection",
+    "ProtectedRequestOutcome",
     "ProvisionVerificationAuthority",
     "ProvisionVerificationAuthorityInput",
     "ProvisionVerificationAuthorityResult",
@@ -298,8 +353,12 @@ __all__ = [
     "VerificationAuthorityTarget",
     "VerificationCodeOutcome",
     "VerificationPurpose",
+    "protected_outcome",
+    "protected_policy_rejection",
+    "protected_request_outcome",
     "validate_authority_revocation",
     "validate_code_submission",
     "validate_protected_request",
     "validate_provision",
+    "verification_code_outcome",
 ]

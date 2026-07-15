@@ -19,10 +19,13 @@ from example_insurance.verification_commands import (
     RevokeVerificationAuthorityResult,
     SubmitVerificationCode,
     SubmitVerificationCodeResult,
+    protected_outcome,
+    protected_request_outcome,
     validate_authority_revocation,
     validate_code_submission,
     validate_protected_request,
     validate_provision,
+    verification_code_outcome,
 )
 
 
@@ -62,7 +65,7 @@ def _decode_provision(payload: dict[str, Any]) -> ProvisionVerificationAuthority
 
 def _decode_request(payload: dict[str, Any]) -> RequestProtectedRenewalDetailsResult:
     return RequestProtectedRenewalDetailsResult(
-        outcome=payload["outcome"],
+        outcome=protected_request_outcome(payload["outcome"]),
         workflow_id=UUID(payload["workflow_id"]),
         challenge_id=_optional_uuid(payload["challenge_id"]),
         verification_workflow_id=_optional_uuid(payload["verification_workflow_id"]),
@@ -82,8 +85,8 @@ def _decode_revocation(payload: dict[str, Any]) -> RevokeVerificationAuthorityRe
 
 def _decode_submission(payload: dict[str, Any]) -> SubmitVerificationCodeResult:
     return SubmitVerificationCodeResult(
-        verification_outcome=payload["verification_outcome"],
-        protected_outcome=payload["protected_outcome"],
+        verification_outcome=verification_code_outcome(payload["verification_outcome"]),
+        protected_outcome=protected_outcome(payload["protected_outcome"]),
         challenge_id=UUID(payload["challenge_id"]),
         protected_command_id=UUID(payload["protected_command_id"]),
         session_id=_optional_uuid(payload["session_id"]),

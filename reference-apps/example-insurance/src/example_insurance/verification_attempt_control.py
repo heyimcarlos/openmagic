@@ -15,6 +15,7 @@ from psycopg import Connection
 from example_insurance.renewal_commands import WorkflowAttemptResult
 from example_insurance.verification_authority_records import lock_identifier_destination
 from example_insurance.verification_challenge_records import (
+    challenge_is_expired,
     lock_challenge,
     resolve_terminal_challenge,
 )
@@ -65,6 +66,19 @@ class VerificationAttemptControl:
                 required=required,
                 workflow_id=workflow.workflow_id,
                 failure_class="verification_challenge_terminal",
+            )
+            return self._result(attempt)
+        if challenge_is_expired(connection, challenge):
+            self._fail_and_close(
+                connection,
+                required=required,
+                workflow_id=workflow.workflow_id,
+                failure_class="verification_challenge_expired",
+            )
+            resolve_terminal_challenge(
+                connection,
+                challenge=challenge,
+                resolution="verification_expired",
             )
             return self._result(attempt)
         destination = lock_identifier_destination(connection, party_id=challenge.party_id)

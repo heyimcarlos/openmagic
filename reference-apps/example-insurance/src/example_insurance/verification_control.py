@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from openmagic_runtime.threads import ThreadStore
 from psycopg import Connection
 
 from example_insurance.verification_challenge_lifecycle import VerificationChallengeLifecycle
@@ -30,7 +29,6 @@ class VerificationControl:
         self,
         *,
         codes: VerificationCodes,
-        threads: ThreadStore,
         challenge_ttl_seconds: int = 600,
         session_ttl_seconds: int = 900,
     ) -> None:
@@ -44,7 +42,6 @@ class VerificationControl:
             policy=policy,
             lifecycle=lifecycle,
             deliveries=deliveries,
-            threads=threads,
         )
         self._submissions = VerificationSubmissionControl(
             codes=codes,

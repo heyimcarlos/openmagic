@@ -7,7 +7,7 @@ from uuid import UUID, uuid4
 
 from openmagic_runtime.commands import StateConflict
 from openmagic_runtime.kernel.control import KernelControl, StartInstance
-from openmagic_runtime.threads import ThreadStore
+from openmagic_runtime.threads import ThreadAccess
 from psycopg import Connection
 
 from example_insurance.renewal_records import record_event
@@ -17,7 +17,10 @@ from example_insurance.verification_authority_records import (
     provision_authority,
     revoke_authority,
 )
-from example_insurance.verification_challenge_lifecycle import VerificationChallengeLifecycle
+from example_insurance.verification_challenge_lifecycle import (
+    LockedPendingChallenges,
+    VerificationChallengeLifecycle,
+)
 from example_insurance.verification_challenge_records import active_session, record_challenge
 from example_insurance.verification_commands import (
     ProtectedOutcome,
@@ -46,21 +49,19 @@ class VerificationRequestControl:
         policy: VerificationPolicy,
         lifecycle: VerificationChallengeLifecycle,
         deliveries: ProtectedRenewalDeliveryControl,
-        threads: ThreadStore,
     ) -> None:
         self._challenge_ttl_seconds = challenge_ttl_seconds
         self._policy = policy
         self._lifecycle = lifecycle
         self._deliveries = deliveries
-        self._threads = threads
 
     def provision(
         self,
         command: ProvisionVerificationAuthority,
         connection: Connection[tuple[Any, ...]],
     ) -> ProvisionVerificationAuthorityResult:
-        self._require_identifier_thread(command)
-        self._lifecycle.lock_pending_instances(
+        self._require_identifier_thread(command, connection)
+        pending = self._lifecycle.lock_pending_instances(
             connection,
             party_id=command.input.party_id,
             thread_id=None,
@@ -71,8 +72,7 @@ class VerificationRequestControl:
         provisioned = provision_authority(connection, command.input)
         self._lifecycle.reconcile_superseded_identifier(
             connection,
-            party_id=command.input.party_id,
-            workflow_id=command.input.workflow_id,
+            pending=pending,
             current_identifier_id=provisioned.identifier_id,
         )
         return ProvisionVerificationAuthorityResult(
@@ -83,10 +83,14 @@ class VerificationRequestControl:
             participant_id=provisioned.participant_id,
         )
 
-    def _require_identifier_thread(self, command: ProvisionVerificationAuthority) -> None:
+    @staticmethod
+    def _require_identifier_thread(
+        command: ProvisionVerificationAuthority,
+        connection: Connection[tuple[Any, ...]],
+    ) -> None:
         value = command.input
         try:
-            thread = self._threads.read(value.delivery_thread_id)
+            thread = ThreadAccess(connection).metadata(value.delivery_thread_id)
         except KeyError as error:
             raise ValueError("Verification identifier Thread is unavailable") from error
         if (
@@ -102,14 +106,14 @@ class VerificationRequestControl:
     ) -> RequestProtectedRenewalDetailsResult:
         value = command.input
         party_id = UUID(command.actor.identifier)
-        self._lifecycle.lock_pending_instances(
+        pending = self._lifecycle.lock_pending_instances(
             connection,
             party_id=party_id,
             thread_id=value.thread_id,
             workflow_id=value.workflow_id,
         )
         if lock_instance_for_workflow(connection, value.workflow_id) is None:
-            return self._terminal_request(command, party_id, connection, "workflow_closed")
+            return self._terminal_request(command, connection, pending, "workflow_closed")
         authority = lock_authority(
             connection,
             workflow_id=value.workflow_id,
@@ -117,7 +121,7 @@ class VerificationRequestControl:
             approval_grant_id=value.approval_grant_id,
         )
         if authority is None:
-            return self._terminal_request(command, party_id, connection, "workflow_closed")
+            return self._terminal_request(command, connection, pending, "workflow_closed")
         outcome = self._policy.authorize(
             authority,
             party_id=party_id,
@@ -128,17 +132,13 @@ class VerificationRequestControl:
             if outcome in {"authority_revoked", "identifier_revoked", "workflow_closed"}:
                 self._lifecycle.reconcile_pending(
                     connection,
-                    party_id=party_id,
-                    thread_id=value.thread_id,
-                    workflow_id=value.workflow_id,
+                    pending=pending,
                     terminal_outcome=outcome,
                 )
             return self._result(command, outcome)
         self._lifecycle.reconcile_pending(
             connection,
-            party_id=party_id,
-            thread_id=value.thread_id,
-            workflow_id=value.workflow_id,
+            pending=pending,
             terminal_outcome=None,
         )
         if active_session(connection, party_id=party_id, thread_id=value.thread_id) is not None:
@@ -177,7 +177,7 @@ class VerificationRequestControl:
         connection: Connection[tuple[Any, ...]],
     ) -> RevokeVerificationAuthorityResult:
         value = command.input
-        self._lifecycle.lock_pending_instances(
+        pending = self._lifecycle.lock_pending_instances(
             connection,
             party_id=value.party_id,
             thread_id=None,
@@ -201,9 +201,7 @@ class VerificationRequestControl:
         )
         self._lifecycle.reconcile_pending(
             connection,
-            party_id=value.party_id,
-            thread_id=None,
-            workflow_id=value.workflow_id,
+            pending=pending,
             terminal_outcome=(
                 "identifier_revoked" if value.target == "identifier" else "authority_revoked"
             ),
@@ -218,15 +216,13 @@ class VerificationRequestControl:
     def _terminal_request(
         self,
         command: RequestProtectedRenewalDetails,
-        party_id: UUID,
         connection: Connection[tuple[Any, ...]],
+        pending: LockedPendingChallenges,
         outcome: ProtectedPolicyRejection,
     ) -> RequestProtectedRenewalDetailsResult:
         self._lifecycle.reconcile_pending(
             connection,
-            party_id=party_id,
-            thread_id=command.input.thread_id,
-            workflow_id=command.input.workflow_id,
+            pending=pending,
             terminal_outcome=outcome,
         )
         return self._result(command, outcome)
