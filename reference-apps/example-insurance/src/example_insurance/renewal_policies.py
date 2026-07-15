@@ -73,6 +73,13 @@ class CompletionEffectFact:
     has_applied_evidence: bool
 
 
+@dataclass(frozen=True)
+class CancellationFacts:
+    lifecycle: str
+    actor_authorized: bool
+    dispatch_boundary_crossed: bool
+
+
 class RenewalApprovalPolicy:
     @staticmethod
     def decide(
@@ -91,12 +98,14 @@ class RenewalApprovalPolicy:
         route = "approve_email" if decision_kind == "approve" else "revise_email"
         return ApprovalDecision(None, route)
 
+
+class RenewalLifecyclePolicy:
     @staticmethod
     def authorizes_revocation(*, actor_kind: str, actor_id: str) -> bool:
         return actor_kind == "system" and actor_id == "authority-administrator"
 
     @staticmethod
-    def authorizes_cancellation(
+    def actor_can_cancel(
         *,
         actor_kind: str,
         actor_id: str,
@@ -106,6 +115,26 @@ class RenewalApprovalPolicy:
         return (actor_kind == authorized_actor_kind and actor_id == authorized_actor_id) or (
             actor_kind == "system" and actor_id == "workflow-administrator"
         )
+
+    @staticmethod
+    def cancellation_outcome(
+        facts: CancellationFacts,
+    ) -> Literal[
+        "unauthorized",
+        "already_completed",
+        "already_cancelled",
+        "too_late",
+        "cancelled",
+    ]:
+        if not facts.actor_authorized:
+            return "unauthorized"
+        if facts.lifecycle == "completed":
+            return "already_completed"
+        if facts.lifecycle == "cancelled":
+            return "already_cancelled"
+        if facts.dispatch_boundary_crossed:
+            return "too_late"
+        return "cancelled"
 
 
 class RenewalWorkflowPolicy:
@@ -284,6 +313,7 @@ __all__ = [
     "RENEWAL_ATTEMPT_RETRY_POLICY",
     "ApprovalDecision",
     "ApprovalDecisionFacts",
+    "CancellationFacts",
     "CompletionEffectFact",
     "CompletionStepFact",
     "EffectAuthorizationFacts",
@@ -292,6 +322,7 @@ __all__ = [
     "RenewalCompletionPolicy",
     "RenewalDeliveryPolicy",
     "RenewalExternalEffectPolicy",
+    "RenewalLifecyclePolicy",
     "RenewalWorkflowPolicy",
     "RouteDecision",
 ]

@@ -11,6 +11,7 @@ from example_insurance.migrations import apply_migrations
 from openmagic_evals.harness._postgres import postgres_container
 from openmagic_runtime.kernel.control import (
     AcceptSignal,
+    CloseInstance,
     KernelControl,
     StartInstance,
     start_instance,
@@ -169,3 +170,50 @@ def test_competing_signals_have_one_winner_in_100_seeded_real_transaction_races(
             assert sum(isinstance(outcome, RuntimeError) for outcome in outcomes) == 1, seed
             assert len(snapshot.steps) == 1, seed
             assert snapshot.waits[0].state == "satisfied", seed
+
+
+def test_concurrent_exact_signal_and_closure_replays_return_one_receipt() -> None:
+    with postgres_container(database_name=f"openmagic_test_{uuid4().hex}") as postgres:
+        database_url = postgres.get_connection_url(driver=None)
+        apply_migrations(database_url)
+        DefinitionCatalog(database_url=database_url).register(signal_race_definition())
+        subject_id = uuid4()
+        started = start_instance(
+            database_url=database_url,
+            request=StartInstance(
+                command_id=uuid4(),
+                definition_key="eval.signal_race",
+                definition_version=1,
+                instance_input={"subject_id": str(subject_id)},
+                route_input={"subject_id": str(subject_id)},
+            ),
+        )
+        signal = AcceptSignal(
+            uuid4(),
+            started.instance_id,
+            started.waits["decision"],
+            "eval.signal.decision",
+            1,
+            {"subject_id": str(subject_id)},
+            "approve",
+        )
+
+        def accept() -> object:
+            with psycopg.connect(database_url) as connection, connection.transaction():
+                return KernelControl(connection).accept_signal(signal)
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            signal_futures = tuple(executor.submit(accept) for _ in range(2))
+            signal_receipts = tuple(future.result() for future in signal_futures)
+        assert signal_receipts[0] == signal_receipts[1]
+
+        closure = CloseInstance(uuid4(), started.instance_id)
+
+        def close() -> object:
+            with psycopg.connect(database_url) as connection, connection.transaction():
+                return KernelControl(connection).close(closure)
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            close_futures = tuple(executor.submit(close) for _ in range(2))
+            close_receipts = tuple(future.result() for future in close_futures)
+        assert close_receipts[0] == close_receipts[1]

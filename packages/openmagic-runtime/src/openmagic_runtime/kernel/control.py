@@ -148,6 +148,18 @@ def _lock_open_instance(connection: Connection[tuple[Any, ...]], instance_id: UU
         raise RuntimeError("Instance is closed")
 
 
+def _lock_source_identity(
+    connection: Connection[tuple[Any, ...]],
+    *,
+    source_kind: str,
+    source_id: UUID,
+) -> None:
+    connection.execute(
+        "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+        (f"{source_kind}:{source_id}",),
+    )
+
+
 def _validate_disposition(
     connection: Connection[tuple[Any, ...]],
     required: DispositionRequired,
@@ -528,6 +540,11 @@ class KernelControl:
             "route_key": request.route_key,
         }
         input_digest = canonical_digest(transition_input)
+        _lock_source_identity(
+            self._connection,
+            source_kind="signal_acceptance",
+            source_id=request.signal_id,
+        )
         replay = self._connection.execute(
             "SELECT input_digest, receipt FROM openmagic_runtime.trace_events "
             "WHERE source_kind = 'signal_acceptance' AND source_id = %s",
@@ -738,6 +755,11 @@ class KernelControl:
 
     def resolve_deferred(self, request: ResolveDeferredStep) -> ResolveDeferredStepReceipt:
         input_digest = canonical_digest(request)
+        _lock_source_identity(
+            self._connection,
+            source_kind="deferred_resolution",
+            source_id=request.source_id,
+        )
         replay = self._connection.execute(
             "SELECT input_digest, receipt FROM openmagic_runtime.trace_events "
             "WHERE source_kind = 'deferred_resolution' AND source_id = %s",
@@ -830,6 +852,11 @@ class KernelControl:
             "instance_id": str(request.instance_id),
         }
         digest = canonical_digest(transition_input)
+        _lock_source_identity(
+            self._connection,
+            source_kind="instance_closure",
+            source_id=request.command_id,
+        )
         replay = self._connection.execute(
             "SELECT input_digest, receipt FROM openmagic_runtime.trace_events "
             "WHERE source_kind = 'instance_closure' AND source_id = %s",

@@ -39,12 +39,14 @@ from example_insurance.renewal_effects import (
 )
 from example_insurance.renewal_policies import (
     ApprovalDecisionFacts,
+    CancellationFacts,
     CompletionEffectFact,
     CompletionStepFact,
     EffectAuthorizationFacts,
     RenewalApprovalPolicy,
     RenewalCompletionPolicy,
     RenewalExternalEffectPolicy,
+    RenewalLifecyclePolicy,
 )
 
 
@@ -71,6 +73,7 @@ class RenewalApprovalControl:
     def __init__(self) -> None:
         self._approval_policy = RenewalApprovalPolicy()
         self._effect_policy = RenewalExternalEffectPolicy()
+        self._lifecycle_policy = RenewalLifecyclePolicy()
         self._completion_policy = RenewalCompletionPolicy()
 
     @staticmethod
@@ -276,7 +279,7 @@ class RenewalApprovalControl:
         ).fetchone()
         if row is None:
             raise StateConflict("Renewal Workflow does not exist")
-        if not self._approval_policy.authorizes_revocation(
+        if not self._lifecycle_policy.authorizes_revocation(
             actor_kind=command.actor.kind,
             actor_id=command.actor.identifier,
         ):
@@ -320,27 +323,37 @@ class RenewalApprovalControl:
             raise StateConflict("Renewal Workflow does not exist")
         instance_id = UUID(str(row[0]))
         lifecycle = str(row[1])
-        if not self._approval_policy.authorizes_cancellation(
+        actor_authorized = self._lifecycle_policy.actor_can_cancel(
             actor_kind=command.actor.kind,
             actor_id=command.actor.identifier,
             authorized_actor_kind=str(row[2]),
             authorized_actor_id=str(row[3]),
-        ):
-            raise StateConflict("Actor is not authorized to cancel renewal outreach")
-        if lifecycle == "completed":
-            return CancelRenewalOutreachResult(
-                "already_completed", command.input.workflow_id, instance_id
-            )
-        if lifecycle == "cancelled":
-            return CancelRenewalOutreachResult(
-                "already_cancelled", command.input.workflow_id, instance_id
-            )
+        )
         crossed = connection.execute(
             "SELECT 1 FROM example_insurance.external_effects WHERE workflow_id = %s LIMIT 1",
             (command.input.workflow_id,),
         ).fetchone()
-        if crossed is not None:
+        outcome = self._lifecycle_policy.cancellation_outcome(
+            CancellationFacts(
+                lifecycle=lifecycle,
+                actor_authorized=actor_authorized,
+                dispatch_boundary_crossed=crossed is not None,
+            )
+        )
+        if outcome == "unauthorized":
+            raise StateConflict("Actor is not authorized to cancel renewal outreach")
+        if outcome == "already_completed":
+            return CancelRenewalOutreachResult(
+                "already_completed", command.input.workflow_id, instance_id
+            )
+        if outcome == "already_cancelled":
+            return CancelRenewalOutreachResult(
+                "already_cancelled", command.input.workflow_id, instance_id
+            )
+        if outcome == "too_late":
             return CancelRenewalOutreachResult("too_late", command.input.workflow_id, instance_id)
+        if outcome != "cancelled":
+            raise RuntimeError("Cancellation Policy returned an unsupported decision")
         connection.execute(
             "UPDATE example_insurance.approval_grants SET invalidated_at = clock_timestamp() "
             "WHERE workflow_id = %s AND consumed_at IS NULL AND invalidated_at IS NULL",
