@@ -10,7 +10,12 @@ from uuid import UUID
 import psycopg
 from psycopg import Connection
 
-from openmagic_runtime._canonical import canonical_bytes
+from openmagic_runtime._canonical import canonical_bytes, canonical_digest
+
+
+def content_fingerprint(value: object) -> str:
+    """Return the runtime's canonical SHA-256 fingerprint for typed public evidence."""
+    return canonical_digest(value)
 
 
 @dataclass(frozen=True)
@@ -162,5 +167,6 @@ __all__ = [
     "RuntimeInstanceEvidence",
     "RuntimeStepEvidence",
     "RuntimeWaitEvidence",
+    "content_fingerprint",
     "inspect_runtime_database",
 ]

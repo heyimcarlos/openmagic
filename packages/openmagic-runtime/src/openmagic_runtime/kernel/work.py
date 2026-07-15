@@ -65,6 +65,7 @@ class DispositionRequired:
     attempt_number: int
     template_key: str
     observation: dict[str, Any]
+    basis_state: Literal["completed", "abandoned"] = "completed"
     consumed: bool = False
     replayed: bool = False
 
@@ -356,14 +357,16 @@ class KernelWork:
         )
         return result
 
-    def recover_expired(self) -> DispositionRequired | None:
+    def recover_expired(self, instance_id: UUID | None = None) -> DispositionRequired | None:
         instance = self._connection.execute(
             "SELECT i.instance_id FROM openmagic_runtime.instances AS i WHERE i.state = 'open' "
+            "AND (%s::uuid IS NULL OR i.instance_id = %s) "
             "AND EXISTS (SELECT 1 FROM openmagic_runtime.attempts AS a "
             "WHERE a.instance_id = i.instance_id AND a.state = 'leased' "
             "AND (a.lease_expires_at <= clock_timestamp() "
             "OR a.hard_deadline <= clock_timestamp())) "
-            "ORDER BY i.created_at, i.instance_id FOR UPDATE SKIP LOCKED LIMIT 1"
+            "ORDER BY i.created_at, i.instance_id FOR UPDATE SKIP LOCKED LIMIT 1",
+            (instance_id, instance_id),
         ).fetchone()
         if instance is None:
             return None
@@ -403,6 +406,7 @@ class KernelWork:
             attempt_number=int(attempt[2]),
             template_key=str(attempt[3]),
             observation={"expiry_cause": "lease_or_hard_deadline"},
+            basis_state="abandoned",
         )
 
     def accept_result(
@@ -454,6 +458,7 @@ class KernelWork:
                 attempt_number=attempt.attempt_number,
                 template_key=attempt.template_key,
                 observation=dict(existing[4]),
+                basis_state="completed",
                 consumed=True,
                 replayed=True,
             )
@@ -486,6 +491,7 @@ class KernelWork:
             attempt_number=attempt.attempt_number,
             template_key=attempt.template_key,
             observation=observation,
+            basis_state="completed",
         )
 
 
