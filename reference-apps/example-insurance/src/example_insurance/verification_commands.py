@@ -140,7 +140,7 @@ def verification_rejection(outcome: ProtectedPolicyRejection) -> VerificationCod
     return outcome
 
 
-def verification_terminal_protected_outcome(
+def _verification_terminal_protected_outcome(
     outcome: VerificationCodeOutcome,
 ) -> ProtectedPolicyRejection | None:
     if outcome == "approval_required":
@@ -301,7 +301,7 @@ class SubmitVerificationCodeResult:
             return
         if self.session_id is not None or self.authorized_delivery_id is not None:
             raise ValueError("A rejected verification receipt cannot contain assurance IDs")
-        terminal_outcome = verification_terminal_protected_outcome(self.verification_outcome)
+        terminal_outcome = _verification_terminal_protected_outcome(self.verification_outcome)
         if terminal_outcome is not None:
             if self.protected_outcome != terminal_outcome:
                 raise ValueError("A terminal verification receipt needs its protected outcome")
@@ -393,5 +393,4 @@ __all__ = [
     "validate_provision",
     "verification_code_outcome",
     "verification_rejection",
-    "verification_terminal_protected_outcome",
 ]

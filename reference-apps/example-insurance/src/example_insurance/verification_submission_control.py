@@ -183,7 +183,7 @@ class VerificationSubmissionControl:
         )
         return self._result(
             command,
-            self._verification_rejection(protected_outcome),
+            verification_rejection(protected_outcome),
             protected_outcome,
         )
 
@@ -201,7 +201,7 @@ class VerificationSubmissionControl:
             protected_outcome = self._terminal_protected_outcome(protected.outcome)
             return self._result(
                 command,
-                self._verification_rejection(protected_outcome),
+                verification_rejection(protected_outcome),
                 protected_outcome,
             )
         return self._result(command, "already_used")
@@ -223,10 +223,6 @@ class VerificationSubmissionControl:
         if value.purpose != protected.purpose:
             return "wrong_purpose"
         return None
-
-    @staticmethod
-    def _verification_rejection(outcome: ProtectedPolicyRejection) -> VerificationCodeOutcome:
-        return verification_rejection(outcome)
 
     @staticmethod
     def _terminal_protected_outcome(value: str | None) -> ProtectedPolicyRejection:
