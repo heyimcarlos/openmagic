@@ -2,17 +2,16 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any
 from uuid import UUID, uuid4
 
 from openmagic_runtime.commands import Actor, Cause, StateConflict
 from openmagic_runtime.evidence import content_fingerprint
-from openmagic_runtime.kernel.control import (
+from openmagic_runtime.kernel.control import KernelControl
+from openmagic_runtime.kernel.transitions import (
     AcceptSignal,
     CloseInstance,
     GuardCurrentAttempt,
-    KernelControl,
     ResolveDeferredStep,
 )
 from openmagic_runtime.kernel.work import ClaimedAttempt, DispositionRequired
@@ -21,15 +20,18 @@ from psycopg.types.json import Jsonb
 
 from example_insurance.renewal_commands import (
     ApproveRenewalDraft,
-    ApproveRenewalDraftInput,
     ApproveRenewalDraftResult,
     CancelRenewalOutreach,
     CancelRenewalOutreachResult,
     RequestRenewalRevision,
-    RequestRenewalRevisionInput,
     RequestRenewalRevisionResult,
     RevokeRenewalAuthority,
     RevokeRenewalAuthorityResult,
+)
+from example_insurance.renewal_decisions import (
+    decision_context,
+    decision_facts,
+    record_decision,
 )
 from example_insurance.renewal_effects import (
     ExternalEffectPermit,
@@ -38,7 +40,7 @@ from example_insurance.renewal_effects import (
     logical_effect_id,
 )
 from example_insurance.renewal_policies import (
-    ApprovalDecisionFacts,
+    ApprovalRejectedDecision,
     CancellationFacts,
     CompletionEffectFact,
     CompletionStepFact,
@@ -48,25 +50,12 @@ from example_insurance.renewal_policies import (
     RenewalExternalEffectPolicy,
     RenewalLifecyclePolicy,
 )
-
-
-@dataclass(frozen=True)
-class _DecisionContext:
-    instance_id: UUID
-    thread_id: UUID
-    lifecycle: str
-    authorized_actor_kind: str
-    authorized_actor_id: str
-    authority_revoked: bool
-    policy_number: str
-    policyholder_name: str
-    policyholder_email: str
-    renewal_date: str
-    expiring_premium_cents: int
-    wait_state: str
-    presentation_bound: bool
-    draft_fingerprint: str
-    effect: RenewalEmailEffect
+from example_insurance.renewal_records import (
+    actor_record,
+    cause_record,
+    record_effect_evidence,
+    record_event,
+)
 
 
 class RenewalApprovalControl:
@@ -109,12 +98,12 @@ class RenewalApprovalControl:
         command: ApproveRenewalDraft,
         connection: Connection[tuple[Any, ...]],
     ) -> ApproveRenewalDraftResult:
-        context = self._decision_context(connection, command.input)
+        context = decision_context(connection, command.input)
         decision = self._approval_policy.decide(
             decision_kind="approve",
-            facts=self._decision_facts(context, command.actor, command.input),
+            facts=decision_facts(context, command.actor, command.input),
         )
-        if decision.outcome is not None:
+        if isinstance(decision, ApprovalRejectedDecision):
             return ApproveRenewalDraftResult(
                 outcome=decision.outcome,
                 workflow_id=command.input.workflow_id,
@@ -143,11 +132,11 @@ class RenewalApprovalControl:
                 signal_type="renewal.draft.decision",
                 schema_version=1,
                 payload=payload,
-                route_key=self._required_route(decision.route_key),
+                route_key=decision.route_key,
             )
         )
         effect_step_id = signal.steps["email_effect"]
-        self._record_decision(
+        record_decision(
             connection,
             decision_id=decision_id,
             command_id=command.command_id,
@@ -167,11 +156,11 @@ class RenewalApprovalControl:
                 command.input.workflow_id,
                 effect_step_id,
                 command.input.presentation_fingerprint,
-                Jsonb(self._actor(command.actor)),
-                Jsonb(self._cause(command.cause)),
+                Jsonb(actor_record(command.actor)),
+                Jsonb(cause_record(command.cause)),
             ),
         )
-        self._event(
+        record_event(
             connection,
             event_type="renewal.draft.approved",
             workflow_id=command.input.workflow_id,
@@ -197,12 +186,12 @@ class RenewalApprovalControl:
         command: RequestRenewalRevision,
         connection: Connection[tuple[Any, ...]],
     ) -> RequestRenewalRevisionResult:
-        context = self._decision_context(connection, command.input)
+        context = decision_context(connection, command.input)
         decision = self._approval_policy.decide(
             decision_kind="request_revision",
-            facts=self._decision_facts(context, command.actor, command.input),
+            facts=decision_facts(context, command.actor, command.input),
         )
-        if decision.outcome is not None:
+        if isinstance(decision, ApprovalRejectedDecision):
             return RequestRenewalRevisionResult(
                 outcome=decision.outcome,
                 workflow_id=command.input.workflow_id,
@@ -233,11 +222,11 @@ class RenewalApprovalControl:
                 signal_type="renewal.draft.decision",
                 schema_version=1,
                 payload=payload,
-                route_key=self._required_route(decision.route_key),
+                route_key=decision.route_key,
             )
         )
         decision_id = uuid4()
-        self._record_decision(
+        record_decision(
             connection,
             decision_id=decision_id,
             command_id=command.command_id,
@@ -248,7 +237,7 @@ class RenewalApprovalControl:
             revision_instruction=command.input.revision_instruction,
         )
         revision_step_id = signal.steps["revision_draft"]
-        self._event(
+        record_event(
             connection,
             event_type="renewal.draft.revision_requested",
             workflow_id=command.input.workflow_id,
@@ -298,7 +287,7 @@ class RenewalApprovalControl:
             "WHERE workflow_id = %s AND consumed_at IS NULL AND invalidated_at IS NULL",
             (command.input.workflow_id,),
         )
-        self._event(
+        record_event(
             connection,
             event_type="renewal.approval_authority.revoked",
             workflow_id=command.input.workflow_id,
@@ -352,8 +341,6 @@ class RenewalApprovalControl:
             )
         if outcome == "too_late":
             return CancelRenewalOutreachResult("too_late", command.input.workflow_id, instance_id)
-        if outcome != "cancelled":
-            raise RuntimeError("Cancellation Policy returned an unsupported decision")
         connection.execute(
             "UPDATE example_insurance.approval_grants SET invalidated_at = clock_timestamp() "
             "WHERE workflow_id = %s AND consumed_at IS NULL AND invalidated_at IS NULL",
@@ -364,7 +351,7 @@ class RenewalApprovalControl:
             "WHERE workflow_id = %s",
             (command.input.workflow_id,),
         )
-        self._event(
+        record_event(
             connection,
             event_type="renewal.outreach.cancelled",
             workflow_id=command.input.workflow_id,
@@ -480,7 +467,7 @@ class RenewalApprovalControl:
                 "updated_at = clock_timestamp() WHERE logical_effect_id = %s",
                 (attempt.attempt_id, attempt.attempt_number, effect_id),
             )
-        self._event(
+        record_event(
             connection,
             event_type="external_effect.dispatch_started",
             workflow_id=UUID(str(workflow[0])),
@@ -525,7 +512,7 @@ class RenewalApprovalControl:
             "updated_at = clock_timestamp() WHERE logical_effect_id = %s",
             (effect_id,),
         )
-        self._evidence(
+        record_effect_evidence(
             connection,
             logical_effect_id=effect_id,
             attempt_id=required.attempt_id,
@@ -694,128 +681,6 @@ class RenewalApprovalControl:
             )
         return {}, {}
 
-    @staticmethod
-    def _decision_context(
-        connection: Connection[tuple[Any, ...]],
-        value: ApproveRenewalDraftInput | RequestRenewalRevisionInput,
-    ) -> _DecisionContext:
-        workflow = connection.execute(
-            "SELECT r.instance_id, r.thread_id, r.lifecycle, r.authorized_actor_kind, "
-            "r.authorized_actor_id, r.authority_revoked_at IS NOT NULL, r.policy_number, "
-            "r.policyholder_name, f.policyholder_email, r.renewal_date, "
-            "r.expiring_premium_cents FROM example_insurance.renewal_workflows r "
-            "JOIN example_insurance.policy_renewal_facts f ON f.policy_id = r.policy_id "
-            "JOIN openmagic_runtime.instances i ON i.instance_id = r.instance_id "
-            "WHERE r.workflow_id = %s FOR UPDATE OF r, i",
-            (value.workflow_id,),
-        ).fetchone()
-        if workflow is None:
-            raise StateConflict("Exact Workflow does not exist")
-        presentation = connection.execute(
-            "SELECT w.state, w.input, d.presentation_fingerprint, d.policyholder_email, "
-            "d.subject, d.body FROM openmagic_runtime.waits w "
-            "JOIN example_insurance.renewal_drafts d ON d.draft_id = %s "
-            "AND d.workflow_id = %s WHERE w.wait_id = %s AND w.instance_id = %s "
-            "FOR UPDATE OF w, d",
-            (value.draft_id, value.workflow_id, value.wait_id, workflow[0]),
-        ).fetchone()
-        if presentation is None:
-            raise StateConflict("Exact Workflow, Wait, or Draft does not exist")
-        wait_input = dict(presentation[1])
-        presentation_bound = wait_input == {
-            "workflow_id": str(value.workflow_id),
-            "draft_id": str(value.draft_id),
-            "presentation_fingerprint": str(presentation[2]),
-            "recipient_email": str(presentation[3]),
-            "subject": str(presentation[4]),
-            "body": str(presentation[5]),
-        }
-        return _DecisionContext(
-            instance_id=UUID(str(workflow[0])),
-            thread_id=UUID(str(workflow[1])),
-            lifecycle=str(workflow[2]),
-            authorized_actor_kind=str(workflow[3]),
-            authorized_actor_id=str(workflow[4]),
-            authority_revoked=bool(workflow[5]),
-            policy_number=str(workflow[6]),
-            policyholder_name=str(workflow[7]),
-            policyholder_email=str(workflow[8]),
-            renewal_date=workflow[9].isoformat(),
-            expiring_premium_cents=int(workflow[10]),
-            wait_state=str(presentation[0]),
-            presentation_bound=presentation_bound,
-            draft_fingerprint=str(presentation[2]),
-            effect=RenewalEmailEffect(
-                str(presentation[3]),
-                str(presentation[4]),
-                str(presentation[5]),
-            ),
-        )
-
-    @staticmethod
-    def _decision_facts(
-        context: _DecisionContext,
-        actor: Actor,
-        value: ApproveRenewalDraftInput | RequestRenewalRevisionInput,
-    ) -> ApprovalDecisionFacts:
-        expected = content_fingerprint(context.effect)
-        return ApprovalDecisionFacts(
-            lifecycle=context.lifecycle,
-            actor_matches=context.authorized_actor_kind == actor.kind
-            and context.authorized_actor_id == actor.identifier,
-            authority_revoked=context.authority_revoked,
-            wait_unsatisfied=context.wait_state == "unsatisfied",
-            presentation_exact=context.presentation_bound
-            and context.draft_fingerprint == expected
-            and value.presentation_fingerprint == expected
-            and value.proposed_effect == context.effect,
-        )
-
-    @staticmethod
-    def _required_route(route_key: str | None) -> str:
-        if route_key is None:
-            raise RuntimeError("Accepted approval decision omitted its predefined Route")
-        return route_key
-
-    @staticmethod
-    def _record_decision(
-        connection: Connection[tuple[Any, ...]],
-        *,
-        decision_id: UUID,
-        command_id: UUID,
-        actor: Actor,
-        cause: Cause,
-        decision_kind: str,
-        value: ApproveRenewalDraftInput | RequestRenewalRevisionInput,
-        revision_instruction: str | None,
-    ) -> None:
-        connection.execute(
-            "INSERT INTO example_insurance.renewal_decisions "
-            "(decision_id, command_id, workflow_id, wait_id, draft_id, decision_kind, actor, "
-            "cause, presentation_fingerprint, proposed_effect, revision_instruction, signal_id) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
-            (
-                decision_id,
-                command_id,
-                value.workflow_id,
-                value.wait_id,
-                value.draft_id,
-                decision_kind,
-                Jsonb(RenewalApprovalControl._actor(actor)),
-                Jsonb(RenewalApprovalControl._cause(cause)),
-                value.presentation_fingerprint,
-                Jsonb(
-                    {
-                        "recipient_email": value.proposed_effect.recipient_email,
-                        "subject": value.proposed_effect.subject,
-                        "body": value.proposed_effect.body,
-                    }
-                ),
-                revision_instruction,
-                command_id,
-            ),
-        )
-
     def _record_effect_observation(
         self,
         connection: Connection[tuple[Any, ...]],
@@ -832,7 +697,7 @@ class RenewalApprovalControl:
             "updated_at = clock_timestamp() WHERE logical_effect_id = %s",
             (classification, effect_id),
         )
-        self._evidence(
+        record_effect_evidence(
             connection,
             logical_effect_id=effect_id,
             attempt_id=required.attempt_id,
@@ -847,7 +712,7 @@ class RenewalApprovalControl:
         ).fetchone()
         if workflow is None:
             raise StateConflict("External Effect disappeared while recording evidence")
-        self._event(
+        record_event(
             connection,
             event_type=f"external_effect.{classification}",
             workflow_id=UUID(str(workflow[0])),
@@ -896,7 +761,7 @@ class RenewalApprovalControl:
             "WHERE workflow_id = %s",
             (workflow_id,),
         )
-        self._event(
+        record_event(
             connection,
             event_type="renewal.outreach.completed",
             workflow_id=workflow_id,
@@ -907,63 +772,6 @@ class RenewalApprovalControl:
         KernelControl(connection).close(
             CloseInstance(command_id=source_attempt_id, instance_id=UUID(str(workflow[0])))
         )
-
-    @staticmethod
-    def _evidence(
-        connection: Connection[tuple[Any, ...]],
-        *,
-        logical_effect_id: UUID,
-        attempt_id: UUID,
-        classification: str,
-        source: str,
-        provider_request_id: str | None,
-    ) -> None:
-        connection.execute(
-            "INSERT INTO example_insurance.external_effect_evidence "
-            "(evidence_id, logical_effect_id, attempt_id, classification, source, "
-            "provider_request_id, details) VALUES (%s, %s, %s, %s, %s, %s, %s)",
-            (
-                uuid4(),
-                logical_effect_id,
-                attempt_id,
-                classification,
-                source,
-                provider_request_id,
-                Jsonb({"classification": classification, "source": source}),
-            ),
-        )
-
-    @staticmethod
-    def _event(
-        connection: Connection[tuple[Any, ...]],
-        *,
-        event_type: str,
-        workflow_id: UUID,
-        actor: Actor,
-        cause: Cause,
-        payload: dict[str, Any],
-    ) -> None:
-        connection.execute(
-            "INSERT INTO example_insurance.domain_events "
-            "(event_id, event_type, schema_version, workflow_id, actor, cause, payload) "
-            "VALUES (%s, %s, 1, %s, %s, %s, %s)",
-            (
-                uuid4(),
-                event_type,
-                workflow_id,
-                Jsonb(RenewalApprovalControl._actor(actor)),
-                Jsonb(RenewalApprovalControl._cause(cause)),
-                Jsonb(payload),
-            ),
-        )
-
-    @staticmethod
-    def _actor(actor: Actor) -> dict[str, str]:
-        return {"kind": actor.kind, "identifier": actor.identifier}
-
-    @staticmethod
-    def _cause(cause: Cause) -> dict[str, str]:
-        return {"kind": cause.kind, "identifier": cause.identifier}
 
 
 __all__ = ["RenewalApprovalControl"]

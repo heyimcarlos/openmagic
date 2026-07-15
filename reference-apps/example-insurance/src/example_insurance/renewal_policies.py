@@ -34,18 +34,25 @@ class ApprovalDecisionFacts:
     presentation_exact: bool
 
 
+ApprovalRejectionOutcome = Literal[
+    "authority_revoked",
+    "stale_presentation",
+    "unauthorized_actor",
+    "wait_already_satisfied",
+]
+
+
 @dataclass(frozen=True)
-class ApprovalDecision:
-    outcome: (
-        Literal[
-            "authority_revoked",
-            "stale_presentation",
-            "unauthorized_actor",
-            "wait_already_satisfied",
-        ]
-        | None
-    )
-    route_key: Literal["approve_email", "revise_email"] | None
+class ApprovalAcceptedDecision:
+    route_key: Literal["approve_email", "revise_email"]
+
+
+@dataclass(frozen=True)
+class ApprovalRejectedDecision:
+    outcome: ApprovalRejectionOutcome
+
+
+ApprovalDecision = ApprovalAcceptedDecision | ApprovalRejectedDecision
 
 
 @dataclass(frozen=True)
@@ -88,15 +95,15 @@ class RenewalApprovalPolicy:
         facts: ApprovalDecisionFacts,
     ) -> ApprovalDecision:
         if facts.lifecycle != "active" or facts.authority_revoked:
-            return ApprovalDecision("authority_revoked", None)
+            return ApprovalRejectedDecision("authority_revoked")
         if not facts.actor_matches:
-            return ApprovalDecision("unauthorized_actor", None)
+            return ApprovalRejectedDecision("unauthorized_actor")
         if not facts.wait_unsatisfied:
-            return ApprovalDecision("wait_already_satisfied", None)
+            return ApprovalRejectedDecision("wait_already_satisfied")
         if not facts.presentation_exact:
-            return ApprovalDecision("stale_presentation", None)
+            return ApprovalRejectedDecision("stale_presentation")
         route = "approve_email" if decision_kind == "approve" else "revise_email"
-        return ApprovalDecision(None, route)
+        return ApprovalAcceptedDecision(route)
 
 
 class RenewalLifecyclePolicy:
@@ -311,8 +318,11 @@ class RenewalExternalEffectPolicy:
 
 __all__ = [
     "RENEWAL_ATTEMPT_RETRY_POLICY",
+    "ApprovalAcceptedDecision",
     "ApprovalDecision",
     "ApprovalDecisionFacts",
+    "ApprovalRejectedDecision",
+    "ApprovalRejectionOutcome",
     "CancellationFacts",
     "CompletionEffectFact",
     "CompletionStepFact",

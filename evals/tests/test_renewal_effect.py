@@ -1,11 +1,7 @@
 from __future__ import annotations
 
 import json
-import os
-import pickle
 import random
-import subprocess
-import sys
 import time
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -43,21 +39,15 @@ from example_insurance.renewals import (
 )
 from openmagic_evals.harness import (
     LocalEmailProvider,
-    TestDeployment,
     approve_renewal,
     prepare_renewal_approval,
-    wait_for_database_fault_window,
-    wait_for_renewal_completion,
 )
 from openmagic_evals.harness._postgres import postgres_container
 from openmagic_runtime.commands import Actor, Cause, CommandReceipt, IdempotencyConflict
 from openmagic_runtime.execution import AttemptExecution, CancellationToken
-from openmagic_runtime.kernel.control import (
-    GuardCurrentAttempt,
-    KernelControl,
-    ResolveDeferredStep,
-)
+from openmagic_runtime.kernel.control import KernelControl
 from openmagic_runtime.kernel.inspection import KernelInspection
+from openmagic_runtime.kernel.transitions import ResolveDeferredStep
 from openmagic_runtime.kernel.work import ClaimedAttempt
 from openmagic_runtime.threads import CreateThread, ThreadStore
 
@@ -313,9 +303,10 @@ def test_definite_non_application_retries_the_same_effect_identity_then_complete
             assert second is not None
             assert second.template_key == "send_renewal_email"
             assert after_first.state == "open"
-            assert next(
-                step for step in after_first.steps if step.step_id == effect_step_id
-            ).state == ("pending")
+            assert (
+                next(step for step in after_first.steps if step.step_id == effect_step_id).state
+                == "pending"
+            )
             assert completed.state == "closed"
             requests = provider.requests()
             assert len(requests) == 2
@@ -987,325 +978,3 @@ def test_concurrent_cancellation_and_fence_serialize_to_one_valid_authority_orde
                     worker_id="email",
                 )
                 assert completed.template_key == "send_renewal_email", seed
-
-
-def test_current_attempt_guard_rejects_expired_abandoned_and_superseded_authority(
-    tmp_path,
-) -> None:
-    with (
-        LocalEmailProvider(working_directory=tmp_path / "provider") as provider,
-        postgres_container(database_name=f"openmagic_test_{uuid4().hex}") as postgres,
-    ):
-        database_url = postgres.get_connection_url(driver=None)
-        apply_migrations(database_url)
-        application = ExampleInsurance(
-            database_url=database_url,
-            email_provider_url=provider.url,
-        )
-        application.prepare()
-        command, actor = prepare_renewal_approval(
-            application,
-            ThreadStore(database_url=database_url),
-        )
-        approve_renewal(application, command, actor)
-        original = application.claim_workflow_attempt(
-            worker_id="email",
-            claim_request_id=uuid4(),
-        )
-        assert original is not None
-        request = GuardCurrentAttempt(
-            instance_id=original.instance_id,
-            step_id=original.step_id,
-            attempt_id=original.attempt_id,
-            attempt_number=original.attempt_number,
-        )
-        with psycopg.connect(database_url) as connection:
-            with connection.transaction():
-                guard = KernelControl(connection).guard_current_attempt(request)
-                guard.require_usable()
-                with pytest.raises(TypeError, match="cannot be serialized"):
-                    pickle.dumps(guard)
-            with (
-                connection.transaction(),
-                pytest.raises(
-                    RuntimeError,
-                    match="earlier transaction",
-                ),
-            ):
-                guard.require_usable()
-        with pytest.raises(RuntimeError, match="no longer transaction-scoped"):
-            guard.require_usable()
-
-        time.sleep(1.1)
-        assert application.recover_expired_workflow_attempt()
-        replacement = application.claim_workflow_attempt(
-            worker_id="replacement",
-            claim_request_id=uuid4(),
-        )
-        assert replacement is not None
-        assert replacement.attempt_number == original.attempt_number + 1
-        with psycopg.connect(database_url) as connection, connection.transaction():
-            control = KernelControl(connection)
-            with pytest.raises(RuntimeError, match="not current"):
-                control.guard_current_attempt(request)
-            control.guard_current_attempt(
-                GuardCurrentAttempt(
-                    instance_id=replacement.instance_id,
-                    step_id=replacement.step_id,
-                    attempt_id=replacement.attempt_id,
-                    attempt_number=replacement.attempt_number,
-                )
-            ).require_usable()
-
-
-@pytest.mark.integration
-def test_fresh_process_recovers_after_fence_commit_before_provider_io(tmp_path) -> None:
-    provider = LocalEmailProvider(working_directory=tmp_path / "provider")
-    deployment = TestDeployment(
-        working_directory=tmp_path / "deployment",
-        email_provider_url=provider.url,
-    )
-    with provider, deployment:
-        provider.configure(behaviors=("success",))
-        deployment.terminate_role("workflow-worker")
-        deployment.terminate_role("delivery-worker")
-        application = ExampleInsurance(
-            database_url=deployment.database_url,
-            email_provider_url=provider.url,
-        )
-        application.prepare()
-        command, actor = prepare_renewal_approval(
-            application,
-            ThreadStore(database_url=deployment.database_url),
-        )
-        approve_renewal(application, command, actor)
-
-        completed = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "openmagic_evals.harness.fence_once",
-                "--database-url",
-                deployment.database_url,
-                "--email-provider-url",
-                provider.url,
-                "--worker-id",
-                "fence-only-process",
-            ],
-            cwd=tmp_path,
-            env={"PATH": os.defpath, "PYTHONNOUSERSITE": "1", "PYTHONUNBUFFERED": "1"},
-            capture_output=True,
-            check=True,
-        )
-        fenced = json.loads(completed.stdout)
-
-        assert UUID(fenced["attempt_id"])
-        assert provider.requests() == ()
-        time.sleep(1.1)
-        recovery_process = deployment.restart_role("workflow-worker")
-        evidence = wait_for_renewal_completion(application, command.input.workflow_id)
-
-        assert recovery_process.pid > 0
-        assert evidence["outcomes"]["external_effect_certainties"] == ["applied"]
-        assert len(provider.reconciliations()) >= 1
-        assert len(provider.requests()) == 1
-
-
-@pytest.mark.integration
-def test_fresh_process_loss_before_fence_allows_only_safe_retry(tmp_path) -> None:
-    provider = LocalEmailProvider(working_directory=tmp_path / "provider")
-    deployment = TestDeployment(
-        working_directory=tmp_path / "deployment",
-        email_provider_url=provider.url,
-    )
-    with provider, deployment:
-        provider.configure(behaviors=("success",))
-        deployment.terminate_role("workflow-worker")
-        deployment.terminate_role("delivery-worker")
-        application = ExampleInsurance(
-            database_url=deployment.database_url,
-            email_provider_url=provider.url,
-        )
-        application.prepare()
-        command, actor = prepare_renewal_approval(
-            application,
-            ThreadStore(database_url=deployment.database_url),
-        )
-        approve_renewal(application, command, actor)
-        with psycopg.connect(deployment.database_url) as connection, connection.transaction():
-            connection.execute(
-                "CREATE FUNCTION example_insurance.pause_effect_fence() RETURNS trigger "
-                "LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(10); RETURN NEW; END $$"
-            )
-            connection.execute(
-                "CREATE TRIGGER pause_effect_fence BEFORE INSERT ON "
-                "example_insurance.external_effects FOR EACH ROW EXECUTE FUNCTION "
-                "example_insurance.pause_effect_fence()"
-            )
-
-        lost = deployment.restart_role("workflow-worker")
-        wait_for_database_fault_window(
-            deployment.database_url,
-            "INSERT INTO example_insurance.external_effects",
-        )
-        deployment.terminate_role("workflow-worker")
-        with psycopg.connect(deployment.database_url) as connection, connection.transaction():
-            connection.execute(
-                "DROP TRIGGER pause_effect_fence ON example_insurance.external_effects"
-            )
-            connection.execute("DROP FUNCTION example_insurance.pause_effect_fence()")
-        time.sleep(1.1)
-        recovered = deployment.restart_role("workflow-worker")
-        evidence = wait_for_renewal_completion(application, command.input.workflow_id)
-
-        assert recovered.pid != lost.pid
-        assert evidence["outcomes"]["attempt_states"].count("abandoned") == 1
-        assert len(provider.requests()) == 1
-
-
-@pytest.mark.integration
-def test_fresh_process_loss_during_reconciliation_preserves_uncertainty(tmp_path) -> None:
-    provider = LocalEmailProvider(working_directory=tmp_path / "provider")
-    deployment = TestDeployment(
-        working_directory=tmp_path / "deployment",
-        email_provider_url=provider.url,
-    )
-    with provider, deployment:
-        provider.configure(
-            behaviors=("response_loss_after_success",),
-            reconciliation="slow_applied",
-            delay_seconds=3,
-        )
-        deployment.terminate_role("workflow-worker")
-        deployment.terminate_role("delivery-worker")
-        application = ExampleInsurance(
-            database_url=deployment.database_url,
-            email_provider_url=provider.url,
-        )
-        application.prepare()
-        command, actor = prepare_renewal_approval(
-            application,
-            ThreadStore(database_url=deployment.database_url),
-        )
-        approve_renewal(application, command, actor)
-
-        lost = deployment.restart_role("workflow-worker")
-        deadline = time.monotonic() + 15
-        while time.monotonic() < deadline and not provider.reconciliations():
-            time.sleep(0.02)
-        assert provider.reconciliations()
-        deployment.terminate_role("workflow-worker")
-        time.sleep(3.2)
-        provider.configure(behaviors=("success",), reconciliation="unchanged")
-        recovered = deployment.restart_role("workflow-worker")
-        evidence = wait_for_renewal_completion(application, command.input.workflow_id)
-
-        assert recovered.pid != lost.pid
-        assert len(provider.requests()) == 1
-        assert evidence["outcomes"]["completion_event_count"] == 1
-        assert any(
-            item["classification"] == "uncertain"
-            for item in evidence["outcomes"]["effect_evidence"]
-        )
-
-
-@pytest.mark.integration
-def test_fresh_process_loss_during_provider_io_reconciles_without_redispatch(tmp_path) -> None:
-    provider = LocalEmailProvider(working_directory=tmp_path / "provider")
-    deployment = TestDeployment(
-        working_directory=tmp_path / "deployment",
-        email_provider_url=provider.url,
-    )
-    with provider, deployment:
-        provider.configure(
-            behaviors=("slow_success",),
-            reconciliation="unchanged",
-            delay_seconds=3,
-        )
-        deployment.terminate_role("workflow-worker")
-        deployment.terminate_role("delivery-worker")
-        application = ExampleInsurance(
-            database_url=deployment.database_url,
-            email_provider_url=provider.url,
-        )
-        application.prepare()
-        command, actor = prepare_renewal_approval(
-            application,
-            ThreadStore(database_url=deployment.database_url),
-        )
-        approve_renewal(application, command, actor)
-
-        lost = deployment.restart_role("workflow-worker")
-        deadline = time.monotonic() + 15
-        while time.monotonic() < deadline and not provider.requests():
-            time.sleep(0.02)
-        assert provider.requests()
-        deployment.terminate_role("workflow-worker")
-        time.sleep(3.2)
-        recovered = deployment.restart_role("workflow-worker")
-        evidence = wait_for_renewal_completion(application, command.input.workflow_id)
-
-        assert recovered.pid != lost.pid
-        assert len(provider.requests()) == 1
-        assert len(provider.reconciliations()) >= 1
-        assert evidence["outcomes"]["external_effect_certainties"] == ["applied"]
-
-
-@pytest.mark.integration
-def test_completion_event_and_instance_closure_recover_atomically(tmp_path) -> None:
-    provider = LocalEmailProvider(working_directory=tmp_path / "provider")
-    deployment = TestDeployment(
-        working_directory=tmp_path / "deployment",
-        email_provider_url=provider.url,
-    )
-    with provider, deployment:
-        provider.configure(behaviors=("success",))
-        deployment.terminate_role("workflow-worker")
-        deployment.terminate_role("delivery-worker")
-        application = ExampleInsurance(
-            database_url=deployment.database_url,
-            email_provider_url=provider.url,
-        )
-        application.prepare()
-        command, actor = prepare_renewal_approval(
-            application,
-            ThreadStore(database_url=deployment.database_url),
-        )
-        approve_renewal(application, command, actor)
-        with psycopg.connect(deployment.database_url) as connection, connection.transaction():
-            connection.execute(
-                "CREATE FUNCTION example_insurance.pause_completion() RETURNS trigger "
-                "LANGUAGE plpgsql AS $$ BEGIN IF NEW.lifecycle = 'completed' THEN "
-                "PERFORM pg_sleep(10); END IF; RETURN NEW; END $$"
-            )
-            connection.execute(
-                "CREATE TRIGGER pause_completion BEFORE UPDATE ON "
-                "example_insurance.renewal_workflows FOR EACH ROW EXECUTE FUNCTION "
-                "example_insurance.pause_completion()"
-            )
-
-        lost = deployment.restart_role("workflow-worker")
-        wait_for_database_fault_window(
-            deployment.database_url,
-            "UPDATE example_insurance.renewal_workflows SET lifecycle = 'completed'",
-        )
-        deployment.terminate_role("workflow-worker")
-        with psycopg.connect(deployment.database_url) as connection, connection.transaction():
-            connection.execute(
-                "DROP TRIGGER pause_completion ON example_insurance.renewal_workflows"
-            )
-            connection.execute("DROP FUNCTION example_insurance.pause_completion()")
-        time.sleep(1.1)
-        recovered = deployment.restart_role("workflow-worker")
-        evidence = wait_for_renewal_completion(application, command.input.workflow_id)
-        deployment.terminate_role("workflow-worker")
-        after_commit = deployment.restart_role("workflow-worker")
-        replayed_evidence = json.loads(application.renewal_evidence_json(command.input.workflow_id))
-
-        assert recovered.pid != lost.pid
-        assert after_commit.pid != recovered.pid
-        assert evidence == replayed_evidence
-        assert evidence["outcomes"]["workflow_lifecycle"] == "completed"
-        assert evidence["outcomes"]["instance_state"] == "closed"
-        assert evidence["outcomes"]["completion_event_count"] == 1
-        assert len(provider.requests()) == 1

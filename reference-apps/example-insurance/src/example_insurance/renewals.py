@@ -13,11 +13,7 @@ from openmagic_runtime.agents import (
     AgentAudience,
     AgentConfiguration,
     AgentExecutionInput,
-    AgentField,
-    AgentRecord,
-    AgentRunInput,
     AgentRuns,
-    AgentTask,
 )
 from openmagic_runtime.commands import (
     Actor,
@@ -59,6 +55,7 @@ from psycopg import Connection
 from psycopg.types.json import Jsonb
 
 from example_insurance.renewal_approval import RenewalApprovalControl
+from example_insurance.renewal_attempts import prepare_workflow_attempt
 from example_insurance.renewal_commands import (
     AcceptRenewalEffectObservation,
     AcceptRenewalEffectObservationInput,
@@ -471,67 +468,17 @@ class ExampleInsurance:
         worker_id: str,
         worker_shutdown: Event | None = None,
     ) -> WorkflowAttemptResult:
-        agent_run_id: UUID | None = None
-        agent_execution_input: AgentExecutionInput | None = None
-        with psycopg.connect(self._database_url) as connection, connection.transaction():
-            authority = KernelWork(connection).execution_authority(
-                attempt,
-                worker_id=worker_id,
-            )
-            durable_attempt = authority.claim
-            if authority.directive == "replay":
-                agent_runs = AgentRuns(connection)
-                existing_run = agent_runs.find_by_attempt(durable_attempt.attempt_id)
-                if existing_run is not None and existing_run.status == "completed":
-                    agent_run_id = existing_run.agent_run_id
-                if authority.accepted_observation is None:
-                    raise RuntimeError("Completed Attempt has no accepted observation")
-                accepted_observation = authority.accepted_observation
-            elif durable_attempt.executor_key == "example_insurance.renewal_draft_agent.v1":
-                agent_runs = AgentRuns(connection)
-                if agent_runs.find_by_attempt(durable_attempt.attempt_id) is not None:
-                    raise RuntimeError("Agent Attempt already has a durable Agent Run")
-                thread_id = UUID(durable_attempt.input["thread_id"])
-                cutoff = ThreadAccess(connection).context_cutoff(thread_id)
-                agent_run = agent_runs.start(
-                    attempt_id=durable_attempt.attempt_id,
-                    input=AgentRunInput(
-                        configuration=AgentConfiguration(
-                            agent_key="example_insurance.renewal_draft",
-                            agent_version=1,
-                            instruction_key="example_insurance.renewal_draft.en_ca.v1",
-                        ),
-                        task=AgentTask(
-                            task_type="renewal.draft",
-                            task_version=1,
-                            input=AgentRecord(
-                                schema_key="example_insurance.renewal_draft.input",
-                                schema_version=1,
-                                fields=tuple(
-                                    AgentField(name=key, value=value)
-                                    for key, value in sorted(durable_attempt.input.items())
-                                ),
-                            ),
-                        ),
-                        thread_id=thread_id,
-                        context_through_sequence=cutoff,
-                        domain_event_context=(),
-                        audience_context=AgentAudience(
-                            kind="workflow_role",
-                            identifier="broker",
-                        ),
-                        locale="en-CA",
-                    ),
-                )
-                agent_run_id = agent_run.agent_run_id
-                agent_execution_input = agent_runs.execution_input_for_attempt(
-                    durable_attempt.attempt_id
-                )
-        if authority.directive == "replay":
+        prepared = prepare_workflow_attempt(
+            database_url=self._database_url,
+            attempt=attempt,
+            worker_id=worker_id,
+        )
+        durable_attempt = prepared.claim
+        if prepared.replay_observation is not None:
             return self.submit_workflow_observation(
                 attempt=durable_attempt,
                 worker_id=worker_id,
-                observation=accepted_observation,
+                observation=prepared.replay_observation,
             )
         if durable_attempt.template_key == "send_renewal_email":
             self.authorize_email_dispatch(attempt=durable_attempt, worker_id=worker_id)
@@ -547,7 +494,7 @@ class ExampleInsurance:
                     template_key=durable_attempt.template_key,
                     executor_key=durable_attempt.executor_key,
                     input=durable_attempt.input,
-                    agent_input=agent_execution_input,
+                    agent_input=prepared.agent_input,
                 ),
                 cancellation=CancellationToken(),
                 renew=lambda: renew_once(
@@ -562,7 +509,7 @@ class ExampleInsurance:
         except ExecutionAuthorityLost:
             raise
         except Exception as error:
-            if agent_run_id is not None:
+            if prepared.agent_run_id is not None:
                 with psycopg.connect(self._database_url) as connection, connection.transaction():
                     AgentRuns(connection).fail_for_attempt(
                         durable_attempt.attempt_id,

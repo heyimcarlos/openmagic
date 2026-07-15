@@ -3,17 +3,33 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any
 from uuid import UUID, uuid4
 
 import psycopg
 from psycopg import Connection
-from psycopg.pq import TransactionStatus
 from psycopg.types.json import Jsonb
 
 from openmagic_runtime._canonical import canonical_digest
 from openmagic_runtime.kernel._trace import append_trace
-from openmagic_runtime.kernel.definitions import Route, validate_payload, verified_definition
+from openmagic_runtime.kernel.definitions import (
+    Route,
+    StepTemplate,
+    WorkflowDefinition,
+    validate_payload,
+    verified_definition,
+)
+from openmagic_runtime.kernel.transitions import (
+    AcceptSignal,
+    CloseInstance,
+    CloseInstanceReceipt,
+    CurrentAttemptGuard,
+    GuardCurrentAttempt,
+    ResolveDeferredStep,
+    ResolveDeferredStepReceipt,
+    SignalReceipt,
+    deferred_action,
+)
 from openmagic_runtime.kernel.work import DispositionRequired
 
 
@@ -35,106 +51,6 @@ class StartInstanceReceipt:
     waits: dict[str, UUID]
     trace_event_id: UUID
     trace_sequence: int
-
-
-@dataclass(frozen=True)
-class AcceptSignal:
-    signal_id: UUID
-    instance_id: UUID
-    wait_id: UUID
-    signal_type: str
-    schema_version: int
-    payload: dict[str, Any]
-    route_key: str
-
-
-@dataclass(frozen=True)
-class SignalReceipt:
-    signal_id: UUID
-    instance_id: UUID
-    wait_id: UUID
-    steps: dict[str, UUID]
-    waits: dict[str, UUID]
-    trace_event_id: UUID
-    trace_sequence: int
-
-
-@dataclass(frozen=True)
-class CloseInstance:
-    command_id: UUID
-    instance_id: UUID
-
-
-@dataclass(frozen=True)
-class CloseInstanceReceipt:
-    instance_id: UUID
-    cancelled_step_ids: tuple[UUID, ...]
-    cancelled_attempt_ids: tuple[UUID, ...]
-    cancelled_wait_ids: tuple[UUID, ...]
-    trace_event_id: UUID
-    trace_sequence: int
-
-
-@dataclass(frozen=True)
-class GuardCurrentAttempt:
-    instance_id: UUID
-    step_id: UUID
-    attempt_id: UUID
-    attempt_number: int
-
-
-class CurrentAttemptGuard:
-    __slots__ = ("_connection", "_transaction_id", "attempt_id")
-
-    def __init__(
-        self,
-        connection: Connection[tuple[Any, ...]],
-        attempt_id: UUID,
-        transaction_id: int,
-    ) -> None:
-        self._connection = connection
-        self.attempt_id = attempt_id
-        self._transaction_id = transaction_id
-
-    def require_usable(self) -> None:
-        if (
-            self._connection.closed
-            or self._connection.info.transaction_status is TransactionStatus.IDLE
-        ):
-            raise RuntimeError("Current Attempt guard is no longer transaction-scoped")
-        current = self._connection.execute("SELECT txid_current()").fetchone()
-        if current is None or int(current[0]) != self._transaction_id:
-            raise RuntimeError("Current Attempt guard belongs to an earlier transaction")
-
-    def __reduce__(self) -> str | tuple[Any, ...]:
-        raise TypeError("Current Attempt guards cannot be serialized")
-
-
-@dataclass(frozen=True)
-class ResolveDeferredStep:
-    source_id: UUID
-    instance_id: UUID
-    step_id: UUID
-    basis_attempt_id: UUID
-    action: Literal["retry", "succeed", "fail"]
-    output: dict[str, Any] | None = None
-    failure: dict[str, Any] | None = None
-
-
-@dataclass(frozen=True)
-class ResolveDeferredStepReceipt:
-    step_id: UUID
-    action: Literal["retry", "succeed", "fail"]
-
-
-def _deferred_action(value: object) -> Literal["retry", "succeed", "fail"]:
-    if value == "retry":
-        return "retry"
-    if value == "succeed":
-        return "succeed"
-    if value == "fail":
-        return "fail"
-    raise RuntimeError("Deferred resolution receipt has an invalid action")
 
 
 def _lock_instance(connection: Connection[tuple[Any, ...]], instance_id: UUID) -> str:
@@ -263,6 +179,126 @@ def _materialize_route(
                 (instance_id, steps[output.slot], prerequisite_id),
             )
     return steps, waits
+
+
+def _materialize_optional_step_route(
+    connection: Connection[tuple[Any, ...]],
+    *,
+    definition: WorkflowDefinition,
+    required: DispositionRequired,
+    outcome_route: str | None,
+    route_input: dict[str, Any] | None,
+) -> tuple[dict[str, UUID], dict[str, UUID]]:
+    if outcome_route is None:
+        if route_input is not None:
+            raise ValueError("Route input cannot be supplied without an Outcome Route")
+        return {}, {}
+    if route_input is None:
+        raise ValueError("Outcome Route requires typed Route input")
+    route = next(item for item in definition.routes if item.key == outcome_route)
+    if route.activation != "step" or route.source_template_key != required.template_key:
+        raise ValueError("Outcome Route does not accept this Step Template")
+    validate_payload(route_input, route.activation_contract)
+    return _materialize_route(
+        connection,
+        instance_id=required.instance_id,
+        route=route,
+        source_kind="step",
+        source_id=required.attempt_id,
+        route_input=route_input,
+    )
+
+
+def _signal_receipt(payload: dict[str, Any]) -> SignalReceipt:
+    return SignalReceipt(
+        signal_id=UUID(payload["signal_id"]),
+        instance_id=UUID(payload["instance_id"]),
+        wait_id=UUID(payload["wait_id"]),
+        steps={key: UUID(value) for key, value in payload["steps"].items()},
+        waits={key: UUID(value) for key, value in payload["waits"].items()},
+        trace_event_id=UUID(payload["trace_event_id"]),
+        trace_sequence=int(payload["trace_sequence"]),
+    )
+
+
+def _validated_signal_route(
+    connection: Connection[tuple[Any, ...]], request: AcceptSignal
+) -> Route:
+    if request.schema_version != 1:
+        raise ValueError("Signal schema version is unsupported")
+    wait = connection.execute(
+        "SELECT template_key, state FROM openmagic_runtime.waits "
+        "WHERE wait_id = %s AND instance_id = %s FOR UPDATE",
+        (request.wait_id, request.instance_id),
+    ).fetchone()
+    if wait is None:
+        raise RuntimeError("Signal target Wait does not exist")
+    if str(wait[1]) != "unsatisfied":
+        raise RuntimeError("Signal target Wait is no longer unsatisfied")
+    definition_row = connection.execute(
+        "SELECT d.manifest, d.manifest_digest FROM openmagic_runtime.instances AS i "
+        "JOIN openmagic_runtime.workflow_definitions AS d "
+        "ON d.definition_key = i.definition_key AND d.definition_version = i.definition_version "
+        "WHERE i.instance_id = %s",
+        (request.instance_id,),
+    ).fetchone()
+    if definition_row is None:
+        raise RuntimeError("Pinned Workflow Definition is unavailable")
+    definition = verified_definition(dict(definition_row[0]), str(definition_row[1]))
+    wait_template = next(item for item in definition.wait_templates if item.key == str(wait[0]))
+    if wait_template.signal_type != request.signal_type:
+        raise ValueError("Signal Type does not match the target Wait")
+    route = next(item for item in definition.routes if item.key == request.route_key)
+    if route.activation != "signal":
+        raise ValueError("Signal Route is not a Signal activation")
+    validate_payload(request.payload, route.activation_contract)
+    return route
+
+
+def _apply_deferred_resolution(
+    connection: Connection[tuple[Any, ...]],
+    *,
+    request: ResolveDeferredStep,
+    template: StepTemplate,
+) -> None:
+    if request.action == "succeed":
+        if request.output is None or request.failure is not None:
+            raise ValueError("Successful deferred resolution requires typed output")
+        validate_payload(request.output, template.output_contract)
+        connection.execute(
+            "UPDATE openmagic_runtime.steps SET state = 'succeeded', output = %s, "
+            "output_digest = %s, terminal_at = clock_timestamp(), claimable_at = NULL, "
+            "deferred_attempt_id = NULL WHERE step_id = %s",
+            (Jsonb(request.output), canonical_digest(request.output), request.step_id),
+        )
+        return
+    if request.action == "retry":
+        if request.output is not None or request.failure is not None:
+            raise ValueError("Retry resolution cannot include Step output")
+        attempt_count = connection.execute(
+            "SELECT count(*) FROM openmagic_runtime.attempts WHERE step_id = %s",
+            (request.step_id,),
+        ).fetchone()
+        if attempt_count is None or int(attempt_count[0]) >= template.retry_policy.max_attempts:
+            raise RuntimeError("Deferred Step retry budget is exhausted")
+        connection.execute(
+            "UPDATE openmagic_runtime.steps SET claimable_at = clock_timestamp(), "
+            "deferred_attempt_id = NULL WHERE step_id = %s",
+            (request.step_id,),
+        )
+        return
+    if request.output is not None or request.failure is None:
+        raise ValueError("Failed deferred resolution requires typed failure")
+    connection.execute(
+        "UPDATE openmagic_runtime.steps SET state = 'failed', failure = %s, "
+        "failure_digest = %s, terminal_at = clock_timestamp(), claimable_at = NULL, "
+        "deferred_attempt_id = NULL WHERE step_id = %s",
+        (
+            Jsonb(request.failure),
+            canonical_digest(request.failure),
+            request.step_id,
+        ),
+    )
 
 
 class KernelControl:
@@ -422,27 +458,13 @@ class KernelControl:
             item for item in definition.step_templates if item.key == required.template_key
         )
         validate_payload(output, template.output_contract)
-        steps: dict[str, UUID] = {}
-        waits: dict[str, UUID] = {}
-        if outcome_route is not None:
-            if route_input is None:
-                raise ValueError("Outcome Route requires typed Route input")
-            route = next(item for item in definition.routes if item.key == outcome_route)
-            if route.activation != "step":
-                raise ValueError("Outcome Route is not a Step activation")
-            if route.source_template_key != required.template_key:
-                raise ValueError("Outcome Route does not accept this Step Template")
-            validate_payload(route_input, route.activation_contract)
-            steps, waits = _materialize_route(
-                self._connection,
-                instance_id=required.instance_id,
-                route=route,
-                source_kind="step",
-                source_id=required.attempt_id,
-                route_input=route_input,
-            )
-        elif route_input is not None:
-            raise ValueError("Route input cannot be supplied without an Outcome Route")
+        steps, waits = _materialize_optional_step_route(
+            self._connection,
+            definition=definition,
+            required=required,
+            outcome_route=outcome_route,
+            route_input=route_input,
+        )
         receipt = {
             "step_id": str(required.step_id),
             "steps": {key: str(value) for key, value in steps.items()},
@@ -562,45 +584,9 @@ class KernelControl:
         if replay is not None:
             if str(replay[0]) != input_digest:
                 raise ValueError("Signal identity was reused with conflicting input")
-            receipt = dict(replay[1])
-            return SignalReceipt(
-                signal_id=UUID(receipt["signal_id"]),
-                instance_id=UUID(receipt["instance_id"]),
-                wait_id=UUID(receipt["wait_id"]),
-                steps={key: UUID(value) for key, value in receipt["steps"].items()},
-                waits={key: UUID(value) for key, value in receipt["waits"].items()},
-                trace_event_id=UUID(receipt["trace_event_id"]),
-                trace_sequence=int(receipt["trace_sequence"]),
-            )
-        if request.schema_version != 1:
-            raise ValueError("Signal schema version is unsupported")
+            return _signal_receipt(dict(replay[1]))
         _require_open_instance(instance_state)
-        wait = self._connection.execute(
-            "SELECT template_key, state FROM openmagic_runtime.waits "
-            "WHERE wait_id = %s AND instance_id = %s FOR UPDATE",
-            (request.wait_id, request.instance_id),
-        ).fetchone()
-        if wait is None:
-            raise RuntimeError("Signal target Wait does not exist")
-        if str(wait[1]) != "unsatisfied":
-            raise RuntimeError("Signal target Wait is no longer unsatisfied")
-        definition_row = self._connection.execute(
-            "SELECT d.manifest, d.manifest_digest FROM openmagic_runtime.instances AS i "
-            "JOIN openmagic_runtime.workflow_definitions AS d "
-            "ON d.definition_key = i.definition_key AND d.definition_version = i.definition_version "
-            "WHERE i.instance_id = %s",
-            (request.instance_id,),
-        ).fetchone()
-        if definition_row is None:
-            raise RuntimeError("Pinned Workflow Definition is unavailable")
-        definition = verified_definition(dict(definition_row[0]), str(definition_row[1]))
-        wait_template = next(item for item in definition.wait_templates if item.key == str(wait[0]))
-        if wait_template.signal_type != request.signal_type:
-            raise ValueError("Signal Type does not match the target Wait")
-        route = next(item for item in definition.routes if item.key == request.route_key)
-        if route.activation != "signal":
-            raise ValueError("Signal Route is not a Signal activation")
-        validate_payload(request.payload, route.activation_contract)
+        route = _validated_signal_route(self._connection, request)
         inserted = self._connection.execute(
             "INSERT INTO openmagic_runtime.signals "
             "(signal_id, instance_id, wait_id, signal_type, schema_version, payload, "
@@ -779,7 +765,7 @@ class KernelControl:
             if str(replay[0]) != input_digest:
                 raise ValueError("Deferred resolution identity was reused with conflicting input")
             receipt = dict(replay[1])
-            action = _deferred_action(receipt["action"])
+            action = deferred_action(receipt["action"])
             return ResolveDeferredStepReceipt(
                 step_id=UUID(str(receipt["step_id"])),
                 action=action,
@@ -808,43 +794,11 @@ class KernelControl:
             raise RuntimeError("Pinned Workflow Definition is unavailable")
         definition = verified_definition(dict(definition_row[0]), str(definition_row[1]))
         template = next(item for item in definition.step_templates if item.key == str(row[0]))
-        if request.action == "succeed":
-            if request.output is None or request.failure is not None:
-                raise ValueError("Successful deferred resolution requires typed output")
-            validate_payload(request.output, template.output_contract)
-            self._connection.execute(
-                "UPDATE openmagic_runtime.steps SET state = 'succeeded', output = %s, "
-                "output_digest = %s, terminal_at = clock_timestamp(), claimable_at = NULL, "
-                "deferred_attempt_id = NULL WHERE step_id = %s",
-                (Jsonb(request.output), canonical_digest(request.output), request.step_id),
-            )
-        elif request.action == "retry":
-            if request.output is not None or request.failure is not None:
-                raise ValueError("Retry resolution cannot include Step output")
-            attempt_count = self._connection.execute(
-                "SELECT count(*) FROM openmagic_runtime.attempts WHERE step_id = %s",
-                (request.step_id,),
-            ).fetchone()
-            if attempt_count is None or int(attempt_count[0]) >= template.retry_policy.max_attempts:
-                raise RuntimeError("Deferred Step retry budget is exhausted")
-            self._connection.execute(
-                "UPDATE openmagic_runtime.steps SET claimable_at = clock_timestamp(), "
-                "deferred_attempt_id = NULL WHERE step_id = %s",
-                (request.step_id,),
-            )
-        else:
-            if request.output is not None or request.failure is None:
-                raise ValueError("Failed deferred resolution requires typed failure")
-            self._connection.execute(
-                "UPDATE openmagic_runtime.steps SET state = 'failed', failure = %s, "
-                "failure_digest = %s, terminal_at = clock_timestamp(), claimable_at = NULL, "
-                "deferred_attempt_id = NULL WHERE step_id = %s",
-                (
-                    Jsonb(request.failure),
-                    canonical_digest(request.failure),
-                    request.step_id,
-                ),
-            )
+        _apply_deferred_resolution(
+            self._connection,
+            request=request,
+            template=template,
+        )
         append_trace(
             self._connection,
             instance_id=request.instance_id,
@@ -956,15 +910,7 @@ def start_instance(*, database_url: str, request: StartInstance) -> StartInstanc
 
 
 __all__ = [
-    "AcceptSignal",
-    "CloseInstance",
-    "CloseInstanceReceipt",
-    "CurrentAttemptGuard",
-    "GuardCurrentAttempt",
     "KernelControl",
-    "ResolveDeferredStep",
-    "ResolveDeferredStepReceipt",
-    "SignalReceipt",
     "StartInstance",
     "StartInstanceReceipt",
     "start_instance",

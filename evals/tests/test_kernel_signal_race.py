@@ -9,13 +9,7 @@ from uuid import uuid4
 import psycopg
 from example_insurance.migrations import apply_migrations
 from openmagic_evals.harness._postgres import postgres_container
-from openmagic_runtime.kernel.control import (
-    AcceptSignal,
-    CloseInstance,
-    KernelControl,
-    StartInstance,
-    start_instance,
-)
+from openmagic_runtime.kernel.control import KernelControl, StartInstance, start_instance
 from openmagic_runtime.kernel.definitions import (
     DefinitionCatalog,
     DefinitionIdentity,
@@ -29,6 +23,7 @@ from openmagic_runtime.kernel.definitions import (
     WorkflowDefinition,
 )
 from openmagic_runtime.kernel.inspection import KernelInspection
+from openmagic_runtime.kernel.transitions import AcceptSignal, CloseInstance
 
 
 def signal_race_definition() -> WorkflowDefinition:
