@@ -61,6 +61,21 @@ class ActivationReceipt:
     waits: dict[str, UUID]
 
 
+@dataclass(frozen=True)
+class ProtectedRenewalDetails:
+    policy_number: str
+    policyholder_name: str
+    renewal_date: str
+
+    @classmethod
+    def decode(cls, record: Mapping[str, Any]) -> ProtectedRenewalDetails:
+        return cls(
+            policy_number=str(record["policy_number"]),
+            policyholder_name=str(record["policyholder_name"]),
+            renewal_date=str(record["renewal_date"]),
+        )
+
+
 def workflow_exists(connection: Connection[tuple[Any, ...]], workflow_id: UUID) -> bool:
     row = connection.execute(
         "SELECT 1 FROM example_insurance.renewal_workflows WHERE workflow_id = %s",
@@ -87,7 +102,32 @@ def lock_instance_for_workflow(
     identity = _read_workflow_identity(connection, workflow_id)
     if identity is None or lock_instance(connection, identity.instance_id) is None:
         return None
-    return identity
+    with connection.cursor(row_factory=dict_row) as cursor:
+        record = cursor.execute(
+            "SELECT workflow_id, instance_id, thread_id FROM "
+            "example_insurance.renewal_workflows WHERE workflow_id = %s FOR UPDATE",
+            (workflow_id,),
+        ).fetchone()
+    if record is None:
+        return None
+    locked = WorkflowIdentity.decode(record)
+    if locked.instance_id != identity.instance_id:
+        raise RuntimeError("Renewal Workflow changed its exact Instance binding")
+    return locked
+
+
+def protected_renewal_details(
+    connection: Connection[tuple[Any, ...]], workflow_id: UUID
+) -> ProtectedRenewalDetails:
+    with connection.cursor(row_factory=dict_row) as cursor:
+        record = cursor.execute(
+            "SELECT policy_number, policyholder_name, renewal_date FROM "
+            "example_insurance.renewal_workflows WHERE workflow_id = %s",
+            (workflow_id,),
+        ).fetchone()
+    if record is None:
+        raise RuntimeError("Protected renewal details are unavailable")
+    return ProtectedRenewalDetails.decode(record)
 
 
 def record_workflow(
@@ -250,6 +290,7 @@ def mark_workflow_completed(connection: Connection[tuple[Any, ...]], workflow_id
 __all__ = [
     "ActivationReceipt",
     "DurableDraft",
+    "ProtectedRenewalDetails",
     "WorkflowIdentity",
     "activation_receipt",
     "bind_draft_ready_event",
@@ -260,6 +301,7 @@ __all__ = [
     "mark_workflow_authority_revoked",
     "mark_workflow_cancelled",
     "mark_workflow_completed",
+    "protected_renewal_details",
     "record_draft",
     "record_workflow",
     "workflow_exists",

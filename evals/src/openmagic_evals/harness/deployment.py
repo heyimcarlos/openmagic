@@ -19,6 +19,8 @@ from testcontainers.postgres import PostgresContainer
 from openmagic_evals.harness._network import free_port
 from openmagic_evals.harness._postgres import postgres_container
 
+_SYNTHETIC_VERIFICATION_SECRET = "openmagic-evals-verification-secret"
+
 ProcessRole = Literal["api", "workflow-worker", "delivery-worker"]
 
 
@@ -47,10 +49,12 @@ class TestDeployment:
         working_directory: Path,
         readiness_timeout: float = 30.0,
         email_provider_url: str | None = None,
+        verification_code_secret: str | None = None,
     ) -> None:
         self.working_directory = working_directory.resolve()
         self.readiness_timeout = readiness_timeout
         self.email_provider_url = email_provider_url
+        self.verification_code_secret = verification_code_secret
         self.database_url = ""
         self.database_name = ""
         self.processes: tuple[ManagedProcess, ...] = ()
@@ -150,6 +154,17 @@ class TestDeployment:
             worker_arguments = ["--worker-id", f"{role}-{uuid4().hex}"]
         if role == "workflow-worker" and self.email_provider_url is not None:
             worker_arguments.extend(["--email-provider-url", self.email_provider_url])
+        if role == "workflow-worker":
+            secret_path = self.working_directory / "verification-code-secret"
+            descriptor = os.open(
+                secret_path,
+                os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW,
+                0o600,
+            )
+            os.fchmod(descriptor, 0o600)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as secret_file:
+                secret_file.write(self.verification_code_secret or _SYNTHETIC_VERIFICATION_SECRET)
+            worker_arguments.extend(["--verification-code-secret-file", str(secret_path)])
         command = [
             str(script),
             "--database-url",

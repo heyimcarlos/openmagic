@@ -37,6 +37,7 @@ def test_cold_migrations_create_independently_owned_schemas_without_reverse_fore
                     "0001_example_insurance_baseline",
                     "0002_renewal_drafting_application",
                     "0003_renewal_approval_effect",
+                    "0004_deterministic_verification",
                 ),
             ),
         ]
@@ -47,7 +48,7 @@ def test_cold_migrations_create_independently_owned_schemas_without_reverse_fore
                 "SELECT 'openmagic_runtime', version FROM openmagic_runtime.migration_history "
                 "UNION ALL "
                 "SELECT 'example_insurance', version FROM example_insurance.migration_history "
-                "ORDER BY 1"
+                "ORDER BY 1, 2"
             ).fetchall()
             reverse_foreign_keys = connection.execute(
                 "SELECT constraint_name FROM information_schema.referential_constraints "
@@ -75,11 +76,33 @@ def test_cold_migrations_create_independently_owned_schemas_without_reverse_fore
                 "AND tc.table_schema = 'example_insurance' "
                 "AND tc.table_name = 'renewal_drafts' AND kcu.column_name = 'step_id'"
             ).fetchone()
+            protected_command_checks = connection.execute(
+                "SELECT pg_get_constraintdef(constraint_row.oid) "
+                "FROM pg_constraint AS constraint_row "
+                "JOIN pg_class AS table_row ON table_row.oid = constraint_row.conrelid "
+                "JOIN pg_namespace AS schema_row ON schema_row.oid = table_row.relnamespace "
+                "WHERE schema_row.nspname = 'example_insurance' "
+                "AND table_row.relname = 'protected_commands' "
+                "AND constraint_row.contype = 'c'"
+            ).fetchall()
+            challenge_constraints = connection.execute(
+                "SELECT constraint_row.contype, pg_get_constraintdef(constraint_row.oid) "
+                "FROM pg_constraint AS constraint_row "
+                "JOIN pg_class AS table_row ON table_row.oid = constraint_row.conrelid "
+                "JOIN pg_namespace AS schema_row ON schema_row.oid = table_row.relnamespace "
+                "WHERE schema_row.nspname = 'example_insurance' "
+                "AND table_row.relname = 'verification_challenges'"
+            ).fetchall()
+            redundant_pending_index = connection.execute(
+                "SELECT indexname FROM pg_indexes WHERE schemaname = 'example_insurance' "
+                "AND indexname = 'one_pending_exact_verification_challenge'"
+            ).fetchall()
 
         assert histories == [
             ("example_insurance", "0001_example_insurance_baseline"),
             ("example_insurance", "0002_renewal_drafting_application"),
             ("example_insurance", "0003_renewal_approval_effect"),
+            ("example_insurance", "0004_deterministic_verification"),
             ("openmagic_runtime", "0001_runtime_baseline"),
             ("openmagic_runtime", "0002_renewal_drafting_runtime"),
             ("openmagic_runtime", "0003_fenced_effect_kernel"),
@@ -87,6 +110,20 @@ def test_cold_migrations_create_independently_owned_schemas_without_reverse_fore
         assert reverse_foreign_keys == []
         assert invalid_singleton_constraints == []
         assert draft_step_uniqueness == (1,)
+        assert any(
+            definition.count("outcome IS NOT NULL") == 2
+            for (definition,) in protected_command_checks
+        )
+        assert ("u", "UNIQUE (protected_command_id)") in challenge_constraints
+        assert any(
+            kind == "f"
+            and definition.startswith(
+                "FOREIGN KEY (protected_command_id, party_id, thread_id, "
+                "protected_workflow_id, purpose)"
+            )
+            for kind, definition in challenge_constraints
+        )
+        assert redundant_pending_index == []
 
 
 @pytest.mark.integration

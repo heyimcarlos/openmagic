@@ -9,6 +9,7 @@ from openmagic_runtime.commands import Actor, Cause
 from psycopg import Connection
 from psycopg.types.json import Jsonb
 
+from example_insurance.application_event_records import actor_record, cause_record
 from example_insurance.renewal_approval_policy import (
     ApprovalDecisionFacts,
     ApprovalDecisionKind,
@@ -19,7 +20,6 @@ from example_insurance.renewal_commands import (
     ApproveRenewalDraftInput,
     RequestRenewalRevisionInput,
 )
-from example_insurance.renewal_records import actor_record, cause_record
 
 
 def decision_facts(

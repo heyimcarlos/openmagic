@@ -9,6 +9,10 @@ from openmagic_evals.harness.renewal_scenario import (
     wait_for_database_fault_window,
     wait_for_renewal_completion,
 )
+from openmagic_evals.harness.verification_scenario import (
+    VerificationScenario,
+    issue_verification_challenge,
+)
 from openmagic_evals.harness.verifier import BootVerdict, DeploymentVerifier
 
 __all__ = [
@@ -18,7 +22,9 @@ __all__ = [
     "ManagedProcess",
     "ProcessRole",
     "TestDeployment",
+    "VerificationScenario",
     "approve_renewal",
+    "issue_verification_challenge",
     "prepare_renewal_approval",
     "renewal_context",
     "wait_for_database_fault_window",

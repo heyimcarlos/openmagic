@@ -15,7 +15,11 @@ from openmagic_runtime.agents import (
     AgentExecutionInput,
 )
 from openmagic_runtime.commands import (
+    Actor,
+    Cause,
+    CommandDispatcher,
     CommandReceipt,
+    CommandUnavailable,
     StateConflict,
 )
 from openmagic_runtime.delivery import (
@@ -35,9 +39,10 @@ from openmagic_runtime.kernel.definitions import DefinitionCatalog
 from openmagic_runtime.kernel.work import (
     ClaimedAttempt,
 )
-from openmagic_runtime.threads import ThreadAccess
+from openmagic_runtime.threads import ThreadAccess, ThreadStore
 from psycopg import Connection
 
+from example_insurance.application_registry import application_command_dispatcher
 from example_insurance.renewal_attempt_control import RenewalAttemptControl
 from example_insurance.renewal_commands import (
     AcceptRenewalEffectObservation,
@@ -61,6 +66,8 @@ from example_insurance.renewal_commands import (
     StartRenewalOutreachInput,
     StartRenewalOutreachResult,
     WorkflowAttemptResult,
+    dispatch_command_id,
+    effect_observation_command_id,
 )
 from example_insurance.renewal_definition import RENEWAL_DEFINITION
 from example_insurance.renewal_effect_control import RenewalEffectControl
@@ -73,6 +80,7 @@ from example_insurance.renewal_effects import (
     AuthorizedEmailEffectExecutor,
     EmailProviderClient,
     EmailReconciliationExecutor,
+    committed_permit_execution_input,
 )
 from example_insurance.renewal_evidence import RenewalEvidenceProjector
 from example_insurance.renewal_facts import RenewalFacts, RenewalFactSource
@@ -80,14 +88,43 @@ from example_insurance.renewal_lifecycle import RenewalLifecycleControl
 from example_insurance.renewal_records import CommandEventLineage
 from example_insurance.renewal_registry import (
     RenewalCommandHandlers,
-    renewal_command_dispatcher,
 )
 from example_insurance.renewal_review_control import RenewalReviewControl
-from example_insurance.renewal_worker_control import RenewalWorkerControl
 from example_insurance.renewal_workflow_records import (
     record_workflow,
     workflow_exists,
 )
+from example_insurance.verification_attempt_control import VerificationAttemptControl
+from example_insurance.verification_codes import VerificationCodes
+from example_insurance.verification_commands import (
+    ProvisionVerificationAuthority,
+    ProvisionVerificationAuthorityInput,
+    ProvisionVerificationAuthorityResult,
+    RequestProtectedRenewalDetails,
+    RequestProtectedRenewalDetailsInput,
+    RequestProtectedRenewalDetailsResult,
+    RevokeVerificationAuthority,
+    RevokeVerificationAuthorityInput,
+    RevokeVerificationAuthorityResult,
+    SubmitVerificationCode,
+    SubmitVerificationCodeInput,
+    SubmitVerificationCodeResult,
+    VerificationAuthorityTarget,
+)
+from example_insurance.verification_control import VerificationControl
+from example_insurance.verification_definition import VERIFICATION_DEFINITION
+from example_insurance.verification_registry import VerificationCommandHandlers
+from example_insurance.verification_workflow_records import (
+    has_active_verification_workflows,
+)
+from example_insurance.workflow_attempt_dispatch import (
+    AttemptHandler,
+    AttemptObservationDispatcher,
+    AttemptRecovery,
+    transactional_acceptor,
+    transactional_recovery,
+)
+from example_insurance.workflow_worker_control import WorkflowWorkerControl
 
 
 @dataclass(frozen=True)
@@ -149,15 +186,38 @@ def _draft_agent_factory() -> Callable[[AgentExecutionInput], RenewalDraftCandid
 
 
 class ExampleInsurance:
-    def __init__(self, *, database_url: str, email_provider_url: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        database_url: str,
+        email_provider_url: str | None = None,
+        verification_code_secret: bytes | None = None,
+        challenge_ttl_seconds: int = 600,
+        session_ttl_seconds: int = 900,
+    ) -> None:
         self._database_url = database_url
         self._review_control = RenewalReviewControl()
         self._lifecycle_control = RenewalLifecycleControl()
         self._effect_control = RenewalEffectControl()
         self._attempt_control = RenewalAttemptControl(effect_control=self._effect_control)
-        self._dispatcher = renewal_command_dispatcher(
+        verification_codes = (
+            VerificationCodes(verification_code_secret)
+            if verification_code_secret is not None
+            else None
+        )
+        self._verification_control = (
+            VerificationControl(
+                codes=verification_codes,
+                threads=ThreadStore(database_url=database_url),
+                challenge_ttl_seconds=challenge_ttl_seconds,
+                session_ttl_seconds=session_ttl_seconds,
+            )
+            if verification_codes is not None
+            else None
+        )
+        self._dispatcher: CommandDispatcher = application_command_dispatcher(
             database_url=database_url,
-            handlers=RenewalCommandHandlers(
+            renewal_handlers=RenewalCommandHandlers(
                 start=self._handle_start,
                 approve=self._handle_approval,
                 revise=self._handle_revision,
@@ -165,6 +225,12 @@ class ExampleInsurance:
                 cancel=self._handle_cancellation,
                 authorize_dispatch=self._handle_dispatch_authorization,
                 accept_effect_observation=self._handle_effect_observation,
+            ),
+            verification_handlers=VerificationCommandHandlers(
+                provision=self._handle_verification_provision,
+                request=self._handle_protected_request,
+                revoke=self._handle_verification_revocation,
+                submit=self._handle_verification_submission,
             ),
         )
         self._renewal_facts = RenewalFactSource(database_url=database_url)
@@ -180,6 +246,34 @@ class ExampleInsurance:
                 timeout_seconds=5,
             ),
         }
+        ordinary_acceptor = transactional_acceptor(
+            database_url,
+            self._attempt_control.accept_observation,
+        )
+        attempt_handlers = {
+            "gather_renewal_facts": AttemptHandler(ordinary_acceptor),
+            "draft_renewal_email": AttemptHandler(ordinary_acceptor),
+            "send_renewal_email": AttemptHandler(
+                self._accept_renewal_effect_attempt,
+                self._renewal_effect_execution_input,
+            ),
+            "reconcile_renewal_email": AttemptHandler(self._accept_renewal_effect_attempt),
+        }
+        recoveries: list[AttemptRecovery] = []
+        if verification_codes is not None:
+            executors["example_insurance.verification_delivery.v1"] = DeterministicExecutor(
+                lambda value: {"challenge_id": str(value["challenge_id"])}
+            )
+            verification_attempts = VerificationAttemptControl(codes=verification_codes)
+            attempt_handlers[verification_attempts.template_key] = AttemptHandler(
+                transactional_acceptor(database_url, verification_attempts.accept_observation)
+            )
+            recoveries.append(
+                transactional_recovery(database_url, verification_attempts.recover_expired)
+            )
+        recoveries.append(
+            transactional_recovery(database_url, self._attempt_control.recover_expired)
+        )
         if email_provider_url is not None:
             executors.update(
                 {
@@ -192,15 +286,29 @@ class ExampleInsurance:
                     ),
                 }
             )
-        self._workers = RenewalWorkerControl(
+        self._attempt_observations = AttemptObservationDispatcher(
+            handlers=attempt_handlers,
+            recoveries=recoveries,
+        )
+        self._workers = WorkflowWorkerControl(
             database_url=database_url,
-            dispatcher=self._dispatcher,
             executors=executors,
-            attempts=self._attempt_control,
+            attempts=self._attempt_observations,
         )
 
     def prepare(self) -> None:
         DefinitionCatalog(database_url=self._database_url).register(RENEWAL_DEFINITION)
+        if self._verification_control is not None:
+            DefinitionCatalog(database_url=self._database_url).register(VERIFICATION_DEFINITION)
+
+    def prepare_workflow_worker(self) -> None:
+        if self._verification_control is None:
+            with psycopg.connect(self._database_url) as connection, connection.transaction():
+                if has_active_verification_workflows(connection):
+                    raise RuntimeError(
+                        "Open verification Workflows require deterministic executor support"
+                    )
+        self.prepare()
 
     def replace_renewal_facts(self, facts: RenewalFacts) -> None:
         self._renewal_facts.replace(facts)
@@ -210,6 +318,42 @@ class ExampleInsurance:
     ) -> CommandReceipt[StartRenewalOutreachResult]:
         return self._dispatcher.execute(
             command_type="renewal.start_outreach",
+            schema_version=1,
+            command=command,
+        )
+
+    def provision_verification_authority(
+        self, command: ProvisionVerificationAuthority
+    ) -> CommandReceipt[ProvisionVerificationAuthorityResult]:
+        return self._dispatcher.execute(
+            command_type="verification.provision_authority",
+            schema_version=1,
+            command=command,
+        )
+
+    def request_protected_renewal_details(
+        self, command: RequestProtectedRenewalDetails
+    ) -> CommandReceipt[RequestProtectedRenewalDetailsResult]:
+        return self._dispatcher.execute(
+            command_type="renewal.read_approved_details",
+            schema_version=1,
+            command=command,
+        )
+
+    def revoke_verification_authority(
+        self, command: RevokeVerificationAuthority
+    ) -> CommandReceipt[RevokeVerificationAuthorityResult]:
+        return self._dispatcher.execute(
+            command_type="verification.revoke_authority",
+            schema_version=1,
+            command=command,
+        )
+
+    def submit_verification_code(
+        self, command: SubmitVerificationCode
+    ) -> CommandReceipt[SubmitVerificationCodeResult]:
+        return self._dispatcher.execute(
+            command_type="verification.submit_code",
             schema_version=1,
             command=command,
         )
@@ -258,13 +402,56 @@ class ExampleInsurance:
     def authorize_email_dispatch(
         self, *, attempt: ClaimedAttempt, worker_id: str
     ) -> CommandReceipt[ExternalEffectPermit]:
-        return self._workers.authorize_dispatch(attempt=attempt, worker_id=worker_id)
+        return self._dispatcher.execute(
+            command_type="renewal.authorize_email_dispatch",
+            schema_version=1,
+            command=AuthorizeRenewalEmailDispatch(
+                command_id=dispatch_command_id(attempt.attempt_id),
+                actor=Actor("system", worker_id),
+                cause=Cause("attempt", str(attempt.attempt_id)),
+                input=AuthorizeRenewalEmailDispatchInput(attempt, worker_id),
+            ),
+        )
 
     def accept_renewal_effect_observation(
         self,
         command: AcceptRenewalEffectObservation,
     ) -> CommandReceipt[WorkflowAttemptResult]:
-        return self._workers.accept_effect_observation(command)
+        return self._dispatcher.execute(
+            command_type="renewal.accept_effect_observation",
+            schema_version=1,
+            command=command,
+        )
+
+    def _renewal_effect_execution_input(
+        self,
+        attempt: ClaimedAttempt,
+        worker_id: str,
+        default: dict[str, Any],
+    ) -> dict[str, Any]:
+        del default
+        return committed_permit_execution_input(
+            self.authorize_email_dispatch(attempt=attempt, worker_id=worker_id)
+        )
+
+    def _accept_renewal_effect_attempt(
+        self,
+        attempt: ClaimedAttempt,
+        worker_id: str,
+        observation: dict[str, Any],
+    ) -> WorkflowAttemptResult:
+        value = RenewalEffectObservation(
+            classification=observation["classification"],
+            provider_request_id=str(observation["provider_request_id"]),
+        )
+        return self.accept_renewal_effect_observation(
+            AcceptRenewalEffectObservation(
+                command_id=effect_observation_command_id(attempt.attempt_id),
+                actor=Actor("system", worker_id),
+                cause=Cause("attempt", str(attempt.attempt_id)),
+                input=AcceptRenewalEffectObservationInput(attempt, worker_id, value),
+            )
+        ).result
 
     def run_workflow_worker_once(
         self, *, worker_id: str, worker_shutdown: Event | None = None
@@ -299,7 +486,7 @@ class ExampleInsurance:
         worker_id: str,
         observation: dict[str, Any],
     ) -> WorkflowAttemptResult:
-        return self._workers.submit_observation(
+        return self._attempt_observations.accept(
             attempt=attempt,
             worker_id=worker_id,
             observation=observation,
@@ -438,6 +625,39 @@ class ExampleInsurance:
             lineage=CommandEventLineage(command.actor, command.command_id),
         )
 
+    def _verification(self) -> VerificationControl:
+        if self._verification_control is None:
+            raise CommandUnavailable("Verification requires an explicit code secret")
+        return self._verification_control
+
+    def _handle_verification_provision(
+        self,
+        command: ProvisionVerificationAuthority,
+        connection: Connection[tuple[Any, ...]],
+    ) -> ProvisionVerificationAuthorityResult:
+        return self._verification().provision(command, connection)
+
+    def _handle_protected_request(
+        self,
+        command: RequestProtectedRenewalDetails,
+        connection: Connection[tuple[Any, ...]],
+    ) -> RequestProtectedRenewalDetailsResult:
+        return self._verification().request(command, connection)
+
+    def _handle_verification_revocation(
+        self,
+        command: RevokeVerificationAuthority,
+        connection: Connection[tuple[Any, ...]],
+    ) -> RevokeVerificationAuthorityResult:
+        return self._verification().revoke(command, connection)
+
+    def _handle_verification_submission(
+        self,
+        command: SubmitVerificationCode,
+        connection: Connection[tuple[Any, ...]],
+    ) -> SubmitVerificationCodeResult:
+        return self._verification().submit(command, connection)
+
 
 __all__ = [
     "AcceptRenewalEffectObservation",
@@ -451,18 +671,31 @@ __all__ = [
     "CancelRenewalOutreachInput",
     "CancelRenewalOutreachResult",
     "ExampleInsurance",
+    "ProvisionVerificationAuthority",
+    "ProvisionVerificationAuthorityInput",
+    "ProvisionVerificationAuthorityResult",
     "RenewalApprovalPresentation",
     "RenewalEffectObservation",
     "RenewalEmailEffect",
     "RenewalFacts",
+    "RequestProtectedRenewalDetails",
+    "RequestProtectedRenewalDetailsInput",
+    "RequestProtectedRenewalDetailsResult",
     "RequestRenewalRevision",
     "RequestRenewalRevisionInput",
     "RequestRenewalRevisionResult",
     "RevokeRenewalAuthority",
     "RevokeRenewalAuthorityInput",
     "RevokeRenewalAuthorityResult",
+    "RevokeVerificationAuthority",
+    "RevokeVerificationAuthorityInput",
+    "RevokeVerificationAuthorityResult",
     "StartRenewalOutreach",
     "StartRenewalOutreachInput",
     "StartRenewalOutreachResult",
+    "SubmitVerificationCode",
+    "SubmitVerificationCodeInput",
+    "SubmitVerificationCodeResult",
+    "VerificationAuthorityTarget",
     "WorkflowAttemptResult",
 ]

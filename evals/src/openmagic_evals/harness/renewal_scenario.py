@@ -26,12 +26,22 @@ from openmagic_evals.harness._postgres import postgres_container
 
 
 @contextmanager
-def renewal_context() -> Iterator[tuple[str, ExampleInsurance, ThreadStore]]:
+def renewal_context(
+    *,
+    verification_code_secret: bytes | None = None,
+    challenge_ttl_seconds: int = 600,
+    session_ttl_seconds: int = 900,
+) -> Iterator[tuple[str, ExampleInsurance, ThreadStore]]:
     """Provide a migrated PostgreSQL renewal application through public interfaces."""
     with postgres_container(database_name=f"openmagic_test_{uuid4().hex}") as postgres:
         database_url = postgres.get_connection_url(driver=None)
         apply_migrations(database_url)
-        application = ExampleInsurance(database_url=database_url)
+        application = ExampleInsurance(
+            database_url=database_url,
+            verification_code_secret=verification_code_secret,
+            challenge_ttl_seconds=challenge_ttl_seconds,
+            session_ttl_seconds=session_ttl_seconds,
+        )
         application.prepare()
         yield database_url, application, ThreadStore(database_url=database_url)
 
@@ -41,17 +51,22 @@ def prepare_renewal_approval(
     threads: ThreadStore,
     *,
     deliver: bool = True,
+    actor: Actor | None = None,
+    thread_id: UUID | None = None,
 ) -> tuple[StartRenewalOutreach, Actor]:
     """Start a renewal and advance it to its durable approval Wait."""
-    thread = threads.create(CreateThread(uuid4(), "email", f"broker-{uuid4()}"))
-    actor = Actor(kind="party", identifier=str(uuid4()))
+    if thread_id is None:
+        thread = threads.create(CreateThread(uuid4(), "email", f"broker-{uuid4()}@example.test"))
+        thread_id = thread.thread_id
+    if actor is None:
+        actor = Actor(kind="party", identifier=str(uuid4()))
     command = StartRenewalOutreach(
         command_id=uuid4(),
         actor=actor,
         cause=Cause(kind="message", identifier=str(uuid4())),
         input=StartRenewalOutreachInput(
             workflow_id=uuid4(),
-            thread_id=thread.thread_id,
+            thread_id=thread_id,
             policy_id=uuid4(),
             policy_number="OM-69",
             policyholder_name="Avery Chen",

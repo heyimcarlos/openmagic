@@ -10,6 +10,8 @@ from openmagic_runtime.commands import Actor, Cause
 from psycopg import Connection
 from psycopg.types.json import Jsonb
 
+from example_insurance.application_event_records import actor_record, cause_record
+
 
 @dataclass(frozen=True)
 class CommandEventLineage:
@@ -19,14 +21,6 @@ class CommandEventLineage:
     @property
     def cause(self) -> Cause:
         return Cause("command", str(self.command_id))
-
-
-def actor_record(actor: Actor) -> dict[str, str]:
-    return {"kind": actor.kind, "identifier": actor.identifier}
-
-
-def cause_record(cause: Cause) -> dict[str, str]:
-    return {"kind": cause.kind, "identifier": cause.identifier}
 
 
 def record_event(
@@ -57,7 +51,5 @@ def record_event(
 
 __all__ = [
     "CommandEventLineage",
-    "actor_record",
-    "cause_record",
     "record_event",
 ]
