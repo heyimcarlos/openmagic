@@ -25,6 +25,89 @@ class RecoveryDecision:
     failure: dict[str, Any] | None = None
 
 
+@dataclass(frozen=True)
+class ApprovalDecisionFacts:
+    lifecycle: str
+    actor_matches: bool
+    authority_revoked: bool
+    wait_unsatisfied: bool
+    presentation_exact: bool
+
+
+@dataclass(frozen=True)
+class ApprovalDecision:
+    outcome: (
+        Literal[
+            "authority_revoked",
+            "stale_presentation",
+            "unauthorized_actor",
+            "wait_already_satisfied",
+        ]
+        | None
+    )
+    route_key: Literal["approve_email", "revise_email"] | None
+
+
+@dataclass(frozen=True)
+class EffectAuthorizationFacts:
+    lifecycle_active: bool
+    authority_revoked: bool
+    grant_matches_step: bool
+    fingerprint_matches_grant: bool
+    grant_valid: bool
+    grant_consumption_consistent: bool
+    durable_claim_matches: bool
+    durable_effect_matches: bool
+    existing_certainty: str | None
+
+
+@dataclass(frozen=True)
+class CompletionStepFact:
+    state: str
+    has_accepted_output: bool
+
+
+@dataclass(frozen=True)
+class CompletionEffectFact:
+    certainty: str
+    has_applied_evidence: bool
+
+
+class RenewalApprovalPolicy:
+    @staticmethod
+    def decide(
+        *,
+        decision_kind: Literal["approve", "request_revision"],
+        facts: ApprovalDecisionFacts,
+    ) -> ApprovalDecision:
+        if facts.lifecycle != "active" or facts.authority_revoked:
+            return ApprovalDecision("authority_revoked", None)
+        if not facts.actor_matches:
+            return ApprovalDecision("unauthorized_actor", None)
+        if not facts.wait_unsatisfied:
+            return ApprovalDecision("wait_already_satisfied", None)
+        if not facts.presentation_exact:
+            return ApprovalDecision("stale_presentation", None)
+        route = "approve_email" if decision_kind == "approve" else "revise_email"
+        return ApprovalDecision(None, route)
+
+    @staticmethod
+    def authorizes_revocation(*, actor_kind: str, actor_id: str) -> bool:
+        return actor_kind == "system" and actor_id == "authority-administrator"
+
+    @staticmethod
+    def authorizes_cancellation(
+        *,
+        actor_kind: str,
+        actor_id: str,
+        authorized_actor_kind: str,
+        authorized_actor_id: str,
+    ) -> bool:
+        return (actor_kind == authorized_actor_kind and actor_id == authorized_actor_id) or (
+            actor_kind == "system" and actor_id == "workflow-administrator"
+        )
+
+
 class RenewalWorkflowPolicy:
     definition_key = "example_insurance.renewal_outreach"
     definition_version = 2
@@ -127,23 +210,38 @@ class RenewalCompletionPolicy:
     @staticmethod
     def is_complete(
         *,
-        required_step_states: tuple[str, ...],
-        effect_certainties: tuple[str, ...],
+        steps: tuple[CompletionStepFact, ...],
+        effects: tuple[CompletionEffectFact, ...],
     ) -> bool:
         return (
-            bool(required_step_states)
-            and all(state == "succeeded" for state in required_step_states)
-            and bool(effect_certainties)
-            and all(certainty == "applied" for certainty in effect_certainties)
+            bool(steps)
+            and all(step.state == "succeeded" and step.has_accepted_output for step in steps)
+            and bool(effects)
+            and all(
+                effect.certainty == "applied" and effect.has_applied_evidence for effect in effects
+            )
         )
 
 
 class RenewalExternalEffectPolicy:
+    maximum_attempts = RENEWAL_ATTEMPT_RETRY_POLICY.max_attempts
+
     @staticmethod
-    def authorize_dispatch(*, lifecycle: str, existing_certainty: str | None) -> None:
-        if lifecycle != "active":
+    def authorize_dispatch(*, facts: EffectAuthorizationFacts) -> None:
+        if not facts.lifecycle_active or facts.authority_revoked:
             raise RuntimeError("Renewal Workflow no longer authorizes dispatch")
-        if existing_certainty not in {None, "not_applied"}:
+        if not all(
+            (
+                facts.grant_matches_step,
+                facts.fingerprint_matches_grant,
+                facts.grant_valid,
+                facts.grant_consumption_consistent,
+                facts.durable_claim_matches,
+                facts.durable_effect_matches,
+            )
+        ):
+            raise RuntimeError("Exact Approval Grant does not authorize this dispatch")
+        if facts.existing_certainty not in {None, "not_applied"}:
             raise RuntimeError("External Effect is not safe to dispatch")
 
     @staticmethod
@@ -184,7 +282,13 @@ class RenewalExternalEffectPolicy:
 
 __all__ = [
     "RENEWAL_ATTEMPT_RETRY_POLICY",
+    "ApprovalDecision",
+    "ApprovalDecisionFacts",
+    "CompletionEffectFact",
+    "CompletionStepFact",
+    "EffectAuthorizationFacts",
     "RecoveryDecision",
+    "RenewalApprovalPolicy",
     "RenewalCompletionPolicy",
     "RenewalDeliveryPolicy",
     "RenewalExternalEffectPolicy",

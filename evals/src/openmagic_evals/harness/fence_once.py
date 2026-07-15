@@ -32,7 +32,7 @@ def main() -> None:
         json.dumps(
             {
                 "attempt_id": str(attempt.attempt_id),
-                "logical_effect_id": str(permit.logical_effect_id),
+                "logical_effect_id": str(permit.result.logical_effect_id),
             }
         )
     )

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date
 from threading import Event
 from typing import Any
 from uuid import UUID, uuid4
@@ -61,22 +60,36 @@ from psycopg.types.json import Jsonb
 
 from example_insurance.renewal_approval import RenewalApprovalControl
 from example_insurance.renewal_commands import (
+    AcceptRenewalEffectObservation,
+    AcceptRenewalEffectObservationInput,
     ApproveRenewalDraft,
     ApproveRenewalDraftInput,
     ApproveRenewalDraftResult,
+    AuthorizeRenewalEmailDispatch,
+    AuthorizeRenewalEmailDispatchInput,
     CancelRenewalOutreach,
     CancelRenewalOutreachInput,
     CancelRenewalOutreachResult,
+    RenewalEffectObservation,
     RequestRenewalRevision,
     RequestRenewalRevisionInput,
     RequestRenewalRevisionResult,
     RevokeRenewalAuthority,
     RevokeRenewalAuthorityInput,
     RevokeRenewalAuthorityResult,
+    StartRenewalOutreach,
+    StartRenewalOutreachInput,
+    StartRenewalOutreachResult,
+    WorkflowAttemptResult,
+    dispatch_command_id,
+    effect_observation_command_id,
     validate_approval,
     validate_cancellation,
+    validate_dispatch,
+    validate_effect_observation,
     validate_revision,
     validate_revocation,
+    validate_start,
 )
 from example_insurance.renewal_definition import RENEWAL_DEFINITION
 from example_insurance.renewal_effects import (
@@ -91,64 +104,32 @@ from example_insurance.renewal_facts import RenewalFacts, RenewalFactSource
 from example_insurance.renewal_policies import RenewalDeliveryPolicy, RenewalWorkflowPolicy
 
 
-@dataclass(frozen=True)
-class StartRenewalOutreachInput:
-    workflow_id: UUID
-    thread_id: UUID
-    policy_id: UUID
-    policy_number: str
-    policyholder_name: str
-    policyholder_email: str
-    renewal_date: str
-    expiring_premium_cents: int
+def _decode_workflow_attempt_result(payload: dict[str, Any]) -> WorkflowAttemptResult:
+    agent_run_id = payload["agent_run_id"]
+    return WorkflowAttemptResult(
+        attempt_id=UUID(payload["attempt_id"]),
+        template_key=str(payload["template_key"]),
+        executor_key=str(payload["executor_key"]),
+        agent_run_id=UUID(agent_run_id) if agent_run_id is not None else None,
+        agent_runtime_generation=payload["agent_runtime_generation"],
+        steps={key: UUID(value) for key, value in payload["steps"].items()},
+        waits={key: UUID(value) for key, value in payload["waits"].items()},
+    )
 
 
-@dataclass(frozen=True)
-class StartRenewalOutreach:
-    command_id: UUID
-    actor: Actor
-    cause: Cause
-    input: StartRenewalOutreachInput
-
-
-@dataclass(frozen=True)
-class StartRenewalOutreachResult:
-    workflow_id: UUID
-    instance_id: UUID
-    thread_id: UUID
-
-
-@dataclass(frozen=True)
-class WorkflowAttemptResult:
-    attempt_id: UUID
-    template_key: str
-    executor_key: str
-    agent_run_id: UUID | None
-    agent_runtime_generation: int | None
-    steps: dict[str, UUID]
-    waits: dict[str, UUID]
+def _decode_effect_permit(payload: dict[str, Any]) -> ExternalEffectPermit:
+    return ExternalEffectPermit(
+        logical_effect_id=UUID(payload["logical_effect_id"]),
+        step_id=UUID(payload["step_id"]),
+        attempt_id=UUID(payload["attempt_id"]),
+        provider_idempotency_key=str(payload["provider_idempotency_key"]),
+    )
 
 
 @dataclass(frozen=True)
 class RenewalDraftCandidate:
     subject: str
     body: str
-
-
-def _validate_start_command(command: StartRenewalOutreach) -> None:
-    value = command.input
-    if not command.actor.identifier.strip() or not command.cause.identifier.strip():
-        raise ValueError("Command Actor and Cause identifiers must be non-empty")
-    if (
-        not value.policy_number.strip()
-        or not value.policyholder_name.strip()
-        or not value.policyholder_email.strip()
-        or "@" not in value.policyholder_email
-    ):
-        raise ValueError("Policy number and policyholder name must be non-empty")
-    date.fromisoformat(value.renewal_date)
-    if value.expiring_premium_cents <= 0:
-        raise ValueError("Expiring premium must be positive")
 
 
 def _draft_agent_factory() -> Callable[[AgentExecutionInput], RenewalDraftCandidate]:
@@ -219,7 +200,7 @@ class ExampleInsurance:
                     instance_id=UUID(payload["instance_id"]),
                     thread_id=UUID(payload["thread_id"]),
                 ),
-                validator=_validate_start_command,
+                validator=validate_start,
             )
             .register(
                 command_type="renewal.approve_draft",
@@ -286,6 +267,24 @@ class ExampleInsurance:
                     instance_id=UUID(payload["instance_id"]),
                 ),
                 validator=validate_cancellation,
+            )
+            .register(
+                command_type="renewal.authorize_email_dispatch",
+                schema_version=1,
+                command_class=AuthorizeRenewalEmailDispatch,
+                result_class=ExternalEffectPermit,
+                handler=self._handle_dispatch_authorization,
+                result_decoder=_decode_effect_permit,
+                validator=validate_dispatch,
+            )
+            .register(
+                command_type="renewal.accept_effect_observation",
+                schema_version=1,
+                command_class=AcceptRenewalEffectObservation,
+                result_class=WorkflowAttemptResult,
+                handler=self._handle_effect_observation,
+                result_decoder=_decode_workflow_attempt_result,
+                validator=validate_effect_observation,
             )
             .build()
         )
@@ -379,13 +378,27 @@ class ExampleInsurance:
 
     def authorize_email_dispatch(
         self, *, attempt: ClaimedAttempt, worker_id: str
-    ) -> ExternalEffectPermit:
-        with psycopg.connect(self._database_url) as connection, connection.transaction():
-            return self._approval_control.authorize_dispatch(
-                connection,
-                attempt=attempt,
-                worker_id=worker_id,
-            )
+    ) -> CommandReceipt[ExternalEffectPermit]:
+        return self._dispatcher.execute(
+            command_type="renewal.authorize_email_dispatch",
+            schema_version=1,
+            command=AuthorizeRenewalEmailDispatch(
+                command_id=dispatch_command_id(attempt.attempt_id),
+                actor=Actor("system", worker_id),
+                cause=Cause("attempt", str(attempt.attempt_id)),
+                input=AuthorizeRenewalEmailDispatchInput(attempt, worker_id),
+            ),
+        )
+
+    def accept_renewal_effect_observation(
+        self,
+        command: AcceptRenewalEffectObservation,
+    ) -> CommandReceipt[WorkflowAttemptResult]:
+        return self._dispatcher.execute(
+            command_type="renewal.accept_effect_observation",
+            schema_version=1,
+            command=command,
+        )
 
     def run_workflow_worker_once(
         self, *, worker_id: str, worker_shutdown: Event | None = None
@@ -556,6 +569,26 @@ class ExampleInsurance:
                         {"class": type(error).__name__},
                     )
             raise
+        if durable_attempt.template_key in {
+            "send_renewal_email",
+            "reconcile_renewal_email",
+        }:
+            value = RenewalEffectObservation(
+                classification=observation.value["classification"],
+                provider_request_id=str(observation.value["provider_request_id"]),
+            )
+            return self.accept_renewal_effect_observation(
+                AcceptRenewalEffectObservation(
+                    command_id=effect_observation_command_id(durable_attempt.attempt_id),
+                    actor=Actor("system", worker_id),
+                    cause=Cause("attempt", str(durable_attempt.attempt_id)),
+                    input=AcceptRenewalEffectObservationInput(
+                        durable_attempt,
+                        worker_id,
+                        value,
+                    ),
+                )
+            ).result
         return self.submit_workflow_observation(
             attempt=durable_attempt,
             worker_id=worker_id,
@@ -569,7 +602,23 @@ class ExampleInsurance:
         worker_id: str,
         observation: dict[str, Any],
     ) -> WorkflowAttemptResult:
-        with psycopg.connect(self._database_url) as connection, connection.transaction():
+        with psycopg.connect(self._database_url) as connection:
+            return self._submit_workflow_observation(
+                connection=connection,
+                attempt=attempt,
+                worker_id=worker_id,
+                observation=observation,
+            )
+
+    def _submit_workflow_observation(
+        self,
+        *,
+        connection: Connection[tuple[Any, ...]],
+        attempt: ClaimedAttempt,
+        worker_id: str,
+        observation: dict[str, Any],
+    ) -> WorkflowAttemptResult:
+        with connection.transaction():
             workflow = connection.execute(
                 "SELECT workflow_id, thread_id FROM example_insurance.renewal_workflows "
                 "WHERE instance_id = %s FOR UPDATE",
@@ -867,16 +916,47 @@ class ExampleInsurance:
     ) -> CancelRenewalOutreachResult:
         return self._approval_control.cancel(command, connection)
 
+    def _handle_dispatch_authorization(
+        self,
+        command: AuthorizeRenewalEmailDispatch,
+        connection: Connection[tuple[Any, ...]],
+    ) -> ExternalEffectPermit:
+        return self._approval_control.authorize_dispatch(
+            connection,
+            attempt=command.input.attempt,
+            worker_id=command.input.worker_id,
+        )
+
+    def _handle_effect_observation(
+        self,
+        command: AcceptRenewalEffectObservation,
+        connection: Connection[tuple[Any, ...]],
+    ) -> WorkflowAttemptResult:
+        return self._submit_workflow_observation(
+            connection=connection,
+            attempt=command.input.attempt,
+            worker_id=command.input.worker_id,
+            observation={
+                "classification": command.input.observation.classification,
+                "provider_request_id": command.input.observation.provider_request_id,
+            },
+        )
+
 
 __all__ = [
+    "AcceptRenewalEffectObservation",
+    "AcceptRenewalEffectObservationInput",
     "ApproveRenewalDraft",
     "ApproveRenewalDraftInput",
     "ApproveRenewalDraftResult",
+    "AuthorizeRenewalEmailDispatch",
+    "AuthorizeRenewalEmailDispatchInput",
     "CancelRenewalOutreach",
     "CancelRenewalOutreachInput",
     "CancelRenewalOutreachResult",
     "ExampleInsurance",
     "RenewalApprovalPresentation",
+    "RenewalEffectObservation",
     "RenewalEmailEffect",
     "RenewalFacts",
     "RequestRenewalRevision",

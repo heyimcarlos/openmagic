@@ -84,11 +84,17 @@ class GuardCurrentAttempt:
 
 
 class CurrentAttemptGuard:
-    __slots__ = ("_connection", "attempt_id")
+    __slots__ = ("_connection", "_transaction_id", "attempt_id")
 
-    def __init__(self, connection: Connection[tuple[Any, ...]], attempt_id: UUID) -> None:
+    def __init__(
+        self,
+        connection: Connection[tuple[Any, ...]],
+        attempt_id: UUID,
+        transaction_id: int,
+    ) -> None:
         self._connection = connection
         self.attempt_id = attempt_id
+        self._transaction_id = transaction_id
 
     def require_usable(self) -> None:
         if (
@@ -96,6 +102,9 @@ class CurrentAttemptGuard:
             or self._connection.info.transaction_status is TransactionStatus.IDLE
         ):
             raise RuntimeError("Current Attempt guard is no longer transaction-scoped")
+        current = self._connection.execute("SELECT txid_current()").fetchone()
+        if current is None or int(current[0]) != self._transaction_id:
+            raise RuntimeError("Current Attempt guard belongs to an earlier transaction")
 
     def __reduce__(self) -> str | tuple[Any, ...]:
         raise TypeError("Current Attempt guards cannot be serialized")
@@ -110,6 +119,22 @@ class ResolveDeferredStep:
     action: Literal["retry", "succeed", "fail"]
     output: dict[str, Any] | None = None
     failure: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class ResolveDeferredStepReceipt:
+    step_id: UUID
+    action: Literal["retry", "succeed", "fail"]
+
+
+def _deferred_action(value: object) -> Literal["retry", "succeed", "fail"]:
+    if value == "retry":
+        return "retry"
+    if value == "succeed":
+        return "succeed"
+    if value == "fail":
+        return "fail"
+    raise RuntimeError("Deferred resolution receipt has an invalid action")
 
 
 def _lock_open_instance(connection: Connection[tuple[Any, ...]], instance_id: UUID) -> None:
@@ -634,7 +659,14 @@ class KernelControl:
             raise RuntimeError("Current Attempt guard target does not exist")
         if int(current[1]) != request.attempt_number or not all(current[2:]):
             raise RuntimeError("Attempt is not current")
-        return CurrentAttemptGuard(self._connection, request.attempt_id)
+        transaction = self._connection.execute("SELECT txid_current()").fetchone()
+        if transaction is None:
+            raise RuntimeError("Current transaction identity is unavailable")
+        return CurrentAttemptGuard(
+            self._connection,
+            request.attempt_id,
+            int(transaction[0]),
+        )
 
     def defer(
         self,
@@ -704,7 +736,22 @@ class KernelControl:
         required.consumed = True
         return steps, waits
 
-    def resolve_deferred(self, request: ResolveDeferredStep) -> None:
+    def resolve_deferred(self, request: ResolveDeferredStep) -> ResolveDeferredStepReceipt:
+        input_digest = canonical_digest(request)
+        replay = self._connection.execute(
+            "SELECT input_digest, receipt FROM openmagic_runtime.trace_events "
+            "WHERE source_kind = 'deferred_resolution' AND source_id = %s",
+            (request.source_id,),
+        ).fetchone()
+        if replay is not None:
+            if str(replay[0]) != input_digest:
+                raise ValueError("Deferred resolution identity was reused with conflicting input")
+            receipt = dict(replay[1])
+            action = _deferred_action(receipt["action"])
+            return ResolveDeferredStepReceipt(
+                step_id=UUID(str(receipt["step_id"])),
+                action=action,
+            )
         _lock_open_instance(self._connection, request.instance_id)
         row = self._connection.execute(
             "SELECT template_key, state, deferred_attempt_id FROM openmagic_runtime.steps "
@@ -775,6 +822,7 @@ class KernelControl:
             input_value=request,
             receipt={"step_id": str(request.step_id), "action": request.action},
         )
+        return ResolveDeferredStepReceipt(request.step_id, request.action)
 
     def close(self, request: CloseInstance) -> CloseInstanceReceipt:
         transition_input = {
@@ -877,6 +925,7 @@ __all__ = [
     "GuardCurrentAttempt",
     "KernelControl",
     "ResolveDeferredStep",
+    "ResolveDeferredStepReceipt",
     "SignalReceipt",
     "StartInstance",
     "StartInstanceReceipt",

@@ -43,12 +43,15 @@ class RenewalEvidenceProjector:
                 for delivery in evidence_reader.deliveries(UUID(str(event[0])))
             )
             effects = connection.execute(
-                "SELECT logical_effect_id, certainty FROM example_insurance.external_effects "
+                "SELECT logical_effect_id, certainty, step_id, approval_grant_id, "
+                "dispatch_attempt_id, effect_fingerprint FROM "
+                "example_insurance.external_effects "
                 "WHERE workflow_id = %s ORDER BY fenced_at, logical_effect_id",
                 (workflow_id,),
             ).fetchall()
             effect_evidence = connection.execute(
-                "SELECT e.evidence_id, e.classification, e.source "
+                "SELECT e.evidence_id, e.classification, e.source, e.logical_effect_id, "
+                "e.attempt_id, e.provider_request_id "
                 "FROM example_insurance.external_effect_evidence e "
                 "JOIN example_insurance.external_effects x "
                 "ON x.logical_effect_id = e.logical_effect_id WHERE x.workflow_id = %s "
@@ -56,12 +59,15 @@ class RenewalEvidenceProjector:
                 (workflow_id,),
             ).fetchall()
             decisions = connection.execute(
-                "SELECT decision_id FROM example_insurance.renewal_decisions "
+                "SELECT decision_id, command_id, wait_id, draft_id, signal_id, decision_kind "
+                "FROM example_insurance.renewal_decisions "
                 "WHERE workflow_id = %s ORDER BY decided_at, decision_id",
                 (workflow_id,),
             ).fetchall()
             grants = connection.execute(
-                "SELECT approval_grant_id FROM example_insurance.approval_grants "
+                "SELECT approval_grant_id, decision_id, step_id, effect_fingerprint, "
+                "consumed_at IS NOT NULL, invalidated_at IS NOT NULL "
+                "FROM example_insurance.approval_grants "
                 "WHERE workflow_id = %s ORDER BY created_at, approval_grant_id",
                 (workflow_id,),
             ).fetchall()
@@ -86,6 +92,7 @@ class RenewalEvidenceProjector:
             ],
             "draft_agent_run_ids": [str(draft[0]) for draft in drafts],
             "decision_ids": [str(decision[0]) for decision in decisions],
+            "signal_ids": [str(decision[4]) for decision in decisions],
             "approval_grant_ids": [str(grant[0]) for grant in grants],
             "logical_effect_ids": [str(effect[0]) for effect in effects],
             "effect_evidence_ids": [str(item[0]) for item in effect_evidence],
@@ -117,8 +124,48 @@ class RenewalEvidenceProjector:
                 "external_email_effect_count": len(effects),
                 "external_effect_certainties": [str(effect[1]) for effect in effects],
                 "effect_evidence": [
-                    {"classification": str(item[1]), "source": str(item[2])}
+                    {
+                        "evidence_id": str(item[0]),
+                        "logical_effect_id": str(item[3]),
+                        "attempt_id": str(item[4]),
+                        "classification": str(item[1]),
+                        "source": str(item[2]),
+                        "provider_request_id": str(item[5]) if item[5] is not None else None,
+                    }
                     for item in effect_evidence
+                ],
+                "decisions": [
+                    {
+                        "decision_id": str(item[0]),
+                        "command_id": str(item[1]),
+                        "wait_id": str(item[2]),
+                        "draft_id": str(item[3]),
+                        "signal_id": str(item[4]),
+                        "decision_kind": str(item[5]),
+                    }
+                    for item in decisions
+                ],
+                "approval_grants": [
+                    {
+                        "approval_grant_id": str(item[0]),
+                        "decision_id": str(item[1]),
+                        "step_id": str(item[2]),
+                        "effect_fingerprint": str(item[3]),
+                        "consumed": bool(item[4]),
+                        "invalidated": bool(item[5]),
+                    }
+                    for item in grants
+                ],
+                "external_effects": [
+                    {
+                        "logical_effect_id": str(item[0]),
+                        "certainty": str(item[1]),
+                        "step_id": str(item[2]),
+                        "approval_grant_id": str(item[3]),
+                        "dispatch_attempt_id": str(item[4]),
+                        "effect_fingerprint": str(item[5]),
+                    }
+                    for item in effects
                 ],
                 "completion_event_count": sum(
                     str(event[1]) == "renewal.outreach.completed" for event in events

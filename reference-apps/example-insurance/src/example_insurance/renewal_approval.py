@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any
 from uuid import UUID, uuid4
 
 from openmagic_runtime.commands import Actor, Cause, StateConflict
@@ -38,6 +38,11 @@ from example_insurance.renewal_effects import (
     logical_effect_id,
 )
 from example_insurance.renewal_policies import (
+    ApprovalDecisionFacts,
+    CompletionEffectFact,
+    CompletionStepFact,
+    EffectAuthorizationFacts,
+    RenewalApprovalPolicy,
     RenewalCompletionPolicy,
     RenewalExternalEffectPolicy,
 )
@@ -57,12 +62,14 @@ class _DecisionContext:
     renewal_date: str
     expiring_premium_cents: int
     wait_state: str
+    presentation_bound: bool
     draft_fingerprint: str
     effect: RenewalEmailEffect
 
 
 class RenewalApprovalControl:
     def __init__(self) -> None:
+        self._approval_policy = RenewalApprovalPolicy()
         self._effect_policy = RenewalExternalEffectPolicy()
         self._completion_policy = RenewalCompletionPolicy()
 
@@ -100,10 +107,13 @@ class RenewalApprovalControl:
         connection: Connection[tuple[Any, ...]],
     ) -> ApproveRenewalDraftResult:
         context = self._decision_context(connection, command.input)
-        rejection = self._decision_rejection(context, command.actor, command.input)
-        if rejection is not None:
+        decision = self._approval_policy.decide(
+            decision_kind="approve",
+            facts=self._decision_facts(context, command.actor, command.input),
+        )
+        if decision.outcome is not None:
             return ApproveRenewalDraftResult(
-                outcome=rejection,
+                outcome=decision.outcome,
                 workflow_id=command.input.workflow_id,
                 wait_id=command.input.wait_id,
                 approval_grant_id=None,
@@ -130,7 +140,7 @@ class RenewalApprovalControl:
                 signal_type="renewal.draft.decision",
                 schema_version=1,
                 payload=payload,
-                route_key="approve_email",
+                route_key=self._required_route(decision.route_key),
             )
         )
         effect_step_id = signal.steps["email_effect"]
@@ -185,10 +195,13 @@ class RenewalApprovalControl:
         connection: Connection[tuple[Any, ...]],
     ) -> RequestRenewalRevisionResult:
         context = self._decision_context(connection, command.input)
-        rejection = self._decision_rejection(context, command.actor, command.input)
-        if rejection is not None:
+        decision = self._approval_policy.decide(
+            decision_kind="request_revision",
+            facts=self._decision_facts(context, command.actor, command.input),
+        )
+        if decision.outcome is not None:
             return RequestRenewalRevisionResult(
-                outcome=rejection,
+                outcome=decision.outcome,
                 workflow_id=command.input.workflow_id,
                 wait_id=command.input.wait_id,
                 revision_step_id=None,
@@ -217,7 +230,7 @@ class RenewalApprovalControl:
                 signal_type="renewal.draft.decision",
                 schema_version=1,
                 payload=payload,
-                route_key="revise_email",
+                route_key=self._required_route(decision.route_key),
             )
         )
         decision_id = uuid4()
@@ -263,6 +276,11 @@ class RenewalApprovalControl:
         ).fetchone()
         if row is None:
             raise StateConflict("Renewal Workflow does not exist")
+        if not self._approval_policy.authorizes_revocation(
+            actor_kind=command.actor.kind,
+            actor_id=command.actor.identifier,
+        ):
+            raise StateConflict("Actor is not authorized to revoke approval authority")
         if str(row[1]) != command.input.actor_id:
             raise StateConflict("Authority revocation targets another Actor")
         if row[0] is not None:
@@ -270,6 +288,11 @@ class RenewalApprovalControl:
         connection.execute(
             "UPDATE example_insurance.renewal_workflows SET authority_revoked_at = "
             "clock_timestamp() WHERE workflow_id = %s",
+            (command.input.workflow_id,),
+        )
+        connection.execute(
+            "UPDATE example_insurance.approval_grants SET invalidated_at = clock_timestamp() "
+            "WHERE workflow_id = %s AND consumed_at IS NULL AND invalidated_at IS NULL",
             (command.input.workflow_id,),
         )
         self._event(
@@ -288,7 +311,8 @@ class RenewalApprovalControl:
         connection: Connection[tuple[Any, ...]],
     ) -> CancelRenewalOutreachResult:
         row = connection.execute(
-            "SELECT instance_id, lifecycle FROM example_insurance.renewal_workflows "
+            "SELECT instance_id, lifecycle, authorized_actor_kind, authorized_actor_id "
+            "FROM example_insurance.renewal_workflows "
             "WHERE workflow_id = %s FOR UPDATE",
             (command.input.workflow_id,),
         ).fetchone()
@@ -296,6 +320,13 @@ class RenewalApprovalControl:
             raise StateConflict("Renewal Workflow does not exist")
         instance_id = UUID(str(row[0]))
         lifecycle = str(row[1])
+        if not self._approval_policy.authorizes_cancellation(
+            actor_kind=command.actor.kind,
+            actor_id=command.actor.identifier,
+            authorized_actor_kind=str(row[2]),
+            authorized_actor_id=str(row[3]),
+        ):
+            raise StateConflict("Actor is not authorized to cancel renewal outreach")
         if lifecycle == "completed":
             return CancelRenewalOutreachResult(
                 "already_completed", command.input.workflow_id, instance_id
@@ -339,13 +370,19 @@ class RenewalApprovalControl:
         worker_id: str,
     ) -> ExternalEffectPermit:
         workflow = connection.execute(
-            "SELECT r.workflow_id, r.lifecycle, g.approval_grant_id, g.effect_fingerprint, "
-            "g.invalidated_at, g.consumed_at FROM example_insurance.renewal_workflows r "
-            "JOIN example_insurance.approval_grants g ON g.workflow_id = r.workflow_id "
-            "WHERE r.instance_id = %s AND g.step_id = %s FOR UPDATE OF r, g",
-            (attempt.instance_id, attempt.step_id),
+            "SELECT workflow_id, lifecycle, authority_revoked_at IS NOT NULL "
+            "FROM example_insurance.renewal_workflows WHERE instance_id = %s FOR UPDATE",
+            (attempt.instance_id,),
         ).fetchone()
         if workflow is None:
+            raise StateConflict("Renewal Workflow is unavailable")
+        grant = connection.execute(
+            "SELECT approval_grant_id, effect_fingerprint, invalidated_at, consumed_at "
+            "FROM example_insurance.approval_grants WHERE workflow_id = %s AND step_id = %s "
+            "FOR UPDATE",
+            (workflow[0], attempt.step_id),
+        ).fetchone()
+        if grant is None:
             raise StateConflict("Exact Approval Grant is unavailable")
         effect = connection.execute(
             "SELECT logical_effect_id, certainty, effect_fingerprint, provider_idempotency_key "
@@ -353,17 +390,6 @@ class RenewalApprovalControl:
             (attempt.step_id,),
         ).fetchone()
         existing_certainty = str(effect[1]) if effect is not None else None
-        self._effect_policy.authorize_dispatch(
-            lifecycle=str(workflow[1]), existing_certainty=existing_certainty
-        )
-        if UUID(str(workflow[2])) != UUID(str(attempt.input["approval_grant_id"])):
-            raise StateConflict("Approval Grant does not authorize this Step")
-        if str(workflow[3]) != str(attempt.input["effect_fingerprint"]):
-            raise StateConflict("Effect fingerprint conflicts with the Approval Grant")
-        if workflow[4] is not None:
-            raise StateConflict("Approval Grant was invalidated")
-        if effect is None and workflow[5] is not None:
-            raise StateConflict("Approval Grant was consumed without a durable Effect fence")
         guard = KernelControl(connection).guard_current_attempt(
             GuardCurrentAttempt(
                 instance_id=attempt.instance_id,
@@ -372,28 +398,43 @@ class RenewalApprovalControl:
                 attempt_number=attempt.attempt_number,
             )
         )
-        guard.require_usable()
         durable = connection.execute(
             "SELECT a.worker_id, s.template_key, s.input FROM openmagic_runtime.attempts a "
             "JOIN openmagic_runtime.steps s ON s.step_id = a.step_id "
             "WHERE a.attempt_id = %s",
             (attempt.attempt_id,),
         ).fetchone()
-        if (
+        durable_claim_matches = not (
             durable is None
             or str(durable[0]) != worker_id
             or str(durable[1]) != attempt.template_key
             or dict(durable[2]) != attempt.input
-        ):
-            raise StateConflict("Worker claim does not match the fenced durable Attempt")
+        )
         durable_effect = RenewalEmailEffect(
             recipient_email=str(attempt.input["recipient_email"]),
             subject=str(attempt.input["subject"]),
             body=str(attempt.input["body"]),
         )
-        if content_fingerprint(durable_effect) != str(workflow[3]):
-            raise StateConflict("Durable Effect-Defining Input fingerprint is inconsistent")
         effect_id = logical_effect_id(attempt.step_id)
+        durable_effect_matches = content_fingerprint(durable_effect) == str(grant[1]) and (
+            effect is None
+            or (UUID(str(effect[0])) == effect_id and str(effect[2]) == str(grant[1]))
+        )
+        self._effect_policy.authorize_dispatch(
+            facts=EffectAuthorizationFacts(
+                lifecycle_active=str(workflow[1]) == "active",
+                authority_revoked=bool(workflow[2]),
+                grant_matches_step=UUID(str(grant[0]))
+                == UUID(str(attempt.input["approval_grant_id"])),
+                fingerprint_matches_grant=str(grant[1]) == str(attempt.input["effect_fingerprint"]),
+                grant_valid=grant[2] is None,
+                grant_consumption_consistent=not (effect is None and grant[3] is not None),
+                durable_claim_matches=durable_claim_matches,
+                durable_effect_matches=durable_effect_matches,
+                existing_certainty=existing_certainty,
+            )
+        )
+        guard.require_usable()
         provider_key = str(effect_id)
         if effect is None:
             connection.execute(
@@ -406,8 +447,8 @@ class RenewalApprovalControl:
                     effect_id,
                     workflow[0],
                     attempt.step_id,
-                    workflow[2],
-                    workflow[3],
+                    grant[0],
+                    grant[1],
                     provider_key,
                     attempt.attempt_id,
                     attempt.attempt_number,
@@ -416,11 +457,9 @@ class RenewalApprovalControl:
             connection.execute(
                 "UPDATE example_insurance.approval_grants SET consumed_at = clock_timestamp() "
                 "WHERE approval_grant_id = %s",
-                (workflow[2],),
+                (grant[0],),
             )
         else:
-            if UUID(str(effect[0])) != effect_id or str(effect[2]) != str(workflow[3]):
-                raise StateConflict("Durable External Effect identity is inconsistent")
             provider_key = str(effect[3])
             connection.execute(
                 "UPDATE example_insurance.external_effects SET dispatch_attempt_id = %s, "
@@ -462,7 +501,7 @@ class RenewalApprovalControl:
         ).fetchone()
         control = KernelControl(connection)
         if effect is None:
-            if required.attempt_number < 3:
+            if required.attempt_number < self._effect_policy.maximum_attempts:
                 control.retry(required)
             else:
                 control.fail(required, failure={"class": "attempt_budget_exhausted"})
@@ -518,7 +557,7 @@ class RenewalApprovalControl:
         disposition = self._effect_policy.result_disposition(
             classification=classification,
             attempt_number=required.attempt_number,
-            maximum_attempts=3,
+            maximum_attempts=self._effect_policy.maximum_attempts,
         )
         control = KernelControl(connection)
         if disposition == "succeed":
@@ -586,8 +625,8 @@ class RenewalApprovalControl:
             classification=classification,
             effect_attempt_number=int(step_input[1]),
             reconciliation_attempt_number=required.attempt_number,
-            maximum_effect_attempts=3,
-            maximum_reconciliation_attempts=3,
+            maximum_effect_attempts=self._effect_policy.maximum_attempts,
+            maximum_reconciliation_attempts=self._effect_policy.maximum_attempts,
         )
         control = KernelControl(connection)
         if disposition == "retry_reconciliation":
@@ -647,68 +686,83 @@ class RenewalApprovalControl:
         connection: Connection[tuple[Any, ...]],
         value: ApproveRenewalDraftInput | RequestRenewalRevisionInput,
     ) -> _DecisionContext:
-        row = connection.execute(
+        workflow = connection.execute(
             "SELECT r.instance_id, r.thread_id, r.lifecycle, r.authorized_actor_kind, "
             "r.authorized_actor_id, r.authority_revoked_at IS NOT NULL, r.policy_number, "
             "r.policyholder_name, f.policyholder_email, r.renewal_date, "
-            "r.expiring_premium_cents, w.state, d.presentation_fingerprint, "
-            "d.policyholder_email, d.subject, d.body FROM example_insurance.renewal_workflows r "
+            "r.expiring_premium_cents FROM example_insurance.renewal_workflows r "
             "JOIN example_insurance.policy_renewal_facts f ON f.policy_id = r.policy_id "
-            "JOIN openmagic_runtime.waits w ON w.wait_id = %s AND w.instance_id = r.instance_id "
-            "JOIN example_insurance.renewal_drafts d ON d.draft_id = %s "
-            "AND d.workflow_id = r.workflow_id WHERE r.workflow_id = %s FOR UPDATE OF r, w, d",
-            (value.wait_id, value.draft_id, value.workflow_id),
+            "JOIN openmagic_runtime.instances i ON i.instance_id = r.instance_id "
+            "WHERE r.workflow_id = %s FOR UPDATE OF r, i",
+            (value.workflow_id,),
         ).fetchone()
-        if row is None:
+        if workflow is None:
+            raise StateConflict("Exact Workflow does not exist")
+        presentation = connection.execute(
+            "SELECT w.state, w.input, d.presentation_fingerprint, d.policyholder_email, "
+            "d.subject, d.body FROM openmagic_runtime.waits w "
+            "JOIN example_insurance.renewal_drafts d ON d.draft_id = %s "
+            "AND d.workflow_id = %s WHERE w.wait_id = %s AND w.instance_id = %s "
+            "FOR UPDATE OF w, d",
+            (value.draft_id, value.workflow_id, value.wait_id, workflow[0]),
+        ).fetchone()
+        if presentation is None:
             raise StateConflict("Exact Workflow, Wait, or Draft does not exist")
+        wait_input = dict(presentation[1])
+        presentation_bound = wait_input == {
+            "workflow_id": str(value.workflow_id),
+            "draft_id": str(value.draft_id),
+            "presentation_fingerprint": str(presentation[2]),
+            "recipient_email": str(presentation[3]),
+            "subject": str(presentation[4]),
+            "body": str(presentation[5]),
+        }
         return _DecisionContext(
-            instance_id=UUID(str(row[0])),
-            thread_id=UUID(str(row[1])),
-            lifecycle=str(row[2]),
-            authorized_actor_kind=str(row[3]),
-            authorized_actor_id=str(row[4]),
-            authority_revoked=bool(row[5]),
-            policy_number=str(row[6]),
-            policyholder_name=str(row[7]),
-            policyholder_email=str(row[8]),
-            renewal_date=row[9].isoformat(),
-            expiring_premium_cents=int(row[10]),
-            wait_state=str(row[11]),
-            draft_fingerprint=str(row[12]),
-            effect=RenewalEmailEffect(str(row[13]), str(row[14]), str(row[15])),
+            instance_id=UUID(str(workflow[0])),
+            thread_id=UUID(str(workflow[1])),
+            lifecycle=str(workflow[2]),
+            authorized_actor_kind=str(workflow[3]),
+            authorized_actor_id=str(workflow[4]),
+            authority_revoked=bool(workflow[5]),
+            policy_number=str(workflow[6]),
+            policyholder_name=str(workflow[7]),
+            policyholder_email=str(workflow[8]),
+            renewal_date=workflow[9].isoformat(),
+            expiring_premium_cents=int(workflow[10]),
+            wait_state=str(presentation[0]),
+            presentation_bound=presentation_bound,
+            draft_fingerprint=str(presentation[2]),
+            effect=RenewalEmailEffect(
+                str(presentation[3]),
+                str(presentation[4]),
+                str(presentation[5]),
+            ),
         )
 
     @staticmethod
-    def _decision_rejection(
+    def _decision_facts(
         context: _DecisionContext,
         actor: Actor,
         value: ApproveRenewalDraftInput | RequestRenewalRevisionInput,
-    ) -> (
-        Literal[
-            "authority_revoked",
-            "stale_presentation",
-            "unauthorized_actor",
-            "wait_already_satisfied",
-        ]
-        | None
-    ):
-        if context.lifecycle != "active" or context.authority_revoked:
-            return "authority_revoked"
-        if (
-            context.authorized_actor_kind != actor.kind
-            or context.authorized_actor_id != actor.identifier
-        ):
-            return "unauthorized_actor"
-        if context.wait_state != "unsatisfied":
-            return "wait_already_satisfied"
+    ) -> ApprovalDecisionFacts:
         expected = content_fingerprint(context.effect)
-        if (
-            context.draft_fingerprint != expected
-            or value.presentation_fingerprint != expected
-            or value.proposed_effect != context.effect
-        ):
-            return "stale_presentation"
-        return None
+        return ApprovalDecisionFacts(
+            lifecycle=context.lifecycle,
+            actor_matches=context.authorized_actor_kind == actor.kind
+            and context.authorized_actor_id == actor.identifier,
+            authority_revoked=context.authority_revoked,
+            wait_unsatisfied=context.wait_state == "unsatisfied",
+            presentation_exact=context.presentation_bound
+            and context.draft_fingerprint == expected
+            and value.presentation_fingerprint == expected
+            and value.proposed_effect == context.effect,
+        )
+
+    @staticmethod
+    def _required_route(route_key: str | None) -> str:
+        if route_key is None:
+            raise RuntimeError("Accepted approval decision omitted its predefined Route")
+        return route_key
 
     @staticmethod
     def _record_decision(
@@ -807,16 +861,21 @@ class RenewalApprovalControl:
         if workflow is None or str(workflow[1]) != "active":
             return
         steps = connection.execute(
-            "SELECT state FROM openmagic_runtime.steps WHERE instance_id = %s",
+            "SELECT state, output_digest IS NOT NULL FROM openmagic_runtime.steps "
+            "WHERE instance_id = %s",
             (workflow[0],),
         ).fetchall()
         effects = connection.execute(
-            "SELECT certainty FROM example_insurance.external_effects WHERE workflow_id = %s",
+            "SELECT e.certainty, EXISTS (SELECT 1 FROM "
+            "example_insurance.external_effect_evidence v WHERE "
+            "v.logical_effect_id = e.logical_effect_id AND v.classification = 'applied' "
+            "AND v.source IN ('provider_response', 'provider_lookup')) "
+            "FROM example_insurance.external_effects e WHERE e.workflow_id = %s",
             (workflow_id,),
         ).fetchall()
         if not self._completion_policy.is_complete(
-            required_step_states=tuple(str(row[0]) for row in steps),
-            effect_certainties=tuple(str(row[0]) for row in effects),
+            steps=tuple(CompletionStepFact(str(row[0]), bool(row[1])) for row in steps),
+            effects=tuple(CompletionEffectFact(str(row[0]), bool(row[1])) for row in effects),
         ):
             return
         connection.execute(

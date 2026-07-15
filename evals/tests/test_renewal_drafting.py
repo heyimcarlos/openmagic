@@ -1162,6 +1162,7 @@ def test_fresh_worker_processes_recover_the_complete_sanitized_evidence_chain(tm
             "instance_id",
             "logical_effect_ids",
             "message_ids",
+            "signal_ids",
             "step_ids",
             "thread_id",
             "workflow_id",
