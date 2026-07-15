@@ -1,4 +1,4 @@
-"""Qualified application policy for renewal drafting orchestration."""
+"""Application Policy for renewal Workflow routes and Delivery."""
 
 from __future__ import annotations
 
@@ -20,128 +20,17 @@ class RouteDecision:
 
 
 @dataclass(frozen=True)
-class RecoveryDecision:
-    action: Literal["retry", "fail"]
-    failure: dict[str, Any] | None = None
+class RetryRecoveryDecision:
+    action: Literal["retry"] = "retry"
 
 
 @dataclass(frozen=True)
-class ApprovalDecisionFacts:
-    lifecycle: str
-    actor_matches: bool
-    authority_revoked: bool
-    wait_unsatisfied: bool
-    presentation_exact: bool
+class FailRecoveryDecision:
+    failure: dict[str, Any]
+    action: Literal["fail"] = "fail"
 
 
-ApprovalRejectionOutcome = Literal[
-    "authority_revoked",
-    "stale_presentation",
-    "unauthorized_actor",
-    "wait_already_satisfied",
-]
-
-
-@dataclass(frozen=True)
-class ApprovalAcceptedDecision:
-    route_key: Literal["approve_email", "revise_email"]
-
-
-@dataclass(frozen=True)
-class ApprovalRejectedDecision:
-    outcome: ApprovalRejectionOutcome
-
-
-ApprovalDecision = ApprovalAcceptedDecision | ApprovalRejectedDecision
-
-
-@dataclass(frozen=True)
-class EffectAuthorizationFacts:
-    lifecycle_active: bool
-    authority_revoked: bool
-    grant_matches_step: bool
-    fingerprint_matches_grant: bool
-    grant_valid: bool
-    grant_consumption_consistent: bool
-    durable_claim_matches: bool
-    durable_effect_matches: bool
-    existing_certainty: str | None
-
-
-@dataclass(frozen=True)
-class CompletionStepFact:
-    state: str
-    has_accepted_output: bool
-
-
-@dataclass(frozen=True)
-class CompletionEffectFact:
-    certainty: str
-    has_applied_evidence: bool
-
-
-@dataclass(frozen=True)
-class CancellationFacts:
-    lifecycle: str
-    actor_authorized: bool
-    dispatch_boundary_crossed: bool
-
-
-class RenewalApprovalPolicy:
-    @staticmethod
-    def decide(
-        *,
-        decision_kind: Literal["approve", "request_revision"],
-        facts: ApprovalDecisionFacts,
-    ) -> ApprovalDecision:
-        if facts.lifecycle != "active" or facts.authority_revoked:
-            return ApprovalRejectedDecision("authority_revoked")
-        if not facts.actor_matches:
-            return ApprovalRejectedDecision("unauthorized_actor")
-        if not facts.wait_unsatisfied:
-            return ApprovalRejectedDecision("wait_already_satisfied")
-        if not facts.presentation_exact:
-            return ApprovalRejectedDecision("stale_presentation")
-        route = "approve_email" if decision_kind == "approve" else "revise_email"
-        return ApprovalAcceptedDecision(route)
-
-
-class RenewalLifecyclePolicy:
-    @staticmethod
-    def authorizes_revocation(*, actor_kind: str, actor_id: str) -> bool:
-        return actor_kind == "system" and actor_id == "authority-administrator"
-
-    @staticmethod
-    def actor_can_cancel(
-        *,
-        actor_kind: str,
-        actor_id: str,
-        authorized_actor_kind: str,
-        authorized_actor_id: str,
-    ) -> bool:
-        return (actor_kind == authorized_actor_kind and actor_id == authorized_actor_id) or (
-            actor_kind == "system" and actor_id == "workflow-administrator"
-        )
-
-    @staticmethod
-    def cancellation_outcome(
-        facts: CancellationFacts,
-    ) -> Literal[
-        "unauthorized",
-        "already_completed",
-        "already_cancelled",
-        "too_late",
-        "cancelled",
-    ]:
-        if not facts.actor_authorized:
-            return "unauthorized"
-        if facts.lifecycle == "completed":
-            return "already_completed"
-        if facts.lifecycle == "cancelled":
-            return "already_cancelled"
-        if facts.dispatch_boundary_crossed:
-            return "too_late"
-        return "cancelled"
+RecoveryDecision = RetryRecoveryDecision | FailRecoveryDecision
 
 
 class RenewalWorkflowPolicy:
@@ -199,16 +88,10 @@ class RenewalWorkflowPolicy:
             "draft_renewal_email",
             "reconcile_renewal_email",
         }:
-            return RecoveryDecision(
-                action="fail",
-                failure={"class": "unknown_step_template"},
-            )
+            return FailRecoveryDecision({"class": "unknown_step_template"})
         if attempt_number < RENEWAL_ATTEMPT_RETRY_POLICY.max_attempts:
-            return RecoveryDecision(action="retry")
-        return RecoveryDecision(
-            action="fail",
-            failure={"class": "attempt_budget_exhausted"},
-        )
+            return RetryRecoveryDecision()
+        return FailRecoveryDecision({"class": "attempt_budget_exhausted"})
 
 
 class RenewalDeliveryPolicy:
@@ -242,97 +125,12 @@ class RenewalDeliveryPolicy:
         return f"{observation['subject']}\n\n{observation['body']}"
 
 
-class RenewalCompletionPolicy:
-    @staticmethod
-    def is_complete(
-        *,
-        steps: tuple[CompletionStepFact, ...],
-        effects: tuple[CompletionEffectFact, ...],
-    ) -> bool:
-        return (
-            bool(steps)
-            and all(step.state == "succeeded" and step.has_accepted_output for step in steps)
-            and bool(effects)
-            and all(
-                effect.certainty == "applied" and effect.has_applied_evidence for effect in effects
-            )
-        )
-
-
-class RenewalExternalEffectPolicy:
-    maximum_attempts = RENEWAL_ATTEMPT_RETRY_POLICY.max_attempts
-
-    @staticmethod
-    def authorize_dispatch(*, facts: EffectAuthorizationFacts) -> None:
-        if not facts.lifecycle_active or facts.authority_revoked:
-            raise RuntimeError("Renewal Workflow no longer authorizes dispatch")
-        if not all(
-            (
-                facts.grant_matches_step,
-                facts.fingerprint_matches_grant,
-                facts.grant_valid,
-                facts.grant_consumption_consistent,
-                facts.durable_claim_matches,
-                facts.durable_effect_matches,
-            )
-        ):
-            raise RuntimeError("Exact Approval Grant does not authorize this dispatch")
-        if facts.existing_certainty not in {None, "not_applied"}:
-            raise RuntimeError("External Effect is not safe to dispatch")
-
-    @staticmethod
-    def result_disposition(
-        *, classification: str, attempt_number: int, maximum_attempts: int
-    ) -> Literal["succeed", "retry", "fail", "defer"]:
-        if classification == "applied":
-            return "succeed"
-        if classification == "not_applied":
-            return "retry" if attempt_number < maximum_attempts else "fail"
-        return "defer"
-
-    @staticmethod
-    def reconciliation_disposition(
-        *,
-        classification: str,
-        effect_attempt_number: int,
-        reconciliation_attempt_number: int,
-        maximum_effect_attempts: int,
-        maximum_reconciliation_attempts: int,
-    ) -> Literal[
-        "confirm",
-        "retry_effect",
-        "fail_effect",
-        "retry_reconciliation",
-        "defer",
-    ]:
-        if classification == "applied":
-            return "confirm"
-        if classification == "not_applied":
-            if effect_attempt_number < maximum_effect_attempts:
-                return "retry_effect"
-            return "fail_effect"
-        if reconciliation_attempt_number < maximum_reconciliation_attempts:
-            return "retry_reconciliation"
-        return "defer"
-
-
 __all__ = [
     "RENEWAL_ATTEMPT_RETRY_POLICY",
-    "ApprovalAcceptedDecision",
-    "ApprovalDecision",
-    "ApprovalDecisionFacts",
-    "ApprovalRejectedDecision",
-    "ApprovalRejectionOutcome",
-    "CancellationFacts",
-    "CompletionEffectFact",
-    "CompletionStepFact",
-    "EffectAuthorizationFacts",
+    "FailRecoveryDecision",
     "RecoveryDecision",
-    "RenewalApprovalPolicy",
-    "RenewalCompletionPolicy",
     "RenewalDeliveryPolicy",
-    "RenewalExternalEffectPolicy",
-    "RenewalLifecyclePolicy",
     "RenewalWorkflowPolicy",
+    "RetryRecoveryDecision",
     "RouteDecision",
 ]

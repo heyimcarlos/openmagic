@@ -202,7 +202,7 @@ class KernelWork:
             source_kind="claim",
             source_id=request.claim_request_id,
             input_value=request,
-            receipt=payload,
+            receipt=lambda _: payload,
         )
         return ClaimedAttempt(
             instance_id=instance_id,
@@ -349,7 +349,7 @@ class KernelWork:
             source_kind="attempt_lease_renewal",
             source_id=renewal_id,
             input_value=renewal_input,
-            receipt={
+            receipt=lambda _: {
                 "attempt_id": str(result.attempt_id),
                 "lease_expires_at": result.lease_expires_at.isoformat(),
                 "hard_deadline": result.hard_deadline.isoformat(),
@@ -397,7 +397,7 @@ class KernelWork:
             source_kind="attempt_abandonment",
             source_id=attempt_id,
             input_value={"attempt_id": str(attempt_id)},
-            receipt={"attempt_id": str(attempt_id), "step_id": str(step_id)},
+            receipt=lambda _: {"attempt_id": str(attempt_id), "step_id": str(step_id)},
         )
         return DispositionRequired(
             instance_id=instance_id,
@@ -482,7 +482,7 @@ class KernelWork:
             source_kind="attempt_result",
             source_id=attempt.attempt_id,
             input_value=observation,
-            receipt={"attempt_id": str(attempt.attempt_id)},
+            receipt=lambda _: {"attempt_id": str(attempt.attempt_id)},
         )
         return DispositionRequired(
             instance_id=attempt.instance_id,

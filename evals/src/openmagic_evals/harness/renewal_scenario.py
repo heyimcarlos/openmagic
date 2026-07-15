@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 from uuid import UUID, uuid4
 
 import psycopg
+from example_insurance.migrations import apply_migrations
 from example_insurance.renewals import (
     ApproveRenewalDraft,
     ApproveRenewalDraftInput,
@@ -19,10 +22,25 @@ from example_insurance.renewals import (
 from openmagic_runtime.commands import Actor, Cause
 from openmagic_runtime.threads import CreateThread, ThreadStore
 
+from openmagic_evals.harness._postgres import postgres_container
+
+
+@contextmanager
+def renewal_context() -> Iterator[tuple[str, ExampleInsurance, ThreadStore]]:
+    """Provide a migrated PostgreSQL renewal application through public interfaces."""
+    with postgres_container(database_name=f"openmagic_test_{uuid4().hex}") as postgres:
+        database_url = postgres.get_connection_url(driver=None)
+        apply_migrations(database_url)
+        application = ExampleInsurance(database_url=database_url)
+        application.prepare()
+        yield database_url, application, ThreadStore(database_url=database_url)
+
 
 def prepare_renewal_approval(
     application: ExampleInsurance,
     threads: ThreadStore,
+    *,
+    deliver: bool = True,
 ) -> tuple[StartRenewalOutreach, Actor]:
     """Start a renewal and advance it to its durable approval Wait."""
     thread = threads.create(CreateThread(uuid4(), "email", f"broker-{uuid4()}"))
@@ -55,6 +73,8 @@ def prepare_renewal_approval(
     application.start_renewal_outreach(command)
     application.run_workflow_worker_once(worker_id="facts")
     application.run_workflow_worker_once(worker_id="draft")
+    if deliver:
+        application.run_delivery_worker_once(worker_id="delivery")
     return command, actor
 
 
@@ -74,6 +94,9 @@ def approve_renewal(
                 workflow_id=command.input.workflow_id,
                 wait_id=presentation.wait_id,
                 draft_id=presentation.draft_id,
+                message_id=presentation.message_id,
+                thread_sequence=presentation.thread_sequence,
+                message_fingerprint=presentation.message_fingerprint,
                 presentation_fingerprint=presentation.presentation_fingerprint,
                 proposed_effect=presentation.proposed_effect,
             ),
@@ -117,6 +140,7 @@ def wait_for_database_fault_window(database_url: str, query_prefix: str) -> None
 __all__ = [
     "approve_renewal",
     "prepare_renewal_approval",
+    "renewal_context",
     "wait_for_database_fault_window",
     "wait_for_renewal_completion",
 ]

@@ -68,6 +68,9 @@ class ApproveRenewalDraftInput:
     workflow_id: UUID
     wait_id: UUID
     draft_id: UUID
+    message_id: UUID
+    thread_sequence: int
+    message_fingerprint: str
     presentation_fingerprint: str
     proposed_effect: RenewalEmailEffect
 
@@ -94,6 +97,9 @@ class RequestRenewalRevisionInput:
     workflow_id: UUID
     wait_id: UUID
     draft_id: UUID
+    message_id: UUID
+    thread_sequence: int
+    message_fingerprint: str
     presentation_fingerprint: str
     proposed_effect: RenewalEmailEffect
     revision_instruction: str
@@ -201,8 +207,12 @@ def effect_observation_command_id(attempt_id: UUID) -> UUID:
 def validate_approval(command: ApproveRenewalDraft) -> None:
     if not command.actor.identifier.strip() or not command.cause.identifier.strip():
         raise ValueError("Command Actor and Cause identifiers must be non-empty")
-    if not command.input.presentation_fingerprint.strip():
-        raise ValueError("Presentation fingerprint must be non-empty")
+    if (
+        not command.input.presentation_fingerprint.strip()
+        or not command.input.message_fingerprint.strip()
+        or command.input.thread_sequence <= 0
+    ):
+        raise ValueError("Presentation identity must be complete")
 
 
 def validate_start(command: StartRenewalOutreach) -> None:
@@ -224,8 +234,12 @@ def validate_start(command: StartRenewalOutreach) -> None:
 def validate_revision(command: RequestRenewalRevision) -> None:
     if not command.actor.identifier.strip() or not command.cause.identifier.strip():
         raise ValueError("Command Actor and Cause identifiers must be non-empty")
-    if not command.input.presentation_fingerprint.strip():
-        raise ValueError("Presentation fingerprint must be non-empty")
+    if (
+        not command.input.presentation_fingerprint.strip()
+        or not command.input.message_fingerprint.strip()
+        or command.input.thread_sequence <= 0
+    ):
+        raise ValueError("Presentation identity must be complete")
     if not command.input.revision_instruction.strip():
         raise ValueError("Revision instruction must be non-empty")
 

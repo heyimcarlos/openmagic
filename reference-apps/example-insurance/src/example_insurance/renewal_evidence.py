@@ -25,7 +25,8 @@ class RenewalEvidenceProjector:
                 raise KeyError(f"Renewal Workflow not found: {workflow_id}")
             runtime = RuntimeEvidenceReader(connection).instance(UUID(str(workflow[1])))
             events = connection.execute(
-                "SELECT event_id, event_type FROM example_insurance.domain_events "
+                "SELECT event_id, event_type, actor, cause "
+                "FROM example_insurance.domain_events "
                 "WHERE workflow_id = %s "
                 "ORDER BY occurred_at, event_id",
                 (workflow_id,),
@@ -59,7 +60,8 @@ class RenewalEvidenceProjector:
                 (workflow_id,),
             ).fetchall()
             decisions = connection.execute(
-                "SELECT decision_id, command_id, wait_id, draft_id, signal_id, decision_kind "
+                "SELECT decision_id, command_id, wait_id, draft_id, presented_message_id, "
+                "thread_sequence, message_fingerprint, signal_id, decision_kind "
                 "FROM example_insurance.renewal_decisions "
                 "WHERE workflow_id = %s ORDER BY decided_at, decision_id",
                 (workflow_id,),
@@ -92,7 +94,7 @@ class RenewalEvidenceProjector:
             ],
             "draft_agent_run_ids": [str(draft[0]) for draft in drafts],
             "decision_ids": [str(decision[0]) for decision in decisions],
-            "signal_ids": [str(decision[4]) for decision in decisions],
+            "signal_ids": [str(decision[7]) for decision in decisions],
             "approval_grant_ids": [str(grant[0]) for grant in grants],
             "logical_effect_ids": [str(effect[0]) for effect in effects],
             "effect_evidence_ids": [str(item[0]) for item in effect_evidence],
@@ -127,6 +129,15 @@ class RenewalEvidenceProjector:
                 "approval_wait_ids": [str(wait.wait_id) for wait in approval_waits],
                 "approval_wait_states": [wait.state for wait in approval_waits],
                 "delivery_states": [delivery.status for delivery in deliveries],
+                "domain_events": [
+                    {
+                        "event_id": str(event[0]),
+                        "event_type": str(event[1]),
+                        "actor": dict(event[2]),
+                        "cause": dict(event[3]),
+                    }
+                    for event in events
+                ],
                 "external_email_effect_count": len(effects),
                 "external_effect_certainties": [str(effect[1]) for effect in effects],
                 "effect_evidence": [
@@ -146,8 +157,11 @@ class RenewalEvidenceProjector:
                         "command_id": str(item[1]),
                         "wait_id": str(item[2]),
                         "draft_id": str(item[3]),
-                        "signal_id": str(item[4]),
-                        "decision_kind": str(item[5]),
+                        "presented_message_id": str(item[4]),
+                        "thread_sequence": int(item[5]),
+                        "message_fingerprint": str(item[6]),
+                        "signal_id": str(item[7]),
+                        "decision_kind": str(item[8]),
                     }
                     for item in decisions
                 ],

@@ -2,12 +2,31 @@
 
 from __future__ import annotations
 
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from openmagic_runtime.commands import Actor, Cause
 from psycopg import Connection
 from psycopg.types.json import Jsonb
+
+from example_insurance.renewal_effect_policy import EffectObservation
+
+EffectEvidenceSource = Literal[
+    "provider_response",
+    "provider_lookup",
+    "worker_loss_after_fence",
+]
+
+
+@dataclass(frozen=True)
+class CommandEventLineage:
+    actor: Actor
+    command_id: UUID
+
+    @property
+    def cause(self) -> Cause:
+        return Cause("command", str(self.command_id))
 
 
 def actor_record(actor: Actor) -> dict[str, str]:
@@ -26,13 +45,14 @@ def record_event(
     actor: Actor,
     cause: Cause,
     payload: dict[str, Any],
-) -> None:
+) -> UUID:
+    event_id = uuid4()
     connection.execute(
         "INSERT INTO example_insurance.domain_events "
         "(event_id, event_type, schema_version, workflow_id, actor, cause, payload) "
         "VALUES (%s, %s, 1, %s, %s, %s, %s)",
         (
-            uuid4(),
+            event_id,
             event_type,
             workflow_id,
             Jsonb(actor_record(actor)),
@@ -40,6 +60,7 @@ def record_event(
             Jsonb(payload),
         ),
     )
+    return event_id
 
 
 def record_effect_evidence(
@@ -47,8 +68,8 @@ def record_effect_evidence(
     *,
     logical_effect_id: UUID,
     attempt_id: UUID,
-    classification: str,
-    source: str,
+    classification: EffectObservation,
+    source: EffectEvidenceSource,
     provider_request_id: str | None,
 ) -> None:
     connection.execute(
@@ -68,6 +89,8 @@ def record_effect_evidence(
 
 
 __all__ = [
+    "CommandEventLineage",
+    "EffectEvidenceSource",
     "actor_record",
     "cause_record",
     "record_effect_evidence",

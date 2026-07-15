@@ -11,24 +11,32 @@ from psycopg import Connection
 from psycopg.types.json import Jsonb
 
 from openmagic_runtime._canonical import canonical_digest
+from openmagic_runtime.kernel._control_support import (
+    lock_open_instance,
+    materialize_route,
+    validate_disposition,
+)
 from openmagic_runtime.kernel._trace import append_trace
+from openmagic_runtime.kernel.attempt_guard import (
+    CurrentAttemptGuard,
+    guard_current_attempt,
+)
+from openmagic_runtime.kernel.closure import close_instance
+from openmagic_runtime.kernel.deferred import defer_step, resolve_deferred_step
 from openmagic_runtime.kernel.definitions import (
-    Route,
-    StepTemplate,
     WorkflowDefinition,
     validate_payload,
     verified_definition,
 )
+from openmagic_runtime.kernel.signals import accept_signal
 from openmagic_runtime.kernel.transitions import (
     AcceptSignal,
     CloseInstance,
     CloseInstanceReceipt,
-    CurrentAttemptGuard,
     GuardCurrentAttempt,
     ResolveDeferredStep,
     ResolveDeferredStepReceipt,
     SignalReceipt,
-    deferred_action,
 )
 from openmagic_runtime.kernel.work import DispositionRequired
 
@@ -53,134 +61,6 @@ class StartInstanceReceipt:
     trace_sequence: int
 
 
-def _lock_instance(connection: Connection[tuple[Any, ...]], instance_id: UUID) -> str:
-    row = connection.execute(
-        "SELECT state FROM openmagic_runtime.instances WHERE instance_id = %s FOR UPDATE",
-        (instance_id,),
-    ).fetchone()
-    if row is None:
-        raise RuntimeError("Instance not found")
-    return str(row[0])
-
-
-def _require_open_instance(state: str) -> None:
-    if state != "open":
-        raise RuntimeError("Instance is closed")
-
-
-def _lock_open_instance(connection: Connection[tuple[Any, ...]], instance_id: UUID) -> None:
-    _require_open_instance(_lock_instance(connection, instance_id))
-
-
-def _lock_source_identity(
-    connection: Connection[tuple[Any, ...]],
-    *,
-    source_kind: str,
-    source_id: UUID,
-) -> None:
-    connection.execute(
-        "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
-        (f"{source_kind}:{source_id}",),
-    )
-
-
-def _validate_disposition(
-    connection: Connection[tuple[Any, ...]],
-    required: DispositionRequired,
-    *,
-    expected_attempt_state: str,
-) -> None:
-    row = connection.execute(
-        "SELECT a.instance_id, a.step_id, a.attempt_number, a.state, a.observation_digest, "
-        "s.template_key FROM openmagic_runtime.attempts AS a "
-        "JOIN openmagic_runtime.steps AS s ON s.step_id = a.step_id "
-        "WHERE a.attempt_id = %s FOR UPDATE OF a, s",
-        (required.attempt_id,),
-    ).fetchone()
-    if row is None:
-        raise RuntimeError("Attempt disposition source does not exist")
-    if (
-        UUID(str(row[0])) != required.instance_id
-        or UUID(str(row[1])) != required.step_id
-        or int(row[2]) != required.attempt_number
-        or str(row[3]) != expected_attempt_state
-        or str(row[5]) != required.template_key
-    ):
-        raise RuntimeError("Attempt disposition does not match its durable source")
-    if expected_attempt_state == "completed" and str(row[4]) != canonical_digest(
-        required.observation
-    ):
-        raise RuntimeError("Attempt disposition observation conflicts with durable source")
-
-
-def _materialize_route(
-    connection: Connection[tuple[Any, ...]],
-    *,
-    instance_id: UUID,
-    route: Route,
-    source_kind: str,
-    source_id: UUID,
-    route_input: dict[str, Any],
-) -> tuple[dict[str, UUID], dict[str, UUID]]:
-    steps: dict[str, UUID] = {}
-    waits: dict[str, UUID] = {}
-    for output in route.outputs:
-        payload = {binding.target: route_input[binding.source] for binding in output.input_bindings}
-        occurrence_id = uuid4()
-        if output.kind == "step":
-            connection.execute(
-                "INSERT INTO openmagic_runtime.steps "
-                "(step_id, instance_id, template_key, route_key, activation_source_kind, "
-                "activation_source_id, output_slot, input, input_digest, state, claimable_at) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'pending', "
-                "clock_timestamp())",
-                (
-                    occurrence_id,
-                    instance_id,
-                    output.template_key,
-                    route.key,
-                    source_kind,
-                    source_id,
-                    output.slot,
-                    Jsonb(payload),
-                    canonical_digest(payload),
-                ),
-            )
-            steps[output.slot] = occurrence_id
-        else:
-            connection.execute(
-                "INSERT INTO openmagic_runtime.waits "
-                "(wait_id, instance_id, template_key, route_key, activation_source_kind, "
-                "activation_source_id, output_slot, input, input_digest, state) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'unsatisfied')",
-                (
-                    occurrence_id,
-                    instance_id,
-                    output.template_key,
-                    route.key,
-                    source_kind,
-                    source_id,
-                    output.slot,
-                    Jsonb(payload),
-                    canonical_digest(payload),
-                ),
-            )
-            waits[output.slot] = occurrence_id
-    for output in route.outputs:
-        if output.kind != "step":
-            continue
-        for prerequisite_slot in output.depends_on_slots:
-            prerequisite_id = steps.get(prerequisite_slot)
-            if prerequisite_id is None:
-                raise ValueError("Step dependency must reference a Step output")
-            connection.execute(
-                "INSERT INTO openmagic_runtime.step_dependencies "
-                "(instance_id, step_id, prerequisite_step_id) VALUES (%s, %s, %s)",
-                (instance_id, steps[output.slot], prerequisite_id),
-            )
-    return steps, waits
-
-
 def _materialize_optional_step_route(
     connection: Connection[tuple[Any, ...]],
     *,
@@ -199,105 +79,13 @@ def _materialize_optional_step_route(
     if route.activation != "step" or route.source_template_key != required.template_key:
         raise ValueError("Outcome Route does not accept this Step Template")
     validate_payload(route_input, route.activation_contract)
-    return _materialize_route(
+    return materialize_route(
         connection,
         instance_id=required.instance_id,
         route=route,
         source_kind="step",
         source_id=required.attempt_id,
         route_input=route_input,
-    )
-
-
-def _signal_receipt(payload: dict[str, Any]) -> SignalReceipt:
-    return SignalReceipt(
-        signal_id=UUID(payload["signal_id"]),
-        instance_id=UUID(payload["instance_id"]),
-        wait_id=UUID(payload["wait_id"]),
-        steps={key: UUID(value) for key, value in payload["steps"].items()},
-        waits={key: UUID(value) for key, value in payload["waits"].items()},
-        trace_event_id=UUID(payload["trace_event_id"]),
-        trace_sequence=int(payload["trace_sequence"]),
-    )
-
-
-def _validated_signal_route(
-    connection: Connection[tuple[Any, ...]], request: AcceptSignal
-) -> Route:
-    if request.schema_version != 1:
-        raise ValueError("Signal schema version is unsupported")
-    wait = connection.execute(
-        "SELECT template_key, state FROM openmagic_runtime.waits "
-        "WHERE wait_id = %s AND instance_id = %s FOR UPDATE",
-        (request.wait_id, request.instance_id),
-    ).fetchone()
-    if wait is None:
-        raise RuntimeError("Signal target Wait does not exist")
-    if str(wait[1]) != "unsatisfied":
-        raise RuntimeError("Signal target Wait is no longer unsatisfied")
-    definition_row = connection.execute(
-        "SELECT d.manifest, d.manifest_digest FROM openmagic_runtime.instances AS i "
-        "JOIN openmagic_runtime.workflow_definitions AS d "
-        "ON d.definition_key = i.definition_key AND d.definition_version = i.definition_version "
-        "WHERE i.instance_id = %s",
-        (request.instance_id,),
-    ).fetchone()
-    if definition_row is None:
-        raise RuntimeError("Pinned Workflow Definition is unavailable")
-    definition = verified_definition(dict(definition_row[0]), str(definition_row[1]))
-    wait_template = next(item for item in definition.wait_templates if item.key == str(wait[0]))
-    if wait_template.signal_type != request.signal_type:
-        raise ValueError("Signal Type does not match the target Wait")
-    route = next(item for item in definition.routes if item.key == request.route_key)
-    if route.activation != "signal":
-        raise ValueError("Signal Route is not a Signal activation")
-    validate_payload(request.payload, route.activation_contract)
-    return route
-
-
-def _apply_deferred_resolution(
-    connection: Connection[tuple[Any, ...]],
-    *,
-    request: ResolveDeferredStep,
-    template: StepTemplate,
-) -> None:
-    if request.action == "succeed":
-        if request.output is None or request.failure is not None:
-            raise ValueError("Successful deferred resolution requires typed output")
-        validate_payload(request.output, template.output_contract)
-        connection.execute(
-            "UPDATE openmagic_runtime.steps SET state = 'succeeded', output = %s, "
-            "output_digest = %s, terminal_at = clock_timestamp(), claimable_at = NULL, "
-            "deferred_attempt_id = NULL WHERE step_id = %s",
-            (Jsonb(request.output), canonical_digest(request.output), request.step_id),
-        )
-        return
-    if request.action == "retry":
-        if request.output is not None or request.failure is not None:
-            raise ValueError("Retry resolution cannot include Step output")
-        attempt_count = connection.execute(
-            "SELECT count(*) FROM openmagic_runtime.attempts WHERE step_id = %s",
-            (request.step_id,),
-        ).fetchone()
-        if attempt_count is None or int(attempt_count[0]) >= template.retry_policy.max_attempts:
-            raise RuntimeError("Deferred Step retry budget is exhausted")
-        connection.execute(
-            "UPDATE openmagic_runtime.steps SET claimable_at = clock_timestamp(), "
-            "deferred_attempt_id = NULL WHERE step_id = %s",
-            (request.step_id,),
-        )
-        return
-    if request.output is not None or request.failure is None:
-        raise ValueError("Failed deferred resolution requires typed failure")
-    connection.execute(
-        "UPDATE openmagic_runtime.steps SET state = 'failed', failure = %s, "
-        "failure_digest = %s, terminal_at = clock_timestamp(), claimable_at = NULL, "
-        "deferred_attempt_id = NULL WHERE step_id = %s",
-        (
-            Jsonb(request.failure),
-            canonical_digest(request.failure),
-            request.step_id,
-        ),
     )
 
 
@@ -353,7 +141,7 @@ class KernelControl:
                 canonical_digest(request.instance_input),
             ),
         )
-        steps, waits = _materialize_route(
+        steps, waits = materialize_route(
             self._connection,
             instance_id=instance_id,
             route=route,
@@ -361,32 +149,22 @@ class KernelControl:
             source_id=request.command_id,
             route_input=request.route_input,
         )
-        trace_event_id = uuid4()
-        receipt_payload = {
-            "instance_id": str(instance_id),
-            "definition_key": request.definition_key,
-            "definition_version": request.definition_version,
-            "steps": {key: str(value) for key, value in steps.items()},
-            "waits": {key: str(value) for key, value in waits.items()},
-            "trace_event_id": str(trace_event_id),
-            "trace_sequence": 1,
-        }
-        self._connection.execute(
-            "UPDATE openmagic_runtime.instances SET last_trace_sequence = 1 WHERE instance_id = %s",
-            (instance_id,),
-        )
-        self._connection.execute(
-            "INSERT INTO openmagic_runtime.trace_events "
-            "(trace_event_id, instance_id, sequence, event_type, schema_version, source_kind, "
-            "source_id, input_digest, receipt) VALUES "
-            "(%s, %s, 1, 'instance_started', 1, 'command_start', %s, %s, %s)",
-            (
-                trace_event_id,
-                instance_id,
-                request.command_id,
-                source_digest,
-                Jsonb(receipt_payload),
-            ),
+        appended = append_trace(
+            self._connection,
+            instance_id=instance_id,
+            event_type="instance_started",
+            source_kind="command_start",
+            source_id=request.command_id,
+            input_value=request,
+            receipt=lambda identity: {
+                "instance_id": str(instance_id),
+                "definition_key": request.definition_key,
+                "definition_version": request.definition_version,
+                "steps": {key: str(value) for key, value in steps.items()},
+                "waits": {key: str(value) for key, value in waits.items()},
+                "trace_event_id": str(identity.trace_event_id),
+                "trace_sequence": identity.sequence,
+            },
         )
         return StartInstanceReceipt(
             instance_id=instance_id,
@@ -394,8 +172,8 @@ class KernelControl:
             definition_version=request.definition_version,
             steps=steps,
             waits=waits,
-            trace_event_id=trace_event_id,
-            trace_sequence=1,
+            trace_event_id=appended.identity.trace_event_id,
+            trace_sequence=appended.identity.sequence,
         )
 
     def succeed(
@@ -406,8 +184,8 @@ class KernelControl:
         outcome_route: str | None = None,
         route_input: dict[str, Any] | None = None,
     ) -> tuple[dict[str, UUID], dict[str, UUID]]:
-        _lock_open_instance(self._connection, required.instance_id)
-        _validate_disposition(
+        lock_open_instance(self._connection, required.instance_id)
+        validate_disposition(
             self._connection,
             required,
             expected_attempt_state="completed",
@@ -477,7 +255,7 @@ class KernelControl:
             source_kind="step_outcome",
             source_id=required.attempt_id,
             input_value=transition_input,
-            receipt=receipt,
+            receipt=lambda _: receipt,
         )
         required.consumed = True
         return steps, waits
@@ -485,8 +263,8 @@ class KernelControl:
     def retry(self, required: DispositionRequired) -> None:
         if required.consumed:
             raise RuntimeError("Attempt disposition was already consumed")
-        _lock_open_instance(self._connection, required.instance_id)
-        _validate_disposition(
+        lock_open_instance(self._connection, required.instance_id)
+        validate_disposition(
             self._connection,
             required,
             expected_attempt_state=required.basis_state,
@@ -523,15 +301,15 @@ class KernelControl:
             source_kind="recovery_disposition",
             source_id=required.attempt_id,
             input_value={"attempt_id": str(required.attempt_id), "delay_seconds": delay},
-            receipt={"step_id": str(required.step_id), "delay_seconds": delay},
+            receipt=lambda _: {"step_id": str(required.step_id), "delay_seconds": delay},
         )
         required.consumed = True
 
     def fail(self, required: DispositionRequired, *, failure: dict[str, Any]) -> None:
         if required.consumed:
             raise RuntimeError("Attempt disposition was already consumed")
-        _lock_open_instance(self._connection, required.instance_id)
-        _validate_disposition(
+        lock_open_instance(self._connection, required.instance_id)
+        validate_disposition(
             self._connection,
             required,
             expected_attempt_state=required.basis_state,
@@ -556,129 +334,15 @@ class KernelControl:
             source_kind="recovery_disposition",
             source_id=required.attempt_id,
             input_value=failure,
-            receipt={"step_id": str(required.step_id), "failure": failure},
+            receipt=lambda _: {"step_id": str(required.step_id), "failure": failure},
         )
         required.consumed = True
 
     def accept_signal(self, request: AcceptSignal) -> SignalReceipt:
-        transition_input = {
-            "instance_id": str(request.instance_id),
-            "wait_id": str(request.wait_id),
-            "signal_type": request.signal_type,
-            "schema_version": request.schema_version,
-            "payload": request.payload,
-            "route_key": request.route_key,
-        }
-        input_digest = canonical_digest(transition_input)
-        instance_state = _lock_instance(self._connection, request.instance_id)
-        _lock_source_identity(
-            self._connection,
-            source_kind="signal_acceptance",
-            source_id=request.signal_id,
-        )
-        replay = self._connection.execute(
-            "SELECT input_digest, receipt FROM openmagic_runtime.trace_events "
-            "WHERE source_kind = 'signal_acceptance' AND source_id = %s",
-            (request.signal_id,),
-        ).fetchone()
-        if replay is not None:
-            if str(replay[0]) != input_digest:
-                raise ValueError("Signal identity was reused with conflicting input")
-            return _signal_receipt(dict(replay[1]))
-        _require_open_instance(instance_state)
-        route = _validated_signal_route(self._connection, request)
-        inserted = self._connection.execute(
-            "INSERT INTO openmagic_runtime.signals "
-            "(signal_id, instance_id, wait_id, signal_type, schema_version, payload, "
-            "payload_digest) VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING signal_id",
-            (
-                request.signal_id,
-                request.instance_id,
-                request.wait_id,
-                request.signal_type,
-                request.schema_version,
-                Jsonb(request.payload),
-                canonical_digest(request.payload),
-            ),
-        ).fetchone()
-        if inserted is None:
-            raise RuntimeError("Signal was not recorded")
-        self._connection.execute(
-            "UPDATE openmagic_runtime.waits SET state = 'satisfied', satisfying_signal_id = %s, "
-            "satisfied_at = clock_timestamp() WHERE wait_id = %s",
-            (request.signal_id, request.wait_id),
-        )
-        steps, waits = _materialize_route(
-            self._connection,
-            instance_id=request.instance_id,
-            route=route,
-            source_kind="signal",
-            source_id=request.signal_id,
-            route_input=request.payload,
-        )
-        trace_event_id = uuid4()
-        sequence_row = self._connection.execute(
-            "UPDATE openmagic_runtime.instances SET last_trace_sequence = last_trace_sequence + 1 "
-            "WHERE instance_id = %s RETURNING last_trace_sequence",
-            (request.instance_id,),
-        ).fetchone()
-        if sequence_row is None:
-            raise RuntimeError("Instance disappeared during Signal acceptance")
-        receipt_payload = {
-            "signal_id": str(request.signal_id),
-            "instance_id": str(request.instance_id),
-            "wait_id": str(request.wait_id),
-            "steps": {key: str(value) for key, value in steps.items()},
-            "waits": {key: str(value) for key, value in waits.items()},
-            "trace_event_id": str(trace_event_id),
-            "trace_sequence": int(sequence_row[0]),
-        }
-        self._connection.execute(
-            "INSERT INTO openmagic_runtime.trace_events "
-            "(trace_event_id, instance_id, sequence, event_type, schema_version, source_kind, "
-            "source_id, input_digest, receipt) VALUES "
-            "(%s, %s, %s, 'signal_accepted', 1, 'signal_acceptance', %s, %s, %s)",
-            (
-                trace_event_id,
-                request.instance_id,
-                sequence_row[0],
-                request.signal_id,
-                input_digest,
-                Jsonb(receipt_payload),
-            ),
-        )
-        return SignalReceipt(
-            signal_id=request.signal_id,
-            instance_id=request.instance_id,
-            wait_id=request.wait_id,
-            steps=steps,
-            waits=waits,
-            trace_event_id=trace_event_id,
-            trace_sequence=int(sequence_row[0]),
-        )
+        return accept_signal(self._connection, request)
 
     def guard_current_attempt(self, request: GuardCurrentAttempt) -> CurrentAttemptGuard:
-        _lock_open_instance(self._connection, request.instance_id)
-        current = self._connection.execute(
-            "SELECT a.step_id, a.attempt_number, a.state = 'leased', "
-            "a.lease_expires_at > clock_timestamp(), a.hard_deadline > clock_timestamp(), "
-            "s.state = 'pending' FROM openmagic_runtime.attempts AS a "
-            "JOIN openmagic_runtime.steps AS s ON s.step_id = a.step_id "
-            "WHERE a.attempt_id = %s AND a.instance_id = %s FOR UPDATE OF a, s",
-            (request.attempt_id, request.instance_id),
-        ).fetchone()
-        if current is None or UUID(str(current[0])) != request.step_id:
-            raise RuntimeError("Current Attempt guard target does not exist")
-        if int(current[1]) != request.attempt_number or not all(current[2:]):
-            raise RuntimeError("Attempt is not current")
-        transaction = self._connection.execute("SELECT txid_current()").fetchone()
-        if transaction is None:
-            raise RuntimeError("Current transaction identity is unavailable")
-        return CurrentAttemptGuard(
-            self._connection,
-            request.attempt_id,
-            int(transaction[0]),
-        )
+        return guard_current_attempt(self._connection, request)
 
     def defer(
         self,
@@ -687,221 +351,18 @@ class KernelControl:
         outcome_route: str | None = None,
         route_input: dict[str, Any] | None = None,
     ) -> tuple[dict[str, UUID], dict[str, UUID]]:
-        if required.consumed:
-            raise RuntimeError("Attempt disposition was already consumed")
-        _lock_open_instance(self._connection, required.instance_id)
-        _validate_disposition(
+        return defer_step(
             self._connection,
             required,
-            expected_attempt_state=required.basis_state,
+            outcome_route=outcome_route,
+            route_input=route_input,
         )
-        updated = self._connection.execute(
-            "UPDATE openmagic_runtime.steps SET claimable_at = NULL, deferred_attempt_id = %s "
-            "WHERE step_id = %s AND instance_id = %s AND state = 'pending' "
-            "RETURNING step_id",
-            (required.attempt_id, required.step_id, required.instance_id),
-        ).fetchone()
-        if updated is None:
-            raise RuntimeError("Deferral cannot target a terminal or missing Step")
-        steps: dict[str, UUID] = {}
-        waits: dict[str, UUID] = {}
-        if outcome_route is not None:
-            if route_input is None:
-                raise ValueError("Deferral Route requires typed Route input")
-            definition_row = self._connection.execute(
-                "SELECT d.manifest, d.manifest_digest FROM openmagic_runtime.instances AS i "
-                "JOIN openmagic_runtime.workflow_definitions AS d ON "
-                "d.definition_key = i.definition_key AND "
-                "d.definition_version = i.definition_version WHERE i.instance_id = %s",
-                (required.instance_id,),
-            ).fetchone()
-            if definition_row is None:
-                raise RuntimeError("Pinned Workflow Definition is unavailable")
-            definition = verified_definition(dict(definition_row[0]), str(definition_row[1]))
-            route = next(item for item in definition.routes if item.key == outcome_route)
-            if route.activation != "step" or route.source_template_key != required.template_key:
-                raise ValueError("Deferral Route does not accept this Step Template")
-            validate_payload(route_input, route.activation_contract)
-            steps, waits = _materialize_route(
-                self._connection,
-                instance_id=required.instance_id,
-                route=route,
-                source_kind="step",
-                source_id=required.attempt_id,
-                route_input=route_input,
-            )
-        elif route_input is not None:
-            raise ValueError("Route input cannot be supplied without a Deferral Route")
-        append_trace(
-            self._connection,
-            instance_id=required.instance_id,
-            event_type="step_deferred",
-            source_kind="step_deferral",
-            source_id=required.attempt_id,
-            input_value={"route": outcome_route, "route_input": route_input},
-            receipt={
-                "step_id": str(required.step_id),
-                "steps": {key: str(value) for key, value in steps.items()},
-                "waits": {key: str(value) for key, value in waits.items()},
-            },
-        )
-        required.consumed = True
-        return steps, waits
 
     def resolve_deferred(self, request: ResolveDeferredStep) -> ResolveDeferredStepReceipt:
-        input_digest = canonical_digest(request)
-        instance_state = _lock_instance(self._connection, request.instance_id)
-        _lock_source_identity(
-            self._connection,
-            source_kind="deferred_resolution",
-            source_id=request.source_id,
-        )
-        replay = self._connection.execute(
-            "SELECT input_digest, receipt FROM openmagic_runtime.trace_events "
-            "WHERE source_kind = 'deferred_resolution' AND source_id = %s",
-            (request.source_id,),
-        ).fetchone()
-        if replay is not None:
-            if str(replay[0]) != input_digest:
-                raise ValueError("Deferred resolution identity was reused with conflicting input")
-            receipt = dict(replay[1])
-            action = deferred_action(receipt["action"])
-            return ResolveDeferredStepReceipt(
-                step_id=UUID(str(receipt["step_id"])),
-                action=action,
-            )
-        _require_open_instance(instance_state)
-        row = self._connection.execute(
-            "SELECT template_key, state, deferred_attempt_id FROM openmagic_runtime.steps "
-            "WHERE step_id = %s AND instance_id = %s FOR UPDATE",
-            (request.step_id, request.instance_id),
-        ).fetchone()
-        if (
-            row is None
-            or str(row[1]) != "pending"
-            or row[2] is None
-            or UUID(str(row[2])) != request.basis_attempt_id
-        ):
-            raise RuntimeError("Deferred Step basis is no longer authoritative")
-        definition_row = self._connection.execute(
-            "SELECT d.manifest, d.manifest_digest FROM openmagic_runtime.instances AS i "
-            "JOIN openmagic_runtime.workflow_definitions AS d ON "
-            "d.definition_key = i.definition_key AND d.definition_version = i.definition_version "
-            "WHERE i.instance_id = %s",
-            (request.instance_id,),
-        ).fetchone()
-        if definition_row is None:
-            raise RuntimeError("Pinned Workflow Definition is unavailable")
-        definition = verified_definition(dict(definition_row[0]), str(definition_row[1]))
-        template = next(item for item in definition.step_templates if item.key == str(row[0]))
-        _apply_deferred_resolution(
-            self._connection,
-            request=request,
-            template=template,
-        )
-        append_trace(
-            self._connection,
-            instance_id=request.instance_id,
-            event_type=f"deferred_step_{request.action}",
-            source_kind="deferred_resolution",
-            source_id=request.source_id,
-            input_value=request,
-            receipt={"step_id": str(request.step_id), "action": request.action},
-        )
-        return ResolveDeferredStepReceipt(request.step_id, request.action)
+        return resolve_deferred_step(self._connection, request)
 
     def close(self, request: CloseInstance) -> CloseInstanceReceipt:
-        transition_input = {
-            "command_id": str(request.command_id),
-            "instance_id": str(request.instance_id),
-        }
-        digest = canonical_digest(transition_input)
-        instance_state = _lock_instance(self._connection, request.instance_id)
-        _lock_source_identity(
-            self._connection,
-            source_kind="instance_closure",
-            source_id=request.command_id,
-        )
-        replay = self._connection.execute(
-            "SELECT input_digest, receipt FROM openmagic_runtime.trace_events "
-            "WHERE source_kind = 'instance_closure' AND source_id = %s",
-            (request.command_id,),
-        ).fetchone()
-        if replay is not None:
-            if str(replay[0]) != digest:
-                raise ValueError("Instance closure identity was reused with conflicting input")
-            receipt = dict(replay[1])
-            return CloseInstanceReceipt(
-                instance_id=UUID(receipt["instance_id"]),
-                cancelled_step_ids=tuple(UUID(value) for value in receipt["cancelled_step_ids"]),
-                cancelled_attempt_ids=tuple(
-                    UUID(value) for value in receipt["cancelled_attempt_ids"]
-                ),
-                cancelled_wait_ids=tuple(UUID(value) for value in receipt["cancelled_wait_ids"]),
-                trace_event_id=UUID(receipt["trace_event_id"]),
-                trace_sequence=int(receipt["trace_sequence"]),
-            )
-        _require_open_instance(instance_state)
-        cancelled_attempts = self._connection.execute(
-            "UPDATE openmagic_runtime.attempts SET state = 'cancelled', "
-            "completed_at = clock_timestamp() WHERE instance_id = %s AND state = 'leased' "
-            "RETURNING attempt_id",
-            (request.instance_id,),
-        ).fetchall()
-        cancelled_steps = self._connection.execute(
-            "UPDATE openmagic_runtime.steps SET state = 'cancelled', "
-            "terminal_at = clock_timestamp(), claimable_at = NULL, deferred_attempt_id = NULL "
-            "WHERE instance_id = %s AND state = 'pending' RETURNING step_id",
-            (request.instance_id,),
-        ).fetchall()
-        cancelled_waits = self._connection.execute(
-            "UPDATE openmagic_runtime.waits SET state = 'cancelled' "
-            "WHERE instance_id = %s AND state = 'unsatisfied' RETURNING wait_id",
-            (request.instance_id,),
-        ).fetchall()
-        self._connection.execute(
-            "UPDATE openmagic_runtime.instances SET state = 'closed', "
-            "closed_at = clock_timestamp() WHERE instance_id = %s",
-            (request.instance_id,),
-        )
-        trace_event_id = uuid4()
-        sequence_row = self._connection.execute(
-            "UPDATE openmagic_runtime.instances SET last_trace_sequence = last_trace_sequence + 1 "
-            "WHERE instance_id = %s RETURNING last_trace_sequence",
-            (request.instance_id,),
-        ).fetchone()
-        if sequence_row is None:
-            raise RuntimeError("Instance disappeared during closure")
-        receipt_payload = {
-            "instance_id": str(request.instance_id),
-            "cancelled_step_ids": [str(row[0]) for row in cancelled_steps],
-            "cancelled_attempt_ids": [str(row[0]) for row in cancelled_attempts],
-            "cancelled_wait_ids": [str(row[0]) for row in cancelled_waits],
-            "trace_event_id": str(trace_event_id),
-            "trace_sequence": int(sequence_row[0]),
-        }
-        self._connection.execute(
-            "INSERT INTO openmagic_runtime.trace_events "
-            "(trace_event_id, instance_id, sequence, event_type, schema_version, source_kind, "
-            "source_id, input_digest, receipt) VALUES "
-            "(%s, %s, %s, 'instance_closed', 1, 'instance_closure', %s, %s, %s)",
-            (
-                trace_event_id,
-                request.instance_id,
-                sequence_row[0],
-                request.command_id,
-                digest,
-                Jsonb(receipt_payload),
-            ),
-        )
-        return CloseInstanceReceipt(
-            instance_id=request.instance_id,
-            cancelled_step_ids=tuple(UUID(str(row[0])) for row in cancelled_steps),
-            cancelled_attempt_ids=tuple(UUID(str(row[0])) for row in cancelled_attempts),
-            cancelled_wait_ids=tuple(UUID(str(row[0])) for row in cancelled_waits),
-            trace_event_id=trace_event_id,
-            trace_sequence=int(sequence_row[0]),
-        )
+        return close_instance(self._connection, request)
 
 
 def start_instance(*, database_url: str, request: StartInstance) -> StartInstanceReceipt:

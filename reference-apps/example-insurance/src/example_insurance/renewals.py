@@ -13,49 +13,32 @@ from openmagic_runtime.agents import (
     AgentAudience,
     AgentConfiguration,
     AgentExecutionInput,
-    AgentRuns,
 )
 from openmagic_runtime.commands import (
-    Actor,
-    Cause,
-    CommandDispatcher,
     CommandReceipt,
-    CommandRegistryBuilder,
     StateConflict,
 )
 from openmagic_runtime.delivery import (
     ClaimDelivery,
     ClaimedDelivery,
     DeliveryAcknowledgement,
-    DeliveryControl,
     DeliveryWork,
     claim_delivery_once,
 )
-from openmagic_runtime.evidence import content_fingerprint
 from openmagic_runtime.execution import (
-    AttemptExecution,
-    CancellationToken,
     DeterministicExecutor,
-    ExecutionAuthorityLost,
     Executor,
     FreshAgentExecutor,
-    execute_with_renewable_authority,
 )
 from openmagic_runtime.kernel.control import KernelControl, StartInstance
 from openmagic_runtime.kernel.definitions import DefinitionCatalog
 from openmagic_runtime.kernel.work import (
     ClaimedAttempt,
-    ClaimWork,
-    KernelWork,
-    claim_once,
-    renew_once,
 )
 from openmagic_runtime.threads import ThreadAccess
 from psycopg import Connection
-from psycopg.types.json import Jsonb
 
-from example_insurance.renewal_approval import RenewalApprovalControl
-from example_insurance.renewal_attempts import prepare_workflow_attempt
+from example_insurance.renewal_attempt_control import RenewalAttemptControl
 from example_insurance.renewal_commands import (
     AcceptRenewalEffectObservation,
     AcceptRenewalEffectObservationInput,
@@ -78,17 +61,9 @@ from example_insurance.renewal_commands import (
     StartRenewalOutreachInput,
     StartRenewalOutreachResult,
     WorkflowAttemptResult,
-    dispatch_command_id,
-    effect_observation_command_id,
-    validate_approval,
-    validate_cancellation,
-    validate_dispatch,
-    validate_effect_observation,
-    validate_revision,
-    validate_revocation,
-    validate_start,
 )
 from example_insurance.renewal_definition import RENEWAL_DEFINITION
+from example_insurance.renewal_effect_control import RenewalEffectControl
 from example_insurance.renewal_effects import (
     EmailProviderExecutor,
     EmailReconciliationExecutor,
@@ -98,29 +73,18 @@ from example_insurance.renewal_effects import (
 )
 from example_insurance.renewal_evidence import RenewalEvidenceProjector
 from example_insurance.renewal_facts import RenewalFacts, RenewalFactSource
-from example_insurance.renewal_policies import RenewalDeliveryPolicy, RenewalWorkflowPolicy
-
-
-def _decode_workflow_attempt_result(payload: dict[str, Any]) -> WorkflowAttemptResult:
-    agent_run_id = payload["agent_run_id"]
-    return WorkflowAttemptResult(
-        attempt_id=UUID(payload["attempt_id"]),
-        template_key=str(payload["template_key"]),
-        executor_key=str(payload["executor_key"]),
-        agent_run_id=UUID(agent_run_id) if agent_run_id is not None else None,
-        agent_runtime_generation=payload["agent_runtime_generation"],
-        steps={key: UUID(value) for key, value in payload["steps"].items()},
-        waits={key: UUID(value) for key, value in payload["waits"].items()},
-    )
-
-
-def _decode_effect_permit(payload: dict[str, Any]) -> ExternalEffectPermit:
-    return ExternalEffectPermit(
-        logical_effect_id=UUID(payload["logical_effect_id"]),
-        step_id=UUID(payload["step_id"]),
-        attempt_id=UUID(payload["attempt_id"]),
-        provider_idempotency_key=str(payload["provider_idempotency_key"]),
-    )
+from example_insurance.renewal_lifecycle import RenewalLifecycleControl
+from example_insurance.renewal_records import CommandEventLineage
+from example_insurance.renewal_registry import (
+    RenewalCommandHandlers,
+    renewal_command_dispatcher,
+)
+from example_insurance.renewal_review_control import RenewalReviewControl
+from example_insurance.renewal_worker_control import RenewalWorkerControl
+from example_insurance.renewal_workflow_records import (
+    record_workflow,
+    workflow_exists,
+)
 
 
 @dataclass(frozen=True)
@@ -184,116 +148,24 @@ def _draft_agent_factory() -> Callable[[AgentExecutionInput], RenewalDraftCandid
 class ExampleInsurance:
     def __init__(self, *, database_url: str, email_provider_url: str | None = None) -> None:
         self._database_url = database_url
-        registrations = (
-            CommandRegistryBuilder()
-            .register(
-                command_type="renewal.start_outreach",
-                schema_version=1,
-                command_class=StartRenewalOutreach,
-                result_class=StartRenewalOutreachResult,
-                handler=self._handle_start,
-                result_decoder=lambda payload: StartRenewalOutreachResult(
-                    workflow_id=UUID(payload["workflow_id"]),
-                    instance_id=UUID(payload["instance_id"]),
-                    thread_id=UUID(payload["thread_id"]),
-                ),
-                validator=validate_start,
-            )
-            .register(
-                command_type="renewal.approve_draft",
-                schema_version=1,
-                command_class=ApproveRenewalDraft,
-                result_class=ApproveRenewalDraftResult,
-                handler=self._handle_approval,
-                result_decoder=lambda payload: ApproveRenewalDraftResult(
-                    outcome=payload["outcome"],
-                    workflow_id=UUID(payload["workflow_id"]),
-                    wait_id=UUID(payload["wait_id"]),
-                    approval_grant_id=(
-                        UUID(payload["approval_grant_id"])
-                        if payload["approval_grant_id"] is not None
-                        else None
-                    ),
-                    effect_step_id=(
-                        UUID(payload["effect_step_id"])
-                        if payload["effect_step_id"] is not None
-                        else None
-                    ),
-                ),
-                validator=validate_approval,
-            )
-            .register(
-                command_type="renewal.request_revision",
-                schema_version=1,
-                command_class=RequestRenewalRevision,
-                result_class=RequestRenewalRevisionResult,
-                handler=self._handle_revision,
-                result_decoder=lambda payload: RequestRenewalRevisionResult(
-                    outcome=payload["outcome"],
-                    workflow_id=UUID(payload["workflow_id"]),
-                    wait_id=UUID(payload["wait_id"]),
-                    revision_step_id=(
-                        UUID(payload["revision_step_id"])
-                        if payload["revision_step_id"] is not None
-                        else None
-                    ),
-                ),
-                validator=validate_revision,
-            )
-            .register(
-                command_type="renewal.revoke_approval_authority",
-                schema_version=1,
-                command_class=RevokeRenewalAuthority,
-                result_class=RevokeRenewalAuthorityResult,
-                handler=self._handle_revocation,
-                result_decoder=lambda payload: RevokeRenewalAuthorityResult(
-                    outcome=payload["outcome"],
-                    workflow_id=UUID(payload["workflow_id"]),
-                ),
-                validator=validate_revocation,
-            )
-            .register(
-                command_type="renewal.cancel_outreach",
-                schema_version=1,
-                command_class=CancelRenewalOutreach,
-                result_class=CancelRenewalOutreachResult,
-                handler=self._handle_cancellation,
-                result_decoder=lambda payload: CancelRenewalOutreachResult(
-                    outcome=payload["outcome"],
-                    workflow_id=UUID(payload["workflow_id"]),
-                    instance_id=UUID(payload["instance_id"]),
-                ),
-                validator=validate_cancellation,
-            )
-            .register(
-                command_type="renewal.authorize_email_dispatch",
-                schema_version=1,
-                command_class=AuthorizeRenewalEmailDispatch,
-                result_class=ExternalEffectPermit,
-                handler=self._handle_dispatch_authorization,
-                result_decoder=_decode_effect_permit,
-                validator=validate_dispatch,
-            )
-            .register(
-                command_type="renewal.accept_effect_observation",
-                schema_version=1,
-                command_class=AcceptRenewalEffectObservation,
-                result_class=WorkflowAttemptResult,
-                handler=self._handle_effect_observation,
-                result_decoder=_decode_workflow_attempt_result,
-                validator=validate_effect_observation,
-            )
-            .build()
-        )
-        self._dispatcher = CommandDispatcher(
+        self._review_control = RenewalReviewControl()
+        self._lifecycle_control = RenewalLifecycleControl()
+        self._effect_control = RenewalEffectControl()
+        self._attempt_control = RenewalAttemptControl(effect_control=self._effect_control)
+        self._dispatcher = renewal_command_dispatcher(
             database_url=database_url,
-            registrations=registrations,
+            handlers=RenewalCommandHandlers(
+                start=self._handle_start,
+                approve=self._handle_approval,
+                revise=self._handle_revision,
+                revoke=self._handle_revocation,
+                cancel=self._handle_cancellation,
+                authorize_dispatch=self._handle_dispatch_authorization,
+                accept_effect_observation=self._handle_effect_observation,
+            ),
         )
-        self._workflow_policy = RenewalWorkflowPolicy()
-        self._delivery_policy = RenewalDeliveryPolicy()
-        self._approval_control = RenewalApprovalControl()
         self._renewal_facts = RenewalFactSource(database_url=database_url)
-        self._executors: dict[str, Executor] = {
+        executors: dict[str, Executor] = {
             "example_insurance.renewal_facts.v1": DeterministicExecutor(self._renewal_facts.gather),
             "example_insurance.renewal_draft_agent.v1": FreshAgentExecutor(
                 _draft_agent_factory,
@@ -306,16 +178,23 @@ class ExampleInsurance:
             ),
         }
         if email_provider_url is not None:
-            self._executors.update(
+            executors.update(
                 {
                     "example_insurance.email_provider.v1": EmailProviderExecutor(
-                        provider_url=email_provider_url
+                        database_url=database_url,
+                        provider_url=email_provider_url,
                     ),
                     "example_insurance.email_reconciliation.v1": EmailReconciliationExecutor(
                         provider_url=email_provider_url
                     ),
                 }
             )
+        self._workers = RenewalWorkerControl(
+            database_url=database_url,
+            dispatcher=self._dispatcher,
+            executors=executors,
+            attempts=self._attempt_control,
+        )
 
     def prepare(self) -> None:
         DefinitionCatalog(database_url=self._database_url).register(RENEWAL_DEFINITION)
@@ -335,7 +214,7 @@ class ExampleInsurance:
     def renewal_approval_presentation(self, workflow_id: UUID) -> RenewalApprovalPresentation:
         with psycopg.connect(self._database_url) as connection, connection.transaction():
             connection.execute("SET TRANSACTION READ ONLY")
-            return self._approval_control.presentation(connection, workflow_id)
+            return self._review_control.presentation(connection, workflow_id)
 
     def approve_renewal_draft(
         self, command: ApproveRenewalDraft
@@ -376,90 +255,26 @@ class ExampleInsurance:
     def authorize_email_dispatch(
         self, *, attempt: ClaimedAttempt, worker_id: str
     ) -> CommandReceipt[ExternalEffectPermit]:
-        return self._dispatcher.execute(
-            command_type="renewal.authorize_email_dispatch",
-            schema_version=1,
-            command=AuthorizeRenewalEmailDispatch(
-                command_id=dispatch_command_id(attempt.attempt_id),
-                actor=Actor("system", worker_id),
-                cause=Cause("attempt", str(attempt.attempt_id)),
-                input=AuthorizeRenewalEmailDispatchInput(attempt, worker_id),
-            ),
-        )
+        return self._workers.authorize_dispatch(attempt=attempt, worker_id=worker_id)
 
     def accept_renewal_effect_observation(
         self,
         command: AcceptRenewalEffectObservation,
     ) -> CommandReceipt[WorkflowAttemptResult]:
-        return self._dispatcher.execute(
-            command_type="renewal.accept_effect_observation",
-            schema_version=1,
-            command=command,
-        )
+        return self._workers.accept_effect_observation(command)
 
     def run_workflow_worker_once(
         self, *, worker_id: str, worker_shutdown: Event | None = None
     ) -> WorkflowAttemptResult | None:
-        self.recover_expired_workflow_attempt()
-        attempt = self.claim_workflow_attempt(worker_id=worker_id, claim_request_id=uuid4())
-        if attempt is None:
-            return None
-        return self.complete_workflow_attempt(
-            attempt=attempt,
-            worker_id=worker_id,
-            worker_shutdown=worker_shutdown,
-        )
+        return self._workers.run_once(worker_id=worker_id, worker_shutdown=worker_shutdown)
 
     def recover_expired_workflow_attempt(self) -> bool:
-        with psycopg.connect(self._database_url) as connection, connection.transaction():
-            workflow = connection.execute(
-                "SELECT r.instance_id FROM example_insurance.renewal_workflows r "
-                "WHERE r.lifecycle = 'active' AND EXISTS ("
-                "SELECT 1 FROM openmagic_runtime.attempts a WHERE a.instance_id = r.instance_id "
-                "AND a.state = 'leased' AND (a.lease_expires_at <= clock_timestamp() "
-                "OR a.hard_deadline <= clock_timestamp())) "
-                "ORDER BY r.created_at, r.workflow_id FOR UPDATE SKIP LOCKED LIMIT 1"
-            ).fetchone()
-            if workflow is None:
-                return False
-            required = KernelWork(connection).recover_expired(UUID(str(workflow[0])))
-            if required is None:
-                return False
-            AgentRuns(connection).abandon_for_attempt(required.attempt_id)
-            effect_recovery = self._approval_control.recover_fenced_attempt(
-                connection,
-                required,
-            )
-            if effect_recovery is not None:
-                if not required.consumed:
-                    raise RuntimeError("External Effect recovery remained unresolved")
-                return True
-            decision = self._workflow_policy.expired_attempt(
-                template_key=required.template_key,
-                attempt_number=required.attempt_number,
-            )
-            control = KernelControl(connection)
-            if decision.action == "retry":
-                control.retry(required)
-            elif decision.failure is not None:
-                control.fail(required, failure=decision.failure)
-            else:
-                raise RuntimeError("Failure disposition requires structured failure data")
-            if not required.consumed:
-                raise RuntimeError("Recovery disposition remained unresolved")
-            return True
+        return self._workers.recover_expired()
 
     def claim_workflow_attempt(
         self, *, worker_id: str, claim_request_id: UUID
     ) -> ClaimedAttempt | None:
-        return claim_once(
-            database_url=self._database_url,
-            request=ClaimWork(
-                claim_request_id=claim_request_id,
-                worker_id=worker_id,
-                executor_keys=tuple(self._executors),
-            ),
-        )
+        return self._workers.claim(worker_id=worker_id, claim_request_id=claim_request_id)
 
     def complete_workflow_attempt(
         self,
@@ -468,78 +283,10 @@ class ExampleInsurance:
         worker_id: str,
         worker_shutdown: Event | None = None,
     ) -> WorkflowAttemptResult:
-        prepared = prepare_workflow_attempt(
-            database_url=self._database_url,
+        return self._workers.complete(
             attempt=attempt,
             worker_id=worker_id,
-        )
-        durable_attempt = prepared.claim
-        if prepared.replay_observation is not None:
-            return self.submit_workflow_observation(
-                attempt=durable_attempt,
-                worker_id=worker_id,
-                observation=prepared.replay_observation,
-            )
-        if durable_attempt.template_key == "send_renewal_email":
-            self.authorize_email_dispatch(attempt=durable_attempt, worker_id=worker_id)
-        executor = self._executors[durable_attempt.executor_key]
-        try:
-            observation = execute_with_renewable_authority(
-                executor=executor,
-                execution=AttemptExecution(
-                    instance_id=durable_attempt.instance_id,
-                    step_id=durable_attempt.step_id,
-                    attempt_id=durable_attempt.attempt_id,
-                    attempt_number=durable_attempt.attempt_number,
-                    template_key=durable_attempt.template_key,
-                    executor_key=durable_attempt.executor_key,
-                    input=durable_attempt.input,
-                    agent_input=prepared.agent_input,
-                ),
-                cancellation=CancellationToken(),
-                renew=lambda: renew_once(
-                    database_url=self._database_url,
-                    attempt=durable_attempt,
-                    worker_id=worker_id,
-                    renewal_id=uuid4(),
-                ),
-                lease_seconds=durable_attempt.lease_seconds,
-                worker_shutdown=worker_shutdown,
-            )
-        except ExecutionAuthorityLost:
-            raise
-        except Exception as error:
-            if prepared.agent_run_id is not None:
-                with psycopg.connect(self._database_url) as connection, connection.transaction():
-                    AgentRuns(connection).fail_for_attempt(
-                        durable_attempt.attempt_id,
-                        {"class": type(error).__name__},
-                    )
-            raise
-        if durable_attempt.template_key in {
-            "send_renewal_email",
-            "reconcile_renewal_email",
-        }:
-            value = RenewalEffectObservation(
-                classification=observation.value["classification"],
-                provider_request_id=str(observation.value["provider_request_id"]),
-            )
-            return self.accept_renewal_effect_observation(
-                AcceptRenewalEffectObservation(
-                    command_id=effect_observation_command_id(durable_attempt.attempt_id),
-                    actor=Actor("system", worker_id),
-                    cause=Cause("attempt", str(durable_attempt.attempt_id)),
-                    input=AcceptRenewalEffectObservationInput(
-                        durable_attempt,
-                        worker_id,
-                        value,
-                    ),
-                )
-            ).result
-        return self.submit_workflow_observation(
-            attempt=durable_attempt,
-            worker_id=worker_id,
-            observation=observation.value,
+            worker_shutdown=worker_shutdown,
         )
 
     def submit_workflow_observation(
@@ -549,196 +296,10 @@ class ExampleInsurance:
         worker_id: str,
         observation: dict[str, Any],
     ) -> WorkflowAttemptResult:
-        with psycopg.connect(self._database_url) as connection:
-            return self._submit_workflow_observation(
-                connection=connection,
-                attempt=attempt,
-                worker_id=worker_id,
-                observation=observation,
-            )
-
-    def _submit_workflow_observation(
-        self,
-        *,
-        connection: Connection[tuple[Any, ...]],
-        attempt: ClaimedAttempt,
-        worker_id: str,
-        observation: dict[str, Any],
-    ) -> WorkflowAttemptResult:
-        with connection.transaction():
-            workflow = connection.execute(
-                "SELECT workflow_id, thread_id FROM example_insurance.renewal_workflows "
-                "WHERE instance_id = %s FOR UPDATE",
-                (attempt.instance_id,),
-            ).fetchone()
-            if workflow is None:
-                raise RuntimeError("Renewal Workflow is unavailable")
-            required = KernelWork(connection).accept_result(
-                attempt,
-                worker_id=worker_id,
-                observation=observation,
-            )
-            control = KernelControl(connection)
-            workflow_id = UUID(str(workflow[0]))
-            thread_id = UUID(str(workflow[1]))
-            agent_run_id: UUID | None = None
-            if required.replayed and required.template_key in {
-                "send_renewal_email",
-                "reconcile_renewal_email",
-            }:
-                step_rows = connection.execute(
-                    "SELECT output_slot, step_id FROM openmagic_runtime.steps "
-                    "WHERE instance_id = %s AND activation_source_kind = 'step' "
-                    "AND activation_source_id = %s",
-                    (required.instance_id, required.attempt_id),
-                ).fetchall()
-                wait_rows = connection.execute(
-                    "SELECT output_slot, wait_id FROM openmagic_runtime.waits "
-                    "WHERE instance_id = %s AND activation_source_kind = 'step' "
-                    "AND activation_source_id = %s",
-                    (required.instance_id, required.attempt_id),
-                ).fetchall()
-                return WorkflowAttemptResult(
-                    attempt_id=required.attempt_id,
-                    template_key=required.template_key,
-                    executor_key=attempt.executor_key,
-                    agent_run_id=None,
-                    agent_runtime_generation=None,
-                    steps={str(row[0]): UUID(str(row[1])) for row in step_rows},
-                    waits={str(row[0]): UUID(str(row[1])) for row in wait_rows},
-                )
-            if required.template_key == "gather_renewal_facts":
-                decision = self._workflow_policy.facts_succeeded(
-                    workflow_id=workflow_id,
-                    thread_id=thread_id,
-                    observation=observation,
-                )
-                steps, waits = control.succeed(
-                    required,
-                    output=decision.output,
-                    outcome_route=decision.outcome_route,
-                    route_input=decision.route_input,
-                )
-            elif required.template_key == "draft_renewal_email":
-                if required.replayed:
-                    existing_draft = connection.execute(
-                        "SELECT draft_id, agent_run_id, presentation_fingerprint, "
-                        "policyholder_email, subject, body "
-                        "FROM example_insurance.renewal_drafts "
-                        "WHERE step_id = %s",
-                        (required.step_id,),
-                    ).fetchone()
-                    if existing_draft is None:
-                        raise RuntimeError("Accepted draft result has no durable draft")
-                    draft_id = UUID(str(existing_draft[0]))
-                    agent_run_id = UUID(str(existing_draft[1]))
-                    decision = self._workflow_policy.draft_succeeded(
-                        workflow_id=workflow_id,
-                        draft_id=draft_id,
-                        presentation_fingerprint=str(existing_draft[2]),
-                        recipient_email=str(existing_draft[3]),
-                        subject=str(existing_draft[4]),
-                        body=str(existing_draft[5]),
-                    )
-                    steps, waits = control.succeed(
-                        required,
-                        output=decision.output,
-                        outcome_route=decision.outcome_route,
-                        route_input=decision.route_input,
-                    )
-                else:
-                    agent_run = AgentRuns(connection).complete_for_attempt(
-                        required.attempt_id,
-                        observation,
-                    )
-                    agent_run_id = agent_run.agent_run_id
-                    draft_id = uuid4()
-                    proposed_effect = RenewalEmailEffect(
-                        recipient_email=str(attempt.input["policyholder_email"]),
-                        subject=str(observation["subject"]),
-                        body=str(observation["body"]),
-                    )
-                    presentation_fingerprint = content_fingerprint(proposed_effect)
-                    connection.execute(
-                        "INSERT INTO example_insurance.renewal_drafts "
-                        "(draft_id, workflow_id, step_id, agent_run_id, subject, body, "
-                        "policyholder_email, presentation_fingerprint) "
-                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
-                        (
-                            draft_id,
-                            workflow_id,
-                            required.step_id,
-                            agent_run_id,
-                            observation["subject"],
-                            observation["body"],
-                            proposed_effect.recipient_email,
-                            presentation_fingerprint,
-                        ),
-                    )
-                    event_id = uuid4()
-                    connection.execute(
-                        "INSERT INTO example_insurance.domain_events "
-                        "(event_id, event_type, schema_version, workflow_id, actor, cause, "
-                        "payload) VALUES "
-                        "(%s, 'renewal.draft.ready', 1, %s, %s, %s, %s)",
-                        (
-                            event_id,
-                            workflow_id,
-                            Jsonb({"kind": "system", "identifier": "workflow-control-plane"}),
-                            Jsonb({"kind": "attempt", "identifier": str(required.attempt_id)}),
-                            Jsonb(
-                                {
-                                    "draft_id": str(draft_id),
-                                    "step_id": str(required.step_id),
-                                }
-                            ),
-                        ),
-                    )
-                    DeliveryControl(connection).create(
-                        domain_event_id=event_id,
-                        thread_id=thread_id,
-                        audience=self._delivery_policy.audience,
-                        message_author=self._delivery_policy.message_author,
-                        content_descriptor=self._delivery_policy.content_descriptor(observation),
-                        message_content=self._delivery_policy.render_message(observation),
-                        retry_policy=self._delivery_policy.retry_policy,
-                    )
-                    decision = self._workflow_policy.draft_succeeded(
-                        workflow_id=workflow_id,
-                        draft_id=draft_id,
-                        presentation_fingerprint=presentation_fingerprint,
-                        recipient_email=proposed_effect.recipient_email,
-                        subject=proposed_effect.subject,
-                        body=proposed_effect.body,
-                    )
-                    steps, waits = control.succeed(
-                        required,
-                        output=decision.output,
-                        outcome_route=decision.outcome_route,
-                        route_input=decision.route_input,
-                    )
-            elif required.template_key == "send_renewal_email":
-                steps, waits = self._approval_control.accept_email_observation(
-                    connection,
-                    required,
-                )
-            elif required.template_key == "reconcile_renewal_email":
-                steps, waits = self._approval_control.accept_reconciliation_observation(
-                    connection,
-                    required,
-                )
-            else:
-                raise RuntimeError(f"unsupported renewal Step: {required.template_key}")
-            if not required.consumed:
-                raise RuntimeError("Attempt disposition remained unresolved")
-        return WorkflowAttemptResult(
-            attempt_id=required.attempt_id,
-            template_key=required.template_key,
-            executor_key=attempt.executor_key,
-            agent_run_id=agent_run_id,
-            agent_runtime_generation=1 if agent_run_id is not None else None,
-            steps=steps,
-            waits=waits,
+        return self._workers.submit_observation(
+            attempt=attempt,
+            worker_id=worker_id,
+            observation=observation,
         )
 
     def run_delivery_worker_once(self, *, worker_id: str) -> DeliveryAcknowledgement | None:
@@ -783,11 +344,7 @@ class ExampleInsurance:
             ThreadAccess(connection).require(command.input.thread_id)
         except KeyError:
             raise StateConflict("The exact Thread does not exist") from None
-        existing = connection.execute(
-            "SELECT 1 FROM example_insurance.renewal_workflows WHERE workflow_id = %s",
-            (command.input.workflow_id,),
-        ).fetchone()
-        if existing is not None:
+        if workflow_exists(connection, command.input.workflow_id):
             raise StateConflict("The renewal Workflow already exists")
         start = KernelControl(connection).start(
             StartInstance(
@@ -809,25 +366,12 @@ class ExampleInsurance:
                 },
             )
         )
-        connection.execute(
-            "INSERT INTO example_insurance.renewal_workflows "
-            "(workflow_id, start_command_id, instance_id, thread_id, policy_id, policy_number, "
-            "policyholder_name, renewal_date, expiring_premium_cents, lifecycle, "
-            "authorized_actor_kind, authorized_actor_id) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'active', %s, %s)",
-            (
-                command.input.workflow_id,
-                command.command_id,
-                start.instance_id,
-                command.input.thread_id,
-                command.input.policy_id,
-                command.input.policy_number,
-                command.input.policyholder_name,
-                command.input.renewal_date,
-                command.input.expiring_premium_cents,
-                command.actor.kind,
-                command.actor.identifier,
-            ),
+        record_workflow(
+            connection,
+            command_id=command.command_id,
+            instance_id=start.instance_id,
+            actor=command.actor,
+            value=command.input,
         )
         return StartRenewalOutreachResult(
             workflow_id=command.input.workflow_id,
@@ -840,38 +384,39 @@ class ExampleInsurance:
         command: ApproveRenewalDraft,
         connection: Connection[tuple[Any, ...]],
     ) -> ApproveRenewalDraftResult:
-        return self._approval_control.approve(command, connection)
+        return self._review_control.approve(command, connection)
 
     def _handle_revision(
         self,
         command: RequestRenewalRevision,
         connection: Connection[tuple[Any, ...]],
     ) -> RequestRenewalRevisionResult:
-        return self._approval_control.request_revision(command, connection)
+        return self._review_control.request_revision(command, connection)
 
     def _handle_revocation(
         self,
         command: RevokeRenewalAuthority,
         connection: Connection[tuple[Any, ...]],
     ) -> RevokeRenewalAuthorityResult:
-        return self._approval_control.revoke(command, connection)
+        return self._lifecycle_control.revoke(command, connection)
 
     def _handle_cancellation(
         self,
         command: CancelRenewalOutreach,
         connection: Connection[tuple[Any, ...]],
     ) -> CancelRenewalOutreachResult:
-        return self._approval_control.cancel(command, connection)
+        return self._lifecycle_control.cancel(command, connection)
 
     def _handle_dispatch_authorization(
         self,
         command: AuthorizeRenewalEmailDispatch,
         connection: Connection[tuple[Any, ...]],
     ) -> ExternalEffectPermit:
-        return self._approval_control.authorize_dispatch(
+        return self._effect_control.authorize_dispatch(
             connection,
             attempt=command.input.attempt,
             worker_id=command.input.worker_id,
+            lineage=CommandEventLineage(command.actor, command.command_id),
         )
 
     def _handle_effect_observation(
@@ -879,14 +424,15 @@ class ExampleInsurance:
         command: AcceptRenewalEffectObservation,
         connection: Connection[tuple[Any, ...]],
     ) -> WorkflowAttemptResult:
-        return self._submit_workflow_observation(
-            connection=connection,
+        return self._attempt_control.accept_effect_observation(
+            connection,
             attempt=command.input.attempt,
             worker_id=command.input.worker_id,
             observation={
                 "classification": command.input.observation.classification,
                 "provider_request_id": command.input.observation.provider_request_id,
             },
+            lineage=CommandEventLineage(command.actor, command.command_id),
         )
 
 

@@ -6,9 +6,6 @@ from dataclasses import dataclass
 from typing import Any, Literal
 from uuid import UUID
 
-from psycopg import Connection
-from psycopg.pq import TransactionStatus
-
 
 @dataclass(frozen=True)
 class AcceptSignal:
@@ -56,33 +53,6 @@ class GuardCurrentAttempt:
     attempt_number: int
 
 
-class CurrentAttemptGuard:
-    __slots__ = ("_connection", "_transaction_id", "attempt_id")
-
-    def __init__(
-        self,
-        connection: Connection[tuple[Any, ...]],
-        attempt_id: UUID,
-        transaction_id: int,
-    ) -> None:
-        self._connection = connection
-        self.attempt_id = attempt_id
-        self._transaction_id = transaction_id
-
-    def require_usable(self) -> None:
-        if (
-            self._connection.closed
-            or self._connection.info.transaction_status is TransactionStatus.IDLE
-        ):
-            raise RuntimeError("Current Attempt guard is no longer transaction-scoped")
-        current = self._connection.execute("SELECT txid_current()").fetchone()
-        if current is None or int(current[0]) != self._transaction_id:
-            raise RuntimeError("Current Attempt guard belongs to an earlier transaction")
-
-    def __reduce__(self) -> str | tuple[Any, ...]:
-        raise TypeError("Current Attempt guards cannot be serialized")
-
-
 @dataclass(frozen=True)
 class ResolveDeferredStep:
     source_id: UUID
@@ -114,7 +84,6 @@ __all__ = [
     "AcceptSignal",
     "CloseInstance",
     "CloseInstanceReceipt",
-    "CurrentAttemptGuard",
     "GuardCurrentAttempt",
     "ResolveDeferredStep",
     "ResolveDeferredStepReceipt",
