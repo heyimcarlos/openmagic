@@ -213,7 +213,7 @@ def test_playground_safety_is_verified_through_its_process_interface() -> None:
         "PYTHONPATH": str(ROOT / "apps/playground/src"),
     }
     completed = subprocess.run(
-        [sys.executable, "-m", "openmagic_playground", "--safety-manifest"],
+        [sys.executable, "-m", "openmagic_playground", "manifest"],
         check=True,
         capture_output=True,
         text=True,
@@ -221,6 +221,11 @@ def test_playground_safety_is_verified_through_its_process_interface() -> None:
     )
 
     assert json.loads(completed.stdout) == {
+        "contributes_to_correctness": False,
+        "deterministic_fixture_version": "issue-71.v1",
         "external_effects_enabled": False,
+        "local_provider_only": True,
+        "process_control": "explicit",
+        "reset_requires_confirmation": True,
         "synthetic_data_only": True,
     }
