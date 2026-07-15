@@ -8,7 +8,6 @@ from uuid import UUID, uuid4
 
 import psycopg
 from openmagic_runtime.agents import AgentRuns
-from openmagic_runtime.commands import CommandReceipt
 from openmagic_runtime.execution import (
     AttemptExecution,
     CancellationToken,
@@ -20,10 +19,8 @@ from openmagic_runtime.kernel.work import ClaimedAttempt, ClaimWork, claim_once,
 
 from example_insurance.renewal_attempts import prepare_workflow_attempt
 from example_insurance.renewal_commands import (
-    AcceptRenewalEffectObservation,
     WorkflowAttemptResult,
 )
-from example_insurance.renewal_effect_types import ExternalEffectPermit
 from example_insurance.workflow_attempt_dispatch import AttemptObservationDispatcher
 
 
@@ -38,19 +35,6 @@ class WorkflowWorkerControl:
         self._database_url = database_url
         self._executors = executors
         self._attempts = attempts
-
-    def authorize_dispatch(
-        self, *, attempt: ClaimedAttempt, worker_id: str
-    ) -> CommandReceipt[ExternalEffectPermit]:
-        return self._attempts.authorize_dispatch(
-            attempt=attempt,
-            worker_id=worker_id,
-        )
-
-    def accept_effect_observation(
-        self, command: AcceptRenewalEffectObservation
-    ) -> CommandReceipt[WorkflowAttemptResult]:
-        return self._attempts.accept_effect_observation(command)
 
     def run_once(
         self, *, worker_id: str, worker_shutdown: Event | None = None
@@ -132,19 +116,6 @@ class WorkflowWorkerControl:
             self._record_agent_failure(durable_attempt, prepared.agent_run_id, error)
             raise
         return self._accept_replay(durable_attempt, worker_id, observation.value)
-
-    def submit_observation(
-        self,
-        *,
-        attempt: ClaimedAttempt,
-        worker_id: str,
-        observation: dict[str, Any],
-    ) -> WorkflowAttemptResult:
-        return self._attempts.submit_ordinary_observation(
-            attempt=attempt,
-            worker_id=worker_id,
-            observation=observation,
-        )
 
     def _accept_replay(
         self,

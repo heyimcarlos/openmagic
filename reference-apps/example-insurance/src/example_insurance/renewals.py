@@ -277,15 +277,15 @@ class ExampleInsurance:
                     ),
                 }
             )
+        self._attempt_observations = AttemptObservationDispatcher(
+            routes=attempt_routes,
+            recoveries=recoveries,
+        )
+        self._effect_route = effect_route
         self._workers = WorkflowWorkerControl(
             database_url=database_url,
             executors=executors,
-            attempts=AttemptObservationDispatcher(
-                routes=attempt_routes,
-                recoveries=recoveries,
-                effects=effect_route,
-                ordinary=ordinary_route,
-            ),
+            attempts=self._attempt_observations,
         )
 
     def prepare(self) -> None:
@@ -394,13 +394,13 @@ class ExampleInsurance:
     def authorize_email_dispatch(
         self, *, attempt: ClaimedAttempt, worker_id: str
     ) -> CommandReceipt[ExternalEffectPermit]:
-        return self._workers.authorize_dispatch(attempt=attempt, worker_id=worker_id)
+        return self._effect_route.authorize_dispatch(attempt=attempt, worker_id=worker_id)
 
     def accept_renewal_effect_observation(
         self,
         command: AcceptRenewalEffectObservation,
     ) -> CommandReceipt[WorkflowAttemptResult]:
-        return self._workers.accept_effect_observation(command)
+        return self._effect_route.accept_effect_observation(command)
 
     def run_workflow_worker_once(
         self, *, worker_id: str, worker_shutdown: Event | None = None
@@ -435,7 +435,7 @@ class ExampleInsurance:
         worker_id: str,
         observation: dict[str, Any],
     ) -> WorkflowAttemptResult:
-        return self._workers.submit_observation(
+        return self._attempt_observations.accept(
             attempt=attempt,
             worker_id=worker_id,
             observation=observation,

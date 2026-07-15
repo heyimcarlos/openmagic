@@ -87,6 +87,55 @@ def test_current_authority_is_revalidated_after_code_delivery(
         assert result.result.session_id is None
 
 
+def test_revoked_membership_can_be_reprovisioned_for_the_existing_participant() -> None:
+    with renewal_context(verification_code_secret=b"issue-70-membership-reprovision") as (
+        _,
+        application,
+        threads,
+    ):
+        scenario = issue_verification_challenge(application, threads)
+        party_id = UUID(scenario.actor.identifier)
+        revoked = application.revoke_verification_authority(
+            RevokeVerificationAuthority(
+                command_id=uuid4(),
+                actor=Actor("system", "authority-administrator"),
+                cause=Cause("command", str(uuid4())),
+                input=RevokeVerificationAuthorityInput(
+                    party_id=party_id,
+                    workflow_id=scenario.renewal.input.workflow_id,
+                    target="membership",
+                ),
+            )
+        )
+        identifier = threads.read(scenario.identifier_thread_id)
+        provisioned = application.provision_verification_authority(
+            ProvisionVerificationAuthority(
+                command_id=uuid4(),
+                actor=Actor("system", "authority-administrator"),
+                cause=Cause("command", str(uuid4())),
+                input=ProvisionVerificationAuthorityInput(
+                    party_id=party_id,
+                    organization_party_id=scenario.organization_party_id,
+                    workflow_id=scenario.renewal.input.workflow_id,
+                    email=identifier.channel_reference,
+                    delivery_thread_id=identifier.thread_id,
+                ),
+            )
+        )
+        replacement = application.request_protected_renewal_details(
+            RequestProtectedRenewalDetails(
+                command_id=uuid4(),
+                actor=scenario.actor,
+                cause=Cause("message", str(uuid4())),
+                input=scenario.protected_command.input,
+            )
+        )
+
+        assert revoked.result.outcome == "revoked"
+        assert provisioned.result.outcome == "provisioned"
+        assert replacement.result.outcome == "verification_required"
+
+
 def test_worker_rejects_a_superseded_identifier_and_rebinds_to_current_email() -> None:
     with renewal_context(verification_code_secret=b"issue-70-current-identifier") as (
         database_url,

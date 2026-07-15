@@ -16,8 +16,7 @@ from example_insurance.renewal_commands import WorkflowAttemptResult
 from example_insurance.verification_authority_records import lock_identifier_destination
 from example_insurance.verification_challenge_records import (
     lock_challenge,
-    mark_challenge_terminal,
-    resolve_protected_command,
+    resolve_terminal_challenge,
 )
 from example_insurance.verification_codes import VerificationCodes
 from example_insurance.verification_policy import (
@@ -81,12 +80,12 @@ class VerificationAttemptControl:
                 workflow_id=workflow.workflow_id,
                 failure_class="verification_identifier_unavailable",
             )
-            mark_challenge_terminal(connection, challenge.challenge_id, "rejected")
-            resolve_protected_command(
+            resolve_terminal_challenge(
                 connection,
+                challenge_id=challenge.challenge_id,
                 protected_command_id=challenge.protected_command_id,
+                state="rejected",
                 outcome="identifier_revoked",
-                delivery_id=None,
             )
             return self._result(attempt)
         event_id = record_verification_event(
@@ -151,12 +150,12 @@ class VerificationAttemptControl:
                     workflow_id=workflow.workflow_id,
                     failure_class="verification_delivery_attempts_exhausted",
                 )
-                mark_challenge_terminal(connection, challenge.challenge_id, "delivery_failed")
-                resolve_protected_command(
+                resolve_terminal_challenge(
                     connection,
+                    challenge_id=challenge.challenge_id,
                     protected_command_id=challenge.protected_command_id,
+                    state="delivery_failed",
                     outcome="verification_delivery_failed",
-                    delivery_id=None,
                 )
             return True
         return False

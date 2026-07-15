@@ -11,6 +11,10 @@ from uuid import UUID, uuid4
 from psycopg import Connection
 from psycopg.rows import dict_row
 
+from example_insurance.verification_commands import (
+    ProtectedCommandOutcome,
+)
+
 ChallengeState = Literal[
     "pending",
     "accepted",
@@ -20,6 +24,7 @@ ChallengeState = Literal[
     "rejected",
 ]
 ProtectedCommandState = Literal["waiting", "authorized", "rejected"]
+TerminalChallengeState = Literal["expired", "delivery_failed", "rejected"]
 
 
 def _challenge_state(value: object) -> ChallengeState:
@@ -46,6 +51,34 @@ def _protected_command_state(value: object) -> ProtectedCommandState:
     if value == "rejected":
         return "rejected"
     raise RuntimeError("Protected Command has an invalid state")
+
+
+def _protected_command_outcome(value: object) -> ProtectedCommandOutcome | None:
+    if value is None:
+        return None
+    if value == "authorized":
+        return "authorized"
+    if value == "approval_required":
+        return "approval_required"
+    if value == "authority_revoked":
+        return "authority_revoked"
+    if value == "identifier_revoked":
+        return "identifier_revoked"
+    if value == "workflow_closed":
+        return "workflow_closed"
+    if value == "wrong_party":
+        return "wrong_party"
+    if value == "wrong_purpose":
+        return "wrong_purpose"
+    if value == "wrong_thread":
+        return "wrong_thread"
+    if value == "verification_expired":
+        return "verification_expired"
+    if value == "verification_delivery_failed":
+        return "verification_delivery_failed"
+    if value == "verification_attempts_exhausted":
+        return "verification_attempts_exhausted"
+    raise RuntimeError("Protected Command has an invalid outcome")
 
 
 @dataclass(frozen=True)
@@ -92,7 +125,7 @@ class DurableProtectedCommand:
     purpose: str
     approval_grant_id: UUID
     state: ProtectedCommandState
-    outcome: str | None
+    outcome: ProtectedCommandOutcome | None
 
     @classmethod
     def decode(cls, record: Mapping[str, Any]) -> DurableProtectedCommand:
@@ -104,7 +137,7 @@ class DurableProtectedCommand:
             purpose=str(record["purpose"]),
             approval_grant_id=UUID(str(record["approval_grant_id"])),
             state=_protected_command_state(record["state"]),
-            outcome=str(record["outcome"]) if record["outcome"] is not None else None,
+            outcome=_protected_command_outcome(record["outcome"]),
         )
 
 
@@ -322,17 +355,10 @@ def challenge_is_expired(
     return record is None or bool(record["expired"])
 
 
-def expire_challenge(connection: Connection[tuple[Any, ...]], challenge_id: UUID) -> None:
-    connection.execute(
-        "UPDATE example_insurance.verification_challenges SET state = 'expired' "
-        "WHERE challenge_id = %s AND state = 'pending'",
-        (challenge_id,),
-    )
-
-
 def record_failed_code(
     connection: Connection[tuple[Any, ...]],
     challenge_id: UUID,
+    protected_command_id: UUID,
     *,
     maximum_attempts: int,
 ) -> bool:
@@ -344,18 +370,37 @@ def record_failed_code(
             "WHERE challenge_id = %s AND state = 'pending' RETURNING state",
             (maximum_attempts, maximum_attempts, challenge_id),
         ).fetchone()
-    return record is not None and record["state"] == "attempts_exhausted"
+    exhausted = record is not None and record["state"] == "attempts_exhausted"
+    if exhausted:
+        resolve_protected_command(
+            connection,
+            protected_command_id=protected_command_id,
+            outcome="verification_attempts_exhausted",
+            delivery_id=None,
+        )
+    return exhausted
 
 
-def mark_challenge_terminal(
+def resolve_terminal_challenge(
     connection: Connection[tuple[Any, ...]],
+    *,
     challenge_id: UUID,
-    state: Literal["delivery_failed", "rejected"],
+    protected_command_id: UUID,
+    state: TerminalChallengeState,
+    outcome: ProtectedCommandOutcome,
 ) -> None:
+    if outcome == "authorized":
+        raise ValueError("A terminal Challenge cannot authorize a protected Command")
     connection.execute(
         "UPDATE example_insurance.verification_challenges SET state = %s "
         "WHERE challenge_id = %s AND state = 'pending'",
         (state, challenge_id),
+    )
+    resolve_protected_command(
+        connection,
+        protected_command_id=protected_command_id,
+        outcome=outcome,
+        delivery_id=None,
     )
 
 
@@ -393,9 +438,11 @@ def resolve_protected_command(
     connection: Connection[tuple[Any, ...]],
     *,
     protected_command_id: UUID,
-    outcome: str,
+    outcome: ProtectedCommandOutcome,
     delivery_id: UUID | None,
 ) -> None:
+    if (outcome == "authorized") != (delivery_id is not None):
+        raise ValueError("Protected Command outcome and Delivery must agree")
     state = "authorized" if outcome == "authorized" else "rejected"
     connection.execute(
         "UPDATE example_insurance.protected_commands SET state = %s, outcome = %s, "
@@ -413,14 +460,13 @@ __all__ = [
     "active_session",
     "challenge_is_expired",
     "establish_session",
-    "expire_challenge",
     "lock_challenge",
     "lock_challenge_and_command",
-    "mark_challenge_terminal",
     "pending_challenge_identities",
     "read_challenge_identity",
     "record_authorized_command",
     "record_challenge",
     "record_failed_code",
     "resolve_protected_command",
+    "resolve_terminal_challenge",
 ]

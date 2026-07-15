@@ -128,7 +128,7 @@ def provision_authority(
         membership_id = UUID(str(membership["membership_id"]))
     with connection.cursor(row_factory=dict_row) as cursor:
         participant = cursor.execute(
-            "SELECT participant_id, membership_id FROM "
+            "SELECT participant_id FROM "
             "example_insurance.workflow_participants WHERE workflow_id = %s "
             "AND party_id = %s FOR UPDATE",
             (value.workflow_id, value.party_id),
@@ -137,24 +137,28 @@ def provision_authority(
         participant_id = uuid4()
         connection.execute(
             "INSERT INTO example_insurance.workflow_participants "
-            "(participant_id, workflow_id, party_id, membership_id) "
-            "VALUES (%s, %s, %s, %s)",
-            (participant_id, value.workflow_id, value.party_id, membership_id),
+            "(participant_id, workflow_id, party_id) VALUES (%s, %s, %s)",
+            (participant_id, value.workflow_id, value.party_id),
         )
     else:
         participant_id = UUID(str(participant["participant_id"]))
-        if UUID(str(participant["membership_id"])) != membership_id:
-            raise ValueError("Workflow Participant has a conflicting Organization Membership")
     role_assignment = connection.execute(
-        "SELECT role_assignment_id FROM example_insurance.workflow_role_assignments "
-        "WHERE participant_id = %s AND role = 'broker' AND revoked_at IS NULL FOR UPDATE",
-        (participant_id,),
+        "SELECT role.role_assignment_id FROM "
+        "example_insurance.workflow_role_assignments AS role "
+        "JOIN example_insurance.organization_memberships AS membership "
+        "ON membership.membership_id = role.membership_id "
+        "AND membership.party_id = role.party_id "
+        "WHERE role.participant_id = %s AND role.membership_id = %s "
+        "AND role.role = 'broker' AND role.revoked_at IS NULL "
+        "AND membership.revoked_at IS NULL FOR UPDATE OF role, membership",
+        (participant_id, membership_id),
     ).fetchone()
     if role_assignment is None:
         connection.execute(
             "INSERT INTO example_insurance.workflow_role_assignments "
-            "(role_assignment_id, participant_id, role) VALUES (%s, %s, 'broker')",
-            (uuid4(), participant_id),
+            "(role_assignment_id, participant_id, party_id, membership_id, role) "
+            "VALUES (%s, %s, %s, %s, 'broker')",
+            (uuid4(), participant_id, value.party_id, membership_id),
         )
     return ProvisionedAuthority(
         identifier_id=identifier_id,
@@ -197,21 +201,27 @@ def revoke_authority(
         ).fetchone()
     elif target == "membership":
         row = connection.execute(
-            "UPDATE example_insurance.organization_memberships AS membership "
-            "SET revoked_at = clock_timestamp() WHERE membership.membership_id = ("
-            "SELECT participant.membership_id FROM "
-            "example_insurance.workflow_participants AS participant "
-            "JOIN example_insurance.workflow_role_assignments AS role "
-            "ON role.participant_id = participant.participant_id "
-            "JOIN example_insurance.organization_memberships AS linked_membership "
-            "ON linked_membership.membership_id = participant.membership_id "
-            "AND linked_membership.party_id = participant.party_id "
+            "WITH target AS (SELECT role.role_assignment_id, role.membership_id FROM "
+            "example_insurance.workflow_role_assignments AS role "
+            "JOIN example_insurance.workflow_participants AS participant "
+            "ON participant.participant_id = role.participant_id "
+            "AND participant.party_id = role.party_id "
+            "JOIN example_insurance.organization_memberships AS membership "
+            "ON membership.membership_id = role.membership_id "
+            "AND membership.party_id = role.party_id "
             "WHERE participant.workflow_id = %s AND participant.party_id = %s "
             "AND role.role = 'broker' AND role.revoked_at IS NULL "
-            "AND linked_membership.revoked_at IS NULL "
-            "ORDER BY participant.assigned_at, participant.participant_id "
-            "LIMIT 1 FOR UPDATE OF participant, role, linked_membership) "
-            "RETURNING membership_id",
+            "AND membership.revoked_at IS NULL "
+            "ORDER BY role.assigned_at, role.role_assignment_id LIMIT 1 "
+            "FOR UPDATE OF participant, role, membership), revoked_role AS ("
+            "UPDATE example_insurance.workflow_role_assignments AS role "
+            "SET revoked_at = clock_timestamp() FROM target "
+            "WHERE role.role_assignment_id = target.role_assignment_id "
+            "RETURNING target.membership_id) "
+            "UPDATE example_insurance.organization_memberships AS membership "
+            "SET revoked_at = clock_timestamp() FROM revoked_role "
+            "WHERE membership.membership_id = revoked_role.membership_id "
+            "RETURNING membership.membership_id",
             (workflow_id, party_id),
         ).fetchone()
     else:
@@ -264,9 +274,9 @@ def lock_authority(
     broker_authority = connection.execute(
         "SELECT p.participant_id FROM example_insurance.workflow_participants AS p "
         "JOIN example_insurance.workflow_role_assignments AS r "
-        "ON r.participant_id = p.participant_id "
+        "ON r.participant_id = p.participant_id AND r.party_id = p.party_id "
         "JOIN example_insurance.organization_memberships AS m "
-        "ON m.membership_id = p.membership_id AND m.party_id = p.party_id "
+        "ON m.membership_id = r.membership_id AND m.party_id = r.party_id "
         "JOIN example_insurance.parties AS person ON person.party_id = p.party_id "
         "AND person.party_kind = 'person' "
         "JOIN example_insurance.parties AS organization "

@@ -43,20 +43,27 @@ CREATE TABLE example_insurance.workflow_participants (
     participant_id uuid PRIMARY KEY,
     workflow_id uuid NOT NULL REFERENCES example_insurance.renewal_workflows(workflow_id),
     party_id uuid NOT NULL REFERENCES example_insurance.parties(party_id),
-    membership_id uuid NOT NULL,
     assigned_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-    FOREIGN KEY (membership_id, party_id)
-        REFERENCES example_insurance.organization_memberships(membership_id, party_id),
+    UNIQUE (participant_id, party_id),
     UNIQUE (workflow_id, party_id)
 );
 
 CREATE TABLE example_insurance.workflow_role_assignments (
     role_assignment_id uuid PRIMARY KEY,
-    participant_id uuid NOT NULL
-        REFERENCES example_insurance.workflow_participants(participant_id),
+    participant_id uuid NOT NULL,
+    party_id uuid NOT NULL,
+    membership_id uuid,
     role text NOT NULL CHECK (role IN ('broker', 'reporter', 'policyholder', 'claimant')),
     assigned_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-    revoked_at timestamptz
+    revoked_at timestamptz,
+    CHECK (
+        (role = 'broker' AND membership_id IS NOT NULL)
+        OR (role <> 'broker' AND membership_id IS NULL)
+    ),
+    FOREIGN KEY (participant_id, party_id)
+        REFERENCES example_insurance.workflow_participants(participant_id, party_id),
+    FOREIGN KEY (membership_id, party_id)
+        REFERENCES example_insurance.organization_memberships(membership_id, party_id)
 );
 
 CREATE UNIQUE INDEX one_current_workflow_role
@@ -71,13 +78,30 @@ CREATE TABLE example_insurance.protected_commands (
     purpose text NOT NULL CHECK (purpose = 'renewal.read_approved_details'),
     approval_grant_id uuid NOT NULL REFERENCES example_insurance.approval_grants(approval_grant_id),
     state text NOT NULL CHECK (state IN ('waiting', 'authorized', 'rejected')),
-    outcome text,
+    outcome text CHECK (
+        outcome IN (
+            'authorized', 'approval_required', 'authority_revoked',
+            'identifier_revoked', 'workflow_closed', 'wrong_party',
+            'wrong_purpose', 'wrong_thread', 'verification_expired',
+            'verification_delivery_failed', 'verification_attempts_exhausted'
+        )
+    ),
     authorized_delivery_id uuid REFERENCES openmagic_runtime.deliveries(delivery_id),
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     resolved_at timestamptz,
     CHECK (
-        (state = 'waiting' AND outcome IS NULL AND resolved_at IS NULL)
-        OR (state <> 'waiting' AND outcome IS NOT NULL AND resolved_at IS NOT NULL)
+        (
+            state = 'waiting' AND outcome IS NULL
+            AND authorized_delivery_id IS NULL AND resolved_at IS NULL
+        )
+        OR (
+            state = 'authorized' AND outcome = 'authorized'
+            AND authorized_delivery_id IS NOT NULL AND resolved_at IS NOT NULL
+        )
+        OR (
+            state = 'rejected' AND outcome <> 'authorized'
+            AND authorized_delivery_id IS NULL AND resolved_at IS NOT NULL
+        )
     ),
     UNIQUE (protected_command_id, party_id, thread_id, workflow_id, purpose)
 );

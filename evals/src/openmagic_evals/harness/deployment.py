@@ -156,11 +156,14 @@ class TestDeployment:
             worker_arguments.extend(["--email-provider-url", self.email_provider_url])
         if role == "workflow-worker":
             secret_path = self.working_directory / "verification-code-secret"
-            secret_path.write_text(
-                self.verification_code_secret or _SYNTHETIC_VERIFICATION_SECRET,
-                encoding="utf-8",
+            descriptor = os.open(
+                secret_path,
+                os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW,
+                0o600,
             )
-            secret_path.chmod(0o600)
+            os.fchmod(descriptor, 0o600)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as secret_file:
+                secret_file.write(self.verification_code_secret or _SYNTHETIC_VERIFICATION_SECRET)
             worker_arguments.extend(["--verification-code-secret-file", str(secret_path)])
         command = [
             str(script),

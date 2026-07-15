@@ -222,8 +222,6 @@ class AttemptObservationDispatcher:
         *,
         routes: Iterable[AttemptRoute],
         recoveries: Iterable[AttemptRecovery],
-        effects: RenewalEffectRoute,
-        ordinary: OrdinaryRenewalRoute,
     ) -> None:
         self._routes: dict[str, AttemptRoute] = {}
         for route in routes:
@@ -232,8 +230,6 @@ class AttemptObservationDispatcher:
                     raise ValueError(f"Duplicate Attempt route: {template_key}")
                 self._routes[template_key] = route
         self._recoveries = tuple(recoveries)
-        self._effects = effects
-        self._ordinary = ordinary
 
     def execution_input(
         self,
@@ -263,29 +259,6 @@ class AttemptObservationDispatcher:
 
     def recover_expired(self) -> bool:
         return any(recovery.recover_expired() for recovery in self._recoveries)
-
-    def authorize_dispatch(
-        self, *, attempt: ClaimedAttempt, worker_id: str
-    ) -> CommandReceipt[ExternalEffectPermit]:
-        return self._effects.authorize_dispatch(attempt=attempt, worker_id=worker_id)
-
-    def accept_effect_observation(
-        self, command: AcceptRenewalEffectObservation
-    ) -> CommandReceipt[WorkflowAttemptResult]:
-        return self._effects.accept_effect_observation(command)
-
-    def submit_ordinary_observation(
-        self,
-        *,
-        attempt: ClaimedAttempt,
-        worker_id: str,
-        observation: dict[str, Any],
-    ) -> WorkflowAttemptResult:
-        return self._ordinary.accept(
-            attempt=attempt,
-            worker_id=worker_id,
-            observation=observation,
-        )
 
     def _route(self, attempt: ClaimedAttempt) -> AttemptRoute:
         try:

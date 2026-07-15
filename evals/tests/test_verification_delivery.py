@@ -152,6 +152,34 @@ def test_verification_delivery_retry_recovers_through_fresh_attempt() -> None:
         assert accepted.result.verification_outcome == "verified"
 
 
+def test_public_observation_submission_uses_the_verification_attempt_route() -> None:
+    with renewal_context(verification_code_secret=b"issue-70-public-attempt-route") as (
+        _,
+        application,
+        threads,
+    ):
+        scenario = issue_verification_challenge(application, threads, run_workflow=False)
+        challenge_id = scenario.challenge_receipt.result.challenge_id
+        assert challenge_id is not None
+        claimed = application.claim_workflow_attempt(
+            worker_id="public-route-worker",
+            claim_request_id=uuid4(),
+        )
+        assert claimed is not None
+
+        result = application.submit_workflow_observation(
+            attempt=claimed,
+            worker_id="public-route-worker",
+            observation={"challenge_id": str(challenge_id)},
+        )
+        delivered = application.run_delivery_worker_once(worker_id="public-route-delivery")
+
+        assert result.template_key == "deliver_verification_challenge"
+        assert delivered is not None
+        assert delivered.thread_id == scenario.identifier_thread_id
+        assert threads.read(scenario.identifier_thread_id).messages
+
+
 def test_verification_attempt_recovers_after_worker_loss_from_fresh_application() -> None:
     secret = b"issue-70-attempt-restart"
     with renewal_context(verification_code_secret=secret) as (

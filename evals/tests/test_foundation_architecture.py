@@ -173,6 +173,7 @@ def test_verification_authority_models_participation_and_roles_separately() -> N
 
     assert "role text" not in participant_definition
     assert "revoked_at" not in participant_definition
+    assert "membership_id" not in participant_definition
     assert "UNIQUE (workflow_id, party_id)" in participant_definition
     assert "CREATE TABLE example_insurance.workflow_role_assignments" in migration
 
@@ -187,6 +188,9 @@ def test_workflow_worker_delegates_typed_attempt_routes_without_template_branche
     assert "send_renewal_email" not in worker_source
     assert "reconcile_renewal_email" not in worker_source
     assert "verification_attempts" not in worker_source
+    assert "CommandReceipt" not in worker_source
+    assert "ExternalEffectPermit" not in worker_source
+    assert "submit_ordinary_observation" not in worker_source
     assert "renewal_command_dispatcher" not in registry_source
 
 

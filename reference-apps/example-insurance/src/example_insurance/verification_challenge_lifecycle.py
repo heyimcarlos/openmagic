@@ -12,11 +12,9 @@ from psycopg import Connection
 from example_insurance.verification_challenge_records import (
     DurableChallenge,
     challenge_is_expired,
-    expire_challenge,
     lock_challenge_and_command,
-    mark_challenge_terminal,
     pending_challenge_identities,
-    resolve_protected_command,
+    resolve_terminal_challenge,
 )
 from example_insurance.verification_commands import ProtectedOutcome
 from example_insurance.verification_workflow_records import verification_delivery_identity
@@ -89,12 +87,12 @@ class VerificationChallengeLifecycle:
                 or challenge.destination_identifier_id == current_identifier_id
             ):
                 continue
-            mark_challenge_terminal(connection, challenge.challenge_id, "rejected")
-            resolve_protected_command(
+            resolve_terminal_challenge(
                 connection,
+                challenge_id=challenge.challenge_id,
                 protected_command_id=protected.protected_command_id,
+                state="rejected",
                 outcome="identifier_revoked",
-                delivery_id=None,
             )
 
     def reconcile_pending(
@@ -122,28 +120,28 @@ class VerificationChallengeLifecycle:
             if challenge.state != "pending":
                 continue
             if terminal_outcome is not None:
-                mark_challenge_terminal(connection, challenge.challenge_id, "rejected")
-                resolve_protected_command(
+                resolve_terminal_challenge(
                     connection,
+                    challenge_id=challenge.challenge_id,
                     protected_command_id=protected.protected_command_id,
+                    state="rejected",
                     outcome=terminal_outcome,
-                    delivery_id=None,
                 )
             elif challenge_is_expired(connection, challenge):
-                expire_challenge(connection, challenge.challenge_id)
-                resolve_protected_command(
+                resolve_terminal_challenge(
                     connection,
+                    challenge_id=challenge.challenge_id,
                     protected_command_id=protected.protected_command_id,
+                    state="expired",
                     outcome="verification_expired",
-                    delivery_id=None,
                 )
             elif self.delivery_status(connection, challenge) == "failed":
-                mark_challenge_terminal(connection, challenge.challenge_id, "delivery_failed")
-                resolve_protected_command(
+                resolve_terminal_challenge(
                     connection,
+                    challenge_id=challenge.challenge_id,
                     protected_command_id=protected.protected_command_id,
+                    state="delivery_failed",
                     outcome="verification_delivery_failed",
-                    delivery_id=None,
                 )
 
 

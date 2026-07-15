@@ -16,12 +16,10 @@ from example_insurance.verification_challenge_records import (
     DurableProtectedCommand,
     challenge_is_expired,
     establish_session,
-    expire_challenge,
     lock_challenge_and_command,
-    mark_challenge_terminal,
     read_challenge_identity,
     record_failed_code,
-    resolve_protected_command,
+    resolve_terminal_challenge,
 )
 from example_insurance.verification_codes import VerificationCodes
 from example_insurance.verification_commands import (
@@ -80,39 +78,33 @@ class VerificationSubmissionControl:
         if challenge.state != "pending":
             return self._terminal_result(command, challenge, protected)
         if challenge_is_expired(connection, challenge):
-            expire_challenge(connection, challenge.challenge_id)
-            resolve_protected_command(
+            resolve_terminal_challenge(
                 connection,
+                challenge_id=challenge.challenge_id,
                 protected_command_id=protected.protected_command_id,
+                state="expired",
                 outcome="verification_expired",
-                delivery_id=None,
             )
             return self._result(command, "expired")
         delivery_status = self._lifecycle.delivery_status(connection, challenge)
         if delivery_status == "failed":
-            mark_challenge_terminal(connection, challenge.challenge_id, "delivery_failed")
-            resolve_protected_command(
+            resolve_terminal_challenge(
                 connection,
+                challenge_id=challenge.challenge_id,
                 protected_command_id=protected.protected_command_id,
+                state="delivery_failed",
                 outcome="verification_delivery_failed",
-                delivery_id=None,
             )
             return self._result(command, "delivery_failed")
         if delivery_status != "delivered":
             return self._result(command, "delivery_unconfirmed")
         if not code_matches:
-            exhausted = record_failed_code(
+            record_failed_code(
                 connection,
                 challenge.challenge_id,
+                protected.protected_command_id,
                 maximum_attempts=MAX_FAILED_CODE_ATTEMPTS,
             )
-            if exhausted:
-                resolve_protected_command(
-                    connection,
-                    protected_command_id=protected.protected_command_id,
-                    outcome="verification_attempts_exhausted",
-                    delivery_id=None,
-                )
             return self._result(command, "invalid_code")
         party_id = UUID(command.actor.identifier)
         authority = lock_authority(
@@ -186,12 +178,12 @@ class VerificationSubmissionControl:
         protected: DurableProtectedCommand,
         protected_outcome: ProtectedOutcome,
     ) -> SubmitVerificationCodeResult:
-        mark_challenge_terminal(connection, challenge.challenge_id, "rejected")
-        resolve_protected_command(
+        resolve_terminal_challenge(
             connection,
+            challenge_id=challenge.challenge_id,
             protected_command_id=protected.protected_command_id,
+            state="rejected",
             outcome=protected_outcome,
-            delivery_id=None,
         )
         return self._result(
             command,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -183,6 +184,25 @@ def test_verification_receipts_and_code_capability_reject_invalid_public_states(
             protected_command_id=uuid4(),
             session_id=None,
             authorized_delivery_id=uuid4(),
+        )
+    invalid_outcome = json.loads('"typo"')
+    with pytest.raises(ValueError, match="invalid outcome"):
+        RequestProtectedRenewalDetailsResult(
+            outcome=invalid_outcome,
+            workflow_id=uuid4(),
+            challenge_id=None,
+            verification_workflow_id=None,
+            verification_instance_id=None,
+            authorized_delivery_id=None,
+        )
+    with pytest.raises(ValueError, match="invalid outcome"):
+        SubmitVerificationCodeResult(
+            verification_outcome=invalid_outcome,
+            protected_outcome=None,
+            challenge_id=uuid4(),
+            protected_command_id=uuid4(),
+            session_id=None,
+            authorized_delivery_id=None,
         )
 
 

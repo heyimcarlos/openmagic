@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from stat import S_IMODE
 
 from openmagic_evals.harness import DeploymentVerifier, TestDeployment
 
@@ -25,6 +26,7 @@ def test_clean_slate_deployment_boots_installed_processes(tmp_path) -> None:
         }
         assert len({process.pid for process in deployment.processes}) == 3
         assert all(process.pid != os.getpid() for process in deployment.processes)
+        assert S_IMODE((tmp_path / "verification-code-secret").stat().st_mode) == 0o600
 
 
 def test_known_bad_control_is_rejected_by_independent_verifier(tmp_path) -> None:

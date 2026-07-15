@@ -36,6 +36,46 @@ VerificationCodeOutcome = Literal[
     "wrong_workflow",
     "wrong_purpose",
 ]
+ProtectedCommandOutcome = Literal[
+    "authorized",
+    "approval_required",
+    "authority_revoked",
+    "identifier_revoked",
+    "workflow_closed",
+    "wrong_party",
+    "wrong_purpose",
+    "wrong_thread",
+    "verification_expired",
+    "verification_delivery_failed",
+    "verification_attempts_exhausted",
+]
+_REQUEST_OUTCOMES = {
+    "authorized",
+    "approval_required",
+    "authority_revoked",
+    "identifier_revoked",
+    "workflow_closed",
+    "wrong_party",
+    "wrong_purpose",
+    "wrong_thread",
+    "verification_required",
+}
+_CODE_OUTCOMES = {
+    "verified",
+    "invalid_code",
+    "expired",
+    "already_used",
+    "delivery_unconfirmed",
+    "delivery_failed",
+    "identifier_revoked",
+    "authority_revoked",
+    "workflow_closed",
+    "wrong_party",
+    "wrong_protected_command",
+    "wrong_thread",
+    "wrong_workflow",
+    "wrong_purpose",
+}
 
 
 @dataclass(frozen=True)
@@ -113,6 +153,8 @@ class RequestProtectedRenewalDetailsResult:
     authorized_delivery_id: UUID | None
 
     def __post_init__(self) -> None:
+        if self.outcome not in _REQUEST_OUTCOMES:
+            raise ValueError("Protected request receipt has an invalid outcome")
         verification_ids = (
             self.challenge_id,
             self.verification_workflow_id,
@@ -167,6 +209,8 @@ class SubmitVerificationCodeResult:
     authorized_delivery_id: UUID | None
 
     def __post_init__(self) -> None:
+        if self.verification_outcome not in _CODE_OUTCOMES:
+            raise ValueError("Verification receipt has an invalid outcome")
         if self.verification_outcome == "verified":
             if (
                 self.protected_outcome != "authorized"
@@ -239,6 +283,7 @@ def validate_code_submission(command: SubmitVerificationCode) -> None:
 
 
 __all__ = [
+    "ProtectedCommandOutcome",
     "ProtectedOutcome",
     "ProvisionVerificationAuthority",
     "ProvisionVerificationAuthorityInput",
