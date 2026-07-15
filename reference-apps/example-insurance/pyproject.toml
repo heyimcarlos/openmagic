@@ -1,0 +1,26 @@
+[project]
+name = "example-insurance"
+version = "0.1.0"
+description = "Example Insurance Application Package for OpenMagic"
+requires-python = ">=3.11,<3.15"
+dependencies = [
+    "openmagic-runtime==0.1.0",
+    "psycopg[binary]>=3.3.0,<4.0.0",
+]
+
+[project.scripts]
+example-insurance-migrate = "example_insurance.migrations:main"
+example-insurance-reset = "example_insurance.reset:main"
+
+[project.entry-points."openmagic.migrations"]
+example_insurance = "example_insurance._persistence:bundle"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/example_insurance"]
+
+[tool.hatch.build]
+include = ["src/example_insurance/**/*.py", "src/example_insurance/**/*.sql"]
