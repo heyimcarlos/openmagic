@@ -9,7 +9,7 @@ The reusable product that executes application-owned durable work through stable
 _Avoid_: Application Package, Reference Application, insurance runtime
 
 **Application Package**:
-The user-owned business definition built on the OpenMagic Runtime. It owns its Commands, Workflow Definitions, qualified Policies, Domain Events, Executor configurations, tools, templates, and completion rules without changing the reusable runtime.
+The user-owned business definition built on the OpenMagic Runtime. It owns its business state, Commands, Workflow Definitions, qualified Policies, Domain Events, Executor configurations, tools, templates, and completion rules without changing the reusable runtime.
 _Avoid_: OpenMagic Runtime, tenant, kernel plugin
 
 **Reference Application**:
