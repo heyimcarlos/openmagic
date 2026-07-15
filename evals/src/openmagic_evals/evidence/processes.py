@@ -21,13 +21,21 @@ from openmagic_evals.evidence.contracts import (
     Correlations,
     DeterministicArtifact,
     DeterministicSummary,
+    ProcessMetrics,
+    QueueDepth,
     canonical_artifact_json,
     parse_artifact,
 )
 from openmagic_evals.evidence.redaction import audit_redaction
 from openmagic_evals.evidence.release import reproducibility_pin
-from openmagic_evals.harness.deployment import ManagedProcess, TestDeployment
+from openmagic_evals.harness.deployment import ManagedProcess, ProcessRole, TestDeployment
 from openmagic_evals.harness.renewal_scenario import prepare_synthetic_renewal_start
+
+_PROCESS_ROLES: tuple[ProcessRole, ...] = (
+    "api",
+    "workflow-worker",
+    "delivery-worker",
+)
 
 
 @dataclass(frozen=True)
@@ -166,6 +174,14 @@ def run_process_release(
             )
         )
     )
+    initial_capacity = {
+        role: sum(process.role == role for process in report.initial_processes)
+        for role in _PROCESS_ROLES
+    }
+    started_processes = {
+        role: sum(process.role == role for process in report.replacement_processes)
+        for role in _PROCESS_ROLES
+    }
     case = ArtifactCase(
         case_id="process.loss-backpressure-recovery",
         case_schema_version=1,
@@ -175,6 +191,23 @@ def run_process_release(
         correlations=Correlations(process_ids=process_ids),
         observation_digests=(digest,),
         verdict=CaseVerdict(status="passed", invariant_violations=()),
+        process_metrics=ProcessMetrics(
+            queued_workflows=report.queued_workflows,
+            initial_queue=QueueDepth(
+                pending_steps=report.initial.pending_steps,
+                pending_deliveries=report.initial.pending_deliveries,
+            ),
+            drained_queue=QueueDepth(
+                pending_steps=report.drained.pending_steps,
+                pending_deliveries=report.drained.pending_deliveries,
+            ),
+            initial_capacity=initial_capacity,
+            started_processes=started_processes,
+            forced_losses={"workflow-worker": 1, "delivery-worker": 1},
+            fresh_interpreters=True,
+            postgresql_only_reconstruction=True,
+            elapsed_ms=report.elapsed_ms,
+        ),
     )
     corpus_digest = (
         "sha256:"

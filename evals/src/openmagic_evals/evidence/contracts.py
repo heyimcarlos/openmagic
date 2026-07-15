@@ -114,6 +114,36 @@ class CaseVerdict(EvidenceModel):
         return self
 
 
+class QueueDepth(EvidenceModel):
+    pending_steps: int = Field(ge=0)
+    pending_deliveries: int = Field(ge=0)
+
+
+class ProcessMetrics(EvidenceModel):
+    queued_workflows: int = Field(gt=0)
+    initial_queue: QueueDepth
+    drained_queue: QueueDepth
+    initial_capacity: dict[Literal["api", "workflow-worker", "delivery-worker"], int]
+    started_processes: dict[Literal["api", "workflow-worker", "delivery-worker"], int]
+    forced_losses: dict[Literal["workflow-worker", "delivery-worker"], int]
+    fresh_interpreters: Literal[True]
+    postgresql_only_reconstruction: Literal[True]
+    elapsed_ms: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def validate_process_evidence(self) -> ProcessMetrics:
+        roles = {"api", "workflow-worker", "delivery-worker"}
+        if set(self.initial_capacity) != roles or set(self.started_processes) != roles:
+            raise ValueError("process evidence must report every independent role")
+        if set(self.forced_losses) != {"workflow-worker", "delivery-worker"}:
+            raise ValueError("process evidence must report both forced Worker losses")
+        if self.initial_queue.pending_steps != self.queued_workflows:
+            raise ValueError("initial Step queue must match the submitted Workflow denominator")
+        if self.drained_queue.pending_steps or self.drained_queue.pending_deliveries:
+            raise ValueError("process evidence must finish with both durable queues drained")
+        return self
+
+
 class ArtifactCase(EvidenceModel):
     case_id: str
     case_schema_version: int = Field(gt=0)
@@ -124,6 +154,7 @@ class ArtifactCase(EvidenceModel):
     correlations: Correlations
     observation_digests: tuple[str, ...]
     verdict: CaseVerdict
+    process_metrics: ProcessMetrics | None = None
 
     @model_validator(mode="after")
     def validate_denominator(self) -> ArtifactCase:
@@ -338,6 +369,8 @@ __all__ = [
     "LiveSmokeArtifact",
     "PlaygroundArtifact",
     "PlaygroundSummary",
+    "ProcessMetrics",
+    "QueueDepth",
     "ReproducibilityPin",
     "artifact_json_schema",
     "canonical_artifact_json",

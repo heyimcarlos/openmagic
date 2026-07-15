@@ -15,6 +15,8 @@ from openmagic_evals.evidence.contracts import (
     Correlations,
     DeterministicArtifact,
     DeterministicSummary,
+    ProcessMetrics,
+    QueueDepth,
     ReproducibilityPin,
     canonical_artifact_json,
     parse_artifact,
@@ -151,6 +153,31 @@ def test_artifact_requires_all_negative_claims() -> None:
             ),
             limitations=("single PostgreSQL deployment shape",),
             negative_claims=REQUIRED_NEGATIVE_CLAIMS[:-1],
+        )
+
+
+def test_process_metrics_require_independent_roles_losses_and_drained_queues() -> None:
+    metrics = ProcessMetrics(
+        queued_workflows=12,
+        initial_queue=QueueDepth(pending_steps=12, pending_deliveries=0),
+        drained_queue=QueueDepth(pending_steps=0, pending_deliveries=0),
+        initial_capacity={"api": 1, "workflow-worker": 1, "delivery-worker": 1},
+        started_processes={"api": 0, "workflow-worker": 4, "delivery-worker": 3},
+        forced_losses={"workflow-worker": 1, "delivery-worker": 1},
+        fresh_interpreters=True,
+        postgresql_only_reconstruction=True,
+        elapsed_ms=250,
+    )
+
+    assert metrics.initial_queue.pending_steps == metrics.queued_workflows
+
+    with pytest.raises(ValueError, match="queues drained"):
+        metrics.model_copy(
+            update={"drained_queue": QueueDepth(pending_steps=0, pending_deliveries=1)}
+        ).model_validate(
+            metrics.model_copy(
+                update={"drained_queue": QueueDepth(pending_steps=0, pending_deliveries=1)}
+            ).model_dump()
         )
 
 
