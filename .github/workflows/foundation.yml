@@ -1,4 +1,4 @@
-name: Runtime foundation
+name: Runtime evidence
 
 on:
   pull_request:
@@ -16,7 +16,7 @@ concurrency:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
         with:
@@ -29,4 +29,36 @@ jobs:
       - run: uv run ruff format --check .
       - run: uv run ruff check .
       - run: uv run ty check packages/openmagic-runtime/src reference-apps/example-insurance/src apps/api/src evals/src
-      - run: uv run pytest
+      - run: uv run ty check packages/openmagic-runtime/tests reference-apps/example-insurance/tests evals/tests
+      - run: mkdir -p .artifacts/issue71
+      - run: uv run openmagic-evidence audit-surface --repository-root .
+      - run: >-
+          uv run openmagic-evidence deterministic
+          --repository-root .
+          --output .artifacts/issue71/deterministic-release.json
+          --timeout-seconds 900
+      - run: >-
+          uv run openmagic-evidence agent-quality
+          --repository-root .
+          --output .artifacts/issue71/agent-quality.json
+      - run: >-
+          uv run openmagic-evidence playground
+          --repository-root .
+          --working-directory .artifacts/issue71/playground
+          --output .artifacts/issue71/playground.json
+      - run: >-
+          uv run openmagic-evidence live-smoke
+          --repository-root .
+          --provider unavailable
+          --model unavailable
+          --endpoint https://unconfigured.invalid/health
+          --configuration-digest sha256:0000000000000000000000000000000000000000000000000000000000000000
+          --synthetic-case-id live.synthetic.unavailable
+          --output .artifacts/issue71/live-smoke.json
+      - run: >-
+          uv run openmagic-evidence claim-report
+          --deterministic .artifacts/issue71/deterministic-release.json
+          --agent-quality .artifacts/issue71/agent-quality.json
+          --live-smoke .artifacts/issue71/live-smoke.json
+          --playground .artifacts/issue71/playground.json
+          --output .artifacts/issue71/claim-report.md
