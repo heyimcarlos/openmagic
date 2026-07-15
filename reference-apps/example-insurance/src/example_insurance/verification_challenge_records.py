@@ -8,11 +8,17 @@ from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
-from openmagic_runtime.delivery import lock_delivery_presentation
 from psycopg import Connection
 from psycopg.rows import dict_row
 
-ChallengeState = Literal["pending", "accepted", "expired", "delivery_failed"]
+ChallengeState = Literal[
+    "pending",
+    "accepted",
+    "expired",
+    "delivery_failed",
+    "attempts_exhausted",
+    "rejected",
+]
 ProtectedCommandState = Literal["waiting", "authorized", "rejected"]
 
 
@@ -25,6 +31,10 @@ def _challenge_state(value: object) -> ChallengeState:
         return "expired"
     if value == "delivery_failed":
         return "delivery_failed"
+    if value == "attempts_exhausted":
+        return "attempts_exhausted"
+    if value == "rejected":
+        return "rejected"
     raise RuntimeError("Verification Challenge has an invalid state")
 
 
@@ -47,6 +57,7 @@ class DurableChallenge:
     protected_workflow_id: UUID
     purpose: str
     destination_identifier_id: UUID
+    destination_thread_id: UUID
     delivery_workflow_id: UUID
     delivery_instance_id: UUID
     state: ChallengeState
@@ -63,6 +74,7 @@ class DurableChallenge:
             protected_workflow_id=UUID(str(record["protected_workflow_id"])),
             purpose=str(record["purpose"]),
             destination_identifier_id=UUID(str(record["destination_identifier_id"])),
+            destination_thread_id=UUID(str(record["destination_thread_id"])),
             delivery_workflow_id=UUID(str(record["delivery_workflow_id"])),
             delivery_instance_id=UUID(str(record["delivery_instance_id"])),
             state=_challenge_state(record["state"]),
@@ -80,6 +92,7 @@ class DurableProtectedCommand:
     purpose: str
     approval_grant_id: UUID
     state: ProtectedCommandState
+    outcome: str | None
 
     @classmethod
     def decode(cls, record: Mapping[str, Any]) -> DurableProtectedCommand:
@@ -91,21 +104,34 @@ class DurableProtectedCommand:
             purpose=str(record["purpose"]),
             approval_grant_id=UUID(str(record["approval_grant_id"])),
             state=_protected_command_state(record["state"]),
+            outcome=str(record["outcome"]) if record["outcome"] is not None else None,
         )
 
 
 @dataclass(frozen=True)
-class ProtectedRenewalDetails:
-    policy_number: str
-    policyholder_name: str
-    renewal_date: str
+class ChallengeIdentity:
+    delivery_instance_id: UUID
+    protected_workflow_id: UUID
+
+    @classmethod
+    def decode(cls, record: Mapping[str, Any]) -> ChallengeIdentity:
+        return cls(
+            delivery_instance_id=UUID(str(record["delivery_instance_id"])),
+            protected_workflow_id=UUID(str(record["protected_workflow_id"])),
+        )
 
 
 @dataclass(frozen=True)
-class PendingChallenge:
+class PendingChallengeIdentity:
     challenge_id: UUID
-    delivery_workflow_id: UUID
     delivery_instance_id: UUID
+
+    @classmethod
+    def decode(cls, record: Mapping[str, Any]) -> PendingChallengeIdentity:
+        return cls(
+            challenge_id=UUID(str(record["challenge_id"])),
+            delivery_instance_id=UUID(str(record["delivery_instance_id"])),
+        )
 
 
 def record_authorized_command(
@@ -140,30 +166,19 @@ def record_authorized_command(
 def active_session(
     connection: Connection[tuple[Any, ...]], *, party_id: UUID, thread_id: UUID
 ) -> UUID | None:
-    row = connection.execute(
-        "SELECT s.session_id FROM example_insurance.verification_sessions AS s "
-        "JOIN example_insurance.party_identifiers AS i ON i.identifier_id = s.identifier_id "
-        "WHERE s.party_id = %s AND s.thread_id = %s AND s.revoked_at IS NULL "
-        "AND s.expires_at > clock_timestamp() AND i.party_id = s.party_id "
-        "AND i.verified_at IS NOT NULL AND i.revoked_at IS NULL "
-        "ORDER BY s.expires_at DESC LIMIT 1 FOR UPDATE OF s, i",
-        (party_id, thread_id),
-    ).fetchone()
-    return UUID(str(row[0])) if row is not None else None
-
-
-def pending_challenge(
-    connection: Connection[tuple[Any, ...]], *, party_id: UUID, thread_id: UUID
-) -> PendingChallenge | None:
-    row = connection.execute(
-        "SELECT challenge_id, delivery_workflow_id, delivery_instance_id FROM "
-        "example_insurance.verification_challenges WHERE party_id = %s AND thread_id = %s "
-        "AND state = 'pending' FOR UPDATE",
-        (party_id, thread_id),
-    ).fetchone()
-    if row is None:
-        return None
-    return PendingChallenge(UUID(str(row[0])), UUID(str(row[1])), UUID(str(row[2])))
+    with connection.cursor(row_factory=dict_row) as cursor:
+        record = cursor.execute(
+            "SELECT s.session_id FROM example_insurance.verification_sessions AS s "
+            "JOIN example_insurance.party_identifiers AS i "
+            "ON i.identifier_id = s.identifier_id "
+            "WHERE s.party_id = %s AND s.thread_id = %s AND s.revoked_at IS NULL "
+            "AND s.expires_at > clock_timestamp() AND i.party_id = s.party_id "
+            "AND i.delivery_thread_id = s.identifier_thread_id "
+            "AND i.verified_at IS NOT NULL AND i.revoked_at IS NULL "
+            "ORDER BY s.expires_at DESC LIMIT 1 FOR UPDATE OF s, i",
+            (party_id, thread_id),
+        ).fetchone()
+    return UUID(str(record["session_id"])) if record is not None else None
 
 
 def record_challenge(
@@ -177,6 +192,7 @@ def record_challenge(
     approval_grant_id: UUID,
     challenge_id: UUID,
     destination_identifier_id: UUID,
+    destination_thread_id: UUID,
     delivery_workflow_id: UUID,
     delivery_instance_id: UUID,
     challenge_ttl_seconds: int,
@@ -197,8 +213,9 @@ def record_challenge(
     connection.execute(
         "INSERT INTO example_insurance.verification_challenges "
         "(challenge_id, protected_command_id, party_id, thread_id, protected_workflow_id, "
-        "purpose, destination_identifier_id, delivery_workflow_id, delivery_instance_id, "
-        "state, expires_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'pending', "
+        "purpose, destination_identifier_id, destination_thread_id, delivery_workflow_id, "
+        "delivery_instance_id, state, expires_at) VALUES "
+        "(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'pending', "
         "clock_timestamp() + (%s * interval '1 second'))",
         (
             challenge_id,
@@ -208,17 +225,27 @@ def record_challenge(
             workflow_id,
             purpose,
             destination_identifier_id,
+            destination_thread_id,
             delivery_workflow_id,
             delivery_instance_id,
             challenge_ttl_seconds,
         ),
     )
-    connection.execute(
-        "INSERT INTO example_insurance.verification_workflows "
-        "(workflow_id, instance_id, challenge_id, protected_workflow_id, lifecycle) "
-        "VALUES (%s, %s, %s, %s, 'active')",
-        (delivery_workflow_id, delivery_instance_id, challenge_id, workflow_id),
-    )
+
+
+def lock_challenge(connection: Connection[tuple[Any, ...]], challenge_id: UUID) -> DurableChallenge:
+    with connection.cursor(row_factory=dict_row) as cursor:
+        record = cursor.execute(
+            "SELECT challenge_id, protected_command_id, party_id, thread_id, "
+            "protected_workflow_id, purpose, destination_identifier_id, "
+            "destination_thread_id, delivery_workflow_id, delivery_instance_id, state, "
+            "failed_attempts, expires_at FROM example_insurance.verification_challenges "
+            "WHERE challenge_id = %s FOR UPDATE",
+            (challenge_id,),
+        ).fetchone()
+    if record is None:
+        raise RuntimeError("Verification Challenge is unavailable")
+    return DurableChallenge.decode(record)
 
 
 def lock_challenge_and_command(
@@ -227,7 +254,7 @@ def lock_challenge_and_command(
     with connection.cursor(row_factory=dict_row) as cursor:
         challenge = cursor.execute(
             "SELECT challenge_id, protected_command_id, party_id, thread_id, "
-            "protected_workflow_id, purpose, destination_identifier_id, "
+            "protected_workflow_id, purpose, destination_identifier_id, destination_thread_id, "
             "delivery_workflow_id, delivery_instance_id, state, failed_attempts, expires_at "
             "FROM example_insurance.verification_challenges WHERE challenge_id = %s FOR UPDATE",
             (challenge_id,),
@@ -236,7 +263,7 @@ def lock_challenge_and_command(
             return None
         protected = cursor.execute(
             "SELECT protected_command_id, workflow_id, thread_id, party_id, purpose, "
-            "approval_grant_id, state FROM example_insurance.protected_commands "
+            "approval_grant_id, state, outcome FROM example_insurance.protected_commands "
             "WHERE protected_command_id = %s FOR UPDATE",
             (challenge["protected_command_id"],),
         ).fetchone()
@@ -247,45 +274,52 @@ def lock_challenge_and_command(
 
 def read_challenge_identity(
     connection: Connection[tuple[Any, ...]], challenge_id: UUID
-) -> tuple[UUID, UUID] | None:
-    row = connection.execute(
-        "SELECT delivery_instance_id, protected_workflow_id FROM "
-        "example_insurance.verification_challenges WHERE challenge_id = %s",
-        (challenge_id,),
-    ).fetchone()
-    if row is None:
-        return None
-    return UUID(str(row[0])), UUID(str(row[1]))
+) -> ChallengeIdentity | None:
+    with connection.cursor(row_factory=dict_row) as cursor:
+        record = cursor.execute(
+            "SELECT delivery_instance_id, protected_workflow_id FROM "
+            "example_insurance.verification_challenges WHERE challenge_id = %s",
+            (challenge_id,),
+        ).fetchone()
+    return ChallengeIdentity.decode(record) if record is not None else None
+
+
+def pending_challenge_identities(
+    connection: Connection[tuple[Any, ...]],
+    *,
+    party_id: UUID,
+    thread_id: UUID | None,
+    protected_workflow_id: UUID,
+) -> tuple[PendingChallengeIdentity, ...]:
+    with connection.cursor(row_factory=dict_row) as cursor:
+        if thread_id is None:
+            records = cursor.execute(
+                "SELECT challenge_id, delivery_instance_id FROM "
+                "example_insurance.verification_challenges WHERE party_id = %s "
+                "AND protected_workflow_id = %s AND state = 'pending' "
+                "ORDER BY created_at, challenge_id",
+                (party_id, protected_workflow_id),
+            ).fetchall()
+        else:
+            records = cursor.execute(
+                "SELECT challenge_id, delivery_instance_id FROM "
+                "example_insurance.verification_challenges WHERE party_id = %s "
+                "AND thread_id = %s AND protected_workflow_id = %s "
+                "AND state = 'pending' ORDER BY created_at, challenge_id",
+                (party_id, thread_id, protected_workflow_id),
+            ).fetchall()
+    return tuple(PendingChallengeIdentity.decode(record) for record in records)
 
 
 def challenge_is_expired(
     connection: Connection[tuple[Any, ...]], challenge: DurableChallenge
 ) -> bool:
-    row = connection.execute(
-        "SELECT %s <= clock_timestamp()",
-        (challenge.expires_at,),
-    ).fetchone()
-    return row is None or bool(row[0])
-
-
-def challenge_delivery_confirmed(
-    connection: Connection[tuple[Any, ...]], challenge_id: UUID
-) -> bool:
-    row = connection.execute(
-        "SELECT v.delivery_event_id, c.thread_id FROM "
-        "example_insurance.verification_workflows AS v "
-        "JOIN example_insurance.verification_challenges AS c "
-        "ON c.challenge_id = v.challenge_id WHERE v.challenge_id = %s",
-        (challenge_id,),
-    ).fetchone()
-    if row is None or row[0] is None:
-        return False
-    presentation = lock_delivery_presentation(
-        connection,
-        domain_event_id=UUID(str(row[0])),
-        thread_id=UUID(str(row[1])),
-    )
-    return presentation is not None and presentation.status == "delivered"
+    with connection.cursor(row_factory=dict_row) as cursor:
+        record = cursor.execute(
+            "SELECT %s <= clock_timestamp() AS expired",
+            (challenge.expires_at,),
+        ).fetchone()
+    return record is None or bool(record["expired"])
 
 
 def expire_challenge(connection: Connection[tuple[Any, ...]], challenge_id: UUID) -> None:
@@ -296,11 +330,32 @@ def expire_challenge(connection: Connection[tuple[Any, ...]], challenge_id: UUID
     )
 
 
-def record_failed_code(connection: Connection[tuple[Any, ...]], challenge_id: UUID) -> None:
+def record_failed_code(
+    connection: Connection[tuple[Any, ...]],
+    challenge_id: UUID,
+    *,
+    maximum_attempts: int,
+) -> bool:
+    with connection.cursor(row_factory=dict_row) as cursor:
+        record = cursor.execute(
+            "UPDATE example_insurance.verification_challenges SET failed_attempts = "
+            "LEAST(failed_attempts + 1, %s), state = CASE WHEN failed_attempts + 1 >= %s "
+            "THEN 'attempts_exhausted' ELSE state END "
+            "WHERE challenge_id = %s AND state = 'pending' RETURNING state",
+            (maximum_attempts, maximum_attempts, challenge_id),
+        ).fetchone()
+    return record is not None and record["state"] == "attempts_exhausted"
+
+
+def mark_challenge_terminal(
+    connection: Connection[tuple[Any, ...]],
+    challenge_id: UUID,
+    state: Literal["delivery_failed", "rejected"],
+) -> None:
     connection.execute(
-        "UPDATE example_insurance.verification_challenges SET failed_attempts = "
-        "LEAST(failed_attempts + 1, 5) WHERE challenge_id = %s AND state = 'pending'",
-        (challenge_id,),
+        "UPDATE example_insurance.verification_challenges SET state = %s "
+        "WHERE challenge_id = %s AND state = 'pending'",
+        (state, challenge_id),
     )
 
 
@@ -318,8 +373,8 @@ def establish_session(
     )
     connection.execute(
         "INSERT INTO example_insurance.verification_sessions "
-        "(session_id, challenge_id, party_id, thread_id, identifier_id, expires_at) "
-        "VALUES (%s, %s, %s, %s, %s, "
+        "(session_id, challenge_id, party_id, thread_id, identifier_id, "
+        "identifier_thread_id, expires_at) VALUES (%s, %s, %s, %s, %s, %s, "
         "clock_timestamp() + (%s * interval '1 second'))",
         (
             session_id,
@@ -327,23 +382,11 @@ def establish_session(
             challenge.party_id,
             challenge.thread_id,
             challenge.destination_identifier_id,
+            challenge.destination_thread_id,
             session_ttl_seconds,
         ),
     )
     return session_id
-
-
-def renewal_details(
-    connection: Connection[tuple[Any, ...]], workflow_id: UUID
-) -> ProtectedRenewalDetails:
-    row = connection.execute(
-        "SELECT policy_number, policyholder_name, renewal_date FROM "
-        "example_insurance.renewal_workflows WHERE workflow_id = %s",
-        (workflow_id,),
-    ).fetchone()
-    if row is None:
-        raise RuntimeError("Protected renewal details are unavailable")
-    return ProtectedRenewalDetails(str(row[0]), str(row[1]), str(row[2]))
 
 
 def resolve_protected_command(
@@ -363,21 +406,21 @@ def resolve_protected_command(
 
 
 __all__ = [
+    "ChallengeIdentity",
     "DurableChallenge",
     "DurableProtectedCommand",
-    "PendingChallenge",
-    "ProtectedRenewalDetails",
+    "PendingChallengeIdentity",
     "active_session",
-    "challenge_delivery_confirmed",
     "challenge_is_expired",
     "establish_session",
     "expire_challenge",
+    "lock_challenge",
     "lock_challenge_and_command",
-    "pending_challenge",
+    "mark_challenge_terminal",
+    "pending_challenge_identities",
     "read_challenge_identity",
     "record_authorized_command",
     "record_challenge",
     "record_failed_code",
-    "renewal_details",
     "resolve_protected_command",
 ]

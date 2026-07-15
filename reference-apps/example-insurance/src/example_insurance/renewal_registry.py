@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
-from openmagic_runtime.commands import CommandDispatcher, CommandRegistryBuilder
+from openmagic_runtime.commands import CommandRegistryBuilder
 from psycopg import Connection
 
 from example_insurance.renewal_commands import (
@@ -114,13 +114,6 @@ def _decode_attempt_result(payload: dict[str, Any]) -> WorkflowAttemptResult:
     )
 
 
-def renewal_command_dispatcher(
-    *, database_url: str, handlers: RenewalCommandHandlers
-) -> CommandDispatcher:
-    registrations = register_renewal_commands(CommandRegistryBuilder(), handlers).build()
-    return CommandDispatcher(database_url=database_url, registrations=registrations)
-
-
 def register_renewal_commands(
     builder: CommandRegistryBuilder, handlers: RenewalCommandHandlers
 ) -> CommandRegistryBuilder:
@@ -194,5 +187,4 @@ def register_renewal_commands(
 __all__ = [
     "RenewalCommandHandlers",
     "register_renewal_commands",
-    "renewal_command_dispatcher",
 ]

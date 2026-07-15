@@ -51,17 +51,22 @@ def prepare_renewal_approval(
     threads: ThreadStore,
     *,
     deliver: bool = True,
+    actor: Actor | None = None,
+    thread_id: UUID | None = None,
 ) -> tuple[StartRenewalOutreach, Actor]:
     """Start a renewal and advance it to its durable approval Wait."""
-    thread = threads.create(CreateThread(uuid4(), "email", f"broker-{uuid4()}"))
-    actor = Actor(kind="party", identifier=str(uuid4()))
+    if thread_id is None:
+        thread = threads.create(CreateThread(uuid4(), "email", f"broker-{uuid4()}"))
+        thread_id = thread.thread_id
+    if actor is None:
+        actor = Actor(kind="party", identifier=str(uuid4()))
     command = StartRenewalOutreach(
         command_id=uuid4(),
         actor=actor,
         cause=Cause(kind="message", identifier=str(uuid4())),
         input=StartRenewalOutreachInput(
             workflow_id=uuid4(),
-            thread_id=thread.thread_id,
+            thread_id=thread_id,
             policy_id=uuid4(),
             policy_number="OM-69",
             policyholder_name="Avery Chen",

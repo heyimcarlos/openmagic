@@ -13,6 +13,12 @@ from openmagic_runtime.kernel.work import ClaimedAttempt, KernelWork
 from psycopg import Connection
 
 from example_insurance.renewal_commands import WorkflowAttemptResult
+from example_insurance.verification_authority_records import lock_identifier_destination
+from example_insurance.verification_challenge_records import (
+    lock_challenge,
+    mark_challenge_terminal,
+    resolve_protected_command,
+)
 from example_insurance.verification_codes import VerificationCodes
 from example_insurance.verification_policy import (
     VERIFICATION_ATTEMPT_RETRY_POLICY,
@@ -49,10 +55,37 @@ class VerificationAttemptControl:
             observation=observation,
         )
         workflow = lock_verification_attempt(connection, required.instance_id)
-        challenge = workflow.challenge
+        challenge = lock_challenge(connection, workflow.challenge_id)
         if observation != {"challenge_id": str(challenge.challenge_id)}:
             raise RuntimeError("Verification delivery observation conflicts with its Challenge")
         if workflow.lifecycle == "completed":
+            return self._result(attempt)
+        if challenge.state != "pending":
+            KernelControl(connection).fail(
+                required,
+                failure={"class": "verification_challenge_terminal"},
+            )
+            fail_verification_workflow(connection, workflow_id=workflow.workflow_id)
+            return self._result(attempt)
+        destination = lock_identifier_destination(connection, party_id=challenge.party_id)
+        if (
+            destination is None
+            or destination.identifier_id != challenge.destination_identifier_id
+            or destination.party_id != challenge.party_id
+            or destination.delivery_thread_id != challenge.destination_thread_id
+        ):
+            KernelControl(connection).fail(
+                required,
+                failure={"class": "verification_identifier_unavailable"},
+            )
+            fail_verification_workflow(connection, workflow_id=workflow.workflow_id)
+            mark_challenge_terminal(connection, challenge.challenge_id, "rejected")
+            resolve_protected_command(
+                connection,
+                protected_command_id=challenge.protected_command_id,
+                outcome="identifier_revoked",
+                delivery_id=None,
+            )
             return self._result(attempt)
         event_id = record_verification_event(
             connection,
@@ -67,8 +100,8 @@ class VerificationAttemptControl:
         code = self._codes.derive(challenge.challenge_id)
         delivery = DeliveryControl(connection).create(
             domain_event_id=event_id,
-            thread_id=challenge.thread_id,
-            audience={"kind": "party", "identifier": str(challenge.party_id)},
+            thread_id=challenge.destination_thread_id,
+            audience={"kind": "email", "identifier": destination.canonical_email},
             message_author={"kind": "system", "identifier": "example-insurance"},
             content_descriptor={
                 "template_key": "example_insurance.verification_code.v1",
@@ -106,6 +139,7 @@ class VerificationAttemptControl:
             if required is None:
                 continue
             workflow = lock_verification_attempt(connection, required.instance_id)
+            challenge = lock_challenge(connection, workflow.challenge_id)
             if required.attempt_number < VERIFICATION_ATTEMPT_RETRY_POLICY.max_attempts:
                 KernelControl(connection).retry(required)
             else:
@@ -116,7 +150,13 @@ class VerificationAttemptControl:
                 fail_verification_workflow(
                     connection,
                     workflow_id=workflow.workflow_id,
-                    challenge_id=workflow.challenge.challenge_id,
+                )
+                mark_challenge_terminal(connection, challenge.challenge_id, "delivery_failed")
+                resolve_protected_command(
+                    connection,
+                    protected_command_id=challenge.protected_command_id,
+                    outcome="verification_delivery_failed",
+                    delivery_id=None,
                 )
             return True
         return False

@@ -112,6 +112,16 @@ from example_insurance.verification_registry import VerificationCommandHandlers
 from example_insurance.verification_workflow_records import (
     has_active_verification_workflows,
 )
+from example_insurance.workflow_attempt_dispatch import (
+    AttemptObservationDispatcher,
+    AttemptRecovery,
+    AttemptRoute,
+    OrdinaryRenewalRoute,
+    RenewalEffectRoute,
+    RenewalReconciliationRoute,
+    TransactionalRecovery,
+    VerificationRoute,
+)
 from example_insurance.workflow_worker_control import WorkflowWorkerControl
 
 
@@ -188,13 +198,18 @@ class ExampleInsurance:
         self._lifecycle_control = RenewalLifecycleControl()
         self._effect_control = RenewalEffectControl()
         self._attempt_control = RenewalAttemptControl(effect_control=self._effect_control)
+        verification_codes = (
+            VerificationCodes(verification_code_secret)
+            if verification_code_secret is not None
+            else None
+        )
         self._verification_control = (
             VerificationControl(
-                codes=VerificationCodes(verification_code_secret),
+                codes=verification_codes,
                 challenge_ttl_seconds=challenge_ttl_seconds,
                 session_ttl_seconds=session_ttl_seconds,
             )
-            if verification_code_secret is not None
+            if verification_codes is not None
             else None
         )
         self._dispatcher: CommandDispatcher = application_command_dispatcher(
@@ -228,14 +243,27 @@ class ExampleInsurance:
                 timeout_seconds=5,
             ),
         }
-        verification_attempts = None
-        if self._verification_control is not None:
+        ordinary_route = OrdinaryRenewalRoute(database_url, self._attempt_control)
+        effect_route = RenewalEffectRoute(self._dispatcher)
+        reconciliation_route = RenewalReconciliationRoute(effect_route)
+        attempt_routes: list[AttemptRoute] = [
+            ordinary_route,
+            effect_route,
+            reconciliation_route,
+        ]
+        recoveries: list[AttemptRecovery] = []
+        if verification_codes is not None:
             executors["example_insurance.verification_delivery.v1"] = DeterministicExecutor(
                 lambda value: {"challenge_id": str(value["challenge_id"])}
             )
-            verification_attempts = VerificationAttemptControl(
-                codes=self._verification_control.codes
+            verification_attempts = VerificationAttemptControl(codes=verification_codes)
+            attempt_routes.append(VerificationRoute(database_url, verification_attempts))
+            recoveries.append(
+                TransactionalRecovery(database_url, verification_attempts.recover_expired)
             )
+        recoveries.append(
+            TransactionalRecovery(database_url, self._attempt_control.recover_expired)
+        )
         if email_provider_url is not None:
             executors.update(
                 {
@@ -250,10 +278,13 @@ class ExampleInsurance:
             )
         self._workers = WorkflowWorkerControl(
             database_url=database_url,
-            dispatcher=self._dispatcher,
             executors=executors,
-            attempts=self._attempt_control,
-            verification_attempts=verification_attempts,
+            attempts=AttemptObservationDispatcher(
+                routes=attempt_routes,
+                recoveries=recoveries,
+                effects=effect_route,
+                ordinary=ordinary_route,
+            ),
         )
 
     def prepare(self) -> None:

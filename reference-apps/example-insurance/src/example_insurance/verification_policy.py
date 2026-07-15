@@ -11,6 +11,7 @@ from example_insurance.verification_authority_records import AuthoritySnapshot
 from example_insurance.verification_commands import ProtectedOutcome, VerificationPurpose
 
 VERIFICATION_ATTEMPT_RETRY_POLICY = RetryPolicy((0, 0))
+MAX_FAILED_CODE_ATTEMPTS = 5
 VERIFICATION_DELIVERY_RETRY_POLICY = DeliveryRetryPolicy(
     version=1,
     max_attempts=3,
@@ -50,6 +51,7 @@ class VerificationPolicy:
 
 
 __all__ = [
+    "MAX_FAILED_CODE_ATTEMPTS",
     "VERIFICATION_ATTEMPT_RETRY_POLICY",
     "VERIFICATION_DELIVERY_RETRY_POLICY",
     "VerificationPolicy",

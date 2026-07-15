@@ -8,7 +8,7 @@ from uuid import UUID, uuid4
 
 import psycopg
 from openmagic_runtime.agents import AgentRuns
-from openmagic_runtime.commands import Actor, Cause, CommandDispatcher, CommandReceipt
+from openmagic_runtime.commands import CommandReceipt
 from openmagic_runtime.execution import (
     AttemptExecution,
     CancellationToken,
@@ -18,21 +18,13 @@ from openmagic_runtime.execution import (
 )
 from openmagic_runtime.kernel.work import ClaimedAttempt, ClaimWork, claim_once, renew_once
 
-from example_insurance.renewal_attempt_control import RenewalAttemptControl
 from example_insurance.renewal_attempts import prepare_workflow_attempt
 from example_insurance.renewal_commands import (
     AcceptRenewalEffectObservation,
-    AcceptRenewalEffectObservationInput,
-    AuthorizeRenewalEmailDispatch,
-    AuthorizeRenewalEmailDispatchInput,
-    RenewalEffectObservation,
     WorkflowAttemptResult,
-    dispatch_command_id,
-    effect_observation_command_id,
 )
 from example_insurance.renewal_effect_types import ExternalEffectPermit
-from example_insurance.renewal_effects import committed_permit_execution_input
-from example_insurance.verification_attempt_control import VerificationAttemptControl
+from example_insurance.workflow_attempt_dispatch import AttemptObservationDispatcher
 
 
 class WorkflowWorkerControl:
@@ -40,39 +32,25 @@ class WorkflowWorkerControl:
         self,
         *,
         database_url: str,
-        dispatcher: CommandDispatcher,
         executors: dict[str, Executor],
-        attempts: RenewalAttemptControl,
-        verification_attempts: VerificationAttemptControl | None = None,
+        attempts: AttemptObservationDispatcher,
     ) -> None:
         self._database_url = database_url
-        self._dispatcher = dispatcher
         self._executors = executors
         self._attempts = attempts
-        self._verification_attempts = verification_attempts
 
     def authorize_dispatch(
         self, *, attempt: ClaimedAttempt, worker_id: str
     ) -> CommandReceipt[ExternalEffectPermit]:
-        return self._dispatcher.execute(
-            command_type="renewal.authorize_email_dispatch",
-            schema_version=1,
-            command=AuthorizeRenewalEmailDispatch(
-                command_id=dispatch_command_id(attempt.attempt_id),
-                actor=Actor("system", worker_id),
-                cause=Cause("attempt", str(attempt.attempt_id)),
-                input=AuthorizeRenewalEmailDispatchInput(attempt, worker_id),
-            ),
+        return self._attempts.authorize_dispatch(
+            attempt=attempt,
+            worker_id=worker_id,
         )
 
     def accept_effect_observation(
         self, command: AcceptRenewalEffectObservation
     ) -> CommandReceipt[WorkflowAttemptResult]:
-        return self._dispatcher.execute(
-            command_type="renewal.accept_effect_observation",
-            schema_version=1,
-            command=command,
-        )
+        return self._attempts.accept_effect_observation(command)
 
     def run_once(
         self, *, worker_id: str, worker_shutdown: Event | None = None
@@ -88,13 +66,7 @@ class WorkflowWorkerControl:
         )
 
     def recover_expired(self) -> bool:
-        with psycopg.connect(self._database_url) as connection, connection.transaction():
-            if (
-                self._verification_attempts is not None
-                and self._verification_attempts.recover_expired(connection)
-            ):
-                return True
-            return self._attempts.recover_expired(connection)
+        return self._attempts.recover_expired()
 
     def claim(self, *, worker_id: str, claim_request_id: UUID) -> ClaimedAttempt | None:
         return claim_once(
@@ -125,10 +97,11 @@ class WorkflowWorkerControl:
                 worker_id,
                 prepared.replay_observation,
             )
-        execution_input = durable_attempt.input
-        if durable_attempt.template_key == "send_renewal_email":
-            permit = self.authorize_dispatch(attempt=durable_attempt, worker_id=worker_id)
-            execution_input = committed_permit_execution_input(permit)
+        execution_input = self._attempts.execution_input(
+            attempt=durable_attempt,
+            worker_id=worker_id,
+            default=durable_attempt.input,
+        )
         executor = self._executors[durable_attempt.executor_key]
         try:
             observation = execute_with_renewable_authority(
@@ -167,13 +140,11 @@ class WorkflowWorkerControl:
         worker_id: str,
         observation: dict[str, Any],
     ) -> WorkflowAttemptResult:
-        with psycopg.connect(self._database_url) as connection, connection.transaction():
-            return self._attempts.accept_observation(
-                connection,
-                attempt=attempt,
-                worker_id=worker_id,
-                observation=observation,
-            )
+        return self._attempts.submit_ordinary_observation(
+            attempt=attempt,
+            worker_id=worker_id,
+            observation=observation,
+        )
 
     def _accept_replay(
         self,
@@ -181,42 +152,11 @@ class WorkflowWorkerControl:
         worker_id: str,
         observation: dict[str, Any],
     ) -> WorkflowAttemptResult:
-        if attempt.template_key == VerificationAttemptControl.template_key:
-            if self._verification_attempts is None:
-                raise RuntimeError("Verification delivery support is not configured")
-            with psycopg.connect(self._database_url) as connection, connection.transaction():
-                return self._verification_attempts.accept_observation(
-                    connection,
-                    attempt=attempt,
-                    worker_id=worker_id,
-                    observation=observation,
-                )
-        if attempt.template_key in {"send_renewal_email", "reconcile_renewal_email"}:
-            return self._commit_effect_observation(attempt, worker_id, observation)
-        return self.submit_observation(
+        return self._attempts.accept(
             attempt=attempt,
             worker_id=worker_id,
             observation=observation,
         )
-
-    def _commit_effect_observation(
-        self,
-        attempt: ClaimedAttempt,
-        worker_id: str,
-        observation: dict[str, Any],
-    ) -> WorkflowAttemptResult:
-        value = RenewalEffectObservation(
-            classification=observation["classification"],
-            provider_request_id=str(observation["provider_request_id"]),
-        )
-        return self.accept_effect_observation(
-            AcceptRenewalEffectObservation(
-                command_id=effect_observation_command_id(attempt.attempt_id),
-                actor=Actor("system", worker_id),
-                cause=Cause("attempt", str(attempt.attempt_id)),
-                input=AcceptRenewalEffectObservationInput(attempt, worker_id, value),
-            )
-        ).result
 
     def _record_agent_failure(
         self,

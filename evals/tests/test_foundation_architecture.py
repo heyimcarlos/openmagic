@@ -135,6 +135,45 @@ def test_application_sql_does_not_reference_private_runtime_tables() -> None:
     assert violations == []
 
 
+def test_verification_persistence_has_canonical_sql_owners_and_named_decoders() -> None:
+    application_root = ROOT / "reference-apps/example-insurance/src/example_insurance"
+    challenge_path = application_root / "verification_challenge_records.py"
+    workflow_path = application_root / "verification_workflow_records.py"
+    authority_path = application_root / "verification_authority_records.py"
+
+    assert "example_insurance.verification_workflows" not in challenge_path.read_text(
+        encoding="utf-8"
+    )
+    assert "example_insurance.verification_challenges" not in workflow_path.read_text(
+        encoding="utf-8"
+    )
+
+    positional_decodes: list[str] = []
+    for path in (challenge_path, workflow_path, authority_path):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Subscript)
+                and isinstance(node.slice, ast.Constant)
+                and isinstance(node.slice.value, int)
+            ):
+                positional_decodes.append(f"{path.name}:{node.lineno}")
+    assert positional_decodes == []
+
+
+def test_workflow_worker_delegates_typed_attempt_routes_without_template_branches() -> None:
+    application_root = ROOT / "reference-apps/example-insurance/src/example_insurance"
+    worker_source = (application_root / "workflow_worker_control.py").read_text(encoding="utf-8")
+    registry_source = (application_root / "renewal_registry.py").read_text(encoding="utf-8")
+
+    assert "VerificationAttemptControl" not in worker_source
+    assert "deliver_verification_challenge" not in worker_source
+    assert "send_renewal_email" not in worker_source
+    assert "reconcile_renewal_email" not in worker_source
+    assert "verification_attempts" not in worker_source
+    assert "renewal_command_dispatcher" not in registry_source
+
+
 def test_playground_safety_is_verified_through_its_process_interface() -> None:
     environment = {
         "PATH": os.defpath,

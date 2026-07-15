@@ -145,7 +145,7 @@ The typed output of evaluating a Policy. It becomes durable history only when co
 _Avoid_: Domain Event, agent verdict
 
 **Verification Challenge**:
-A durable, single-use request for a Party to prove current control of an on-file identifier through a second channel. It binds one Party, Thread, protected Workflow, purpose, and exact waiting protected Command, expires after 10 minutes, and creates delivery through a typed side-effecting Step in a separate system Workflow. Verification delivery therefore cannot change the protected business Workflow's cancellation or completion semantics.
+A durable, single-use request for a Party to prove current control of an on-file identifier through a second channel. It binds one Party, protected Thread, protected Workflow, purpose, exact waiting protected Command, and the current identifier's distinct delivery Thread. The code is delivered only to the identifier delivery Thread whose Channel Reference represents the on-file identifier, while successful protected-command resumption returns only to the protected Thread. The Challenge expires after 10 minutes and creates delivery through a typed side-effecting Step in a separate system Workflow. Verification delivery therefore cannot change the protected business Workflow's cancellation or completion semantics.
 _Avoid_: Verification tool, global Party verification, Workflow authority grant
 
 **Verification Session**:

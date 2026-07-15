@@ -13,7 +13,6 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from example_insurance.application_event_records import actor_record, cause_record
-from example_insurance.verification_challenge_records import DurableChallenge
 
 VerificationWorkflowLifecycle = Literal["active", "completed", "failed"]
 
@@ -31,35 +30,68 @@ def _workflow_lifecycle(value: object) -> VerificationWorkflowLifecycle:
 @dataclass(frozen=True)
 class VerificationAttemptState:
     workflow_id: UUID
-    challenge: DurableChallenge
+    challenge_id: UUID
     lifecycle: VerificationWorkflowLifecycle
+
+    @classmethod
+    def decode(cls, record: dict[str, Any]) -> VerificationAttemptState:
+        return cls(
+            workflow_id=UUID(str(record["workflow_id"])),
+            challenge_id=UUID(str(record["challenge_id"])),
+            lifecycle=_workflow_lifecycle(record["lifecycle"]),
+        )
+
+
+@dataclass(frozen=True)
+class VerificationDeliveryIdentity:
+    delivery_event_id: UUID | None
+
+    @classmethod
+    def decode(cls, record: dict[str, Any]) -> VerificationDeliveryIdentity:
+        value = record["delivery_event_id"]
+        return cls(delivery_event_id=UUID(str(value)) if value is not None else None)
 
 
 def lock_verification_attempt(
     connection: Connection[tuple[Any, ...]], instance_id: UUID
 ) -> VerificationAttemptState:
     with connection.cursor(row_factory=dict_row) as cursor:
-        workflow = cursor.execute(
+        record = cursor.execute(
             "SELECT workflow_id, challenge_id, lifecycle FROM "
             "example_insurance.verification_workflows WHERE instance_id = %s FOR UPDATE",
             (instance_id,),
         ).fetchone()
-        if workflow is None:
-            raise RuntimeError("Verification Workflow is unavailable")
-        challenge = cursor.execute(
-            "SELECT challenge_id, protected_command_id, party_id, thread_id, "
-            "protected_workflow_id, purpose, destination_identifier_id, "
-            "delivery_workflow_id, delivery_instance_id, state, failed_attempts, expires_at "
-            "FROM example_insurance.verification_challenges WHERE challenge_id = %s FOR UPDATE",
-            (workflow["challenge_id"],),
-        ).fetchone()
-    if challenge is None:
-        raise RuntimeError("Verification Challenge is unavailable")
-    return VerificationAttemptState(
-        workflow_id=UUID(str(workflow["workflow_id"])),
-        challenge=DurableChallenge.decode(challenge),
-        lifecycle=_workflow_lifecycle(workflow["lifecycle"]),
+    if record is None:
+        raise RuntimeError("Verification Workflow is unavailable")
+    return VerificationAttemptState.decode(record)
+
+
+def record_verification_workflow(
+    connection: Connection[tuple[Any, ...]],
+    *,
+    workflow_id: UUID,
+    instance_id: UUID,
+    challenge_id: UUID,
+    protected_workflow_id: UUID,
+) -> None:
+    connection.execute(
+        "INSERT INTO example_insurance.verification_workflows "
+        "(workflow_id, instance_id, challenge_id, protected_workflow_id, lifecycle) "
+        "VALUES (%s, %s, %s, %s, 'active')",
+        (workflow_id, instance_id, challenge_id, protected_workflow_id),
     )
+
+
+def verification_delivery_identity(
+    connection: Connection[tuple[Any, ...]], challenge_id: UUID
+) -> VerificationDeliveryIdentity | None:
+    with connection.cursor(row_factory=dict_row) as cursor:
+        record = cursor.execute(
+            "SELECT delivery_event_id FROM example_insurance.verification_workflows "
+            "WHERE challenge_id = %s FOR UPDATE",
+            (challenge_id,),
+        ).fetchone()
+    return VerificationDeliveryIdentity.decode(record) if record is not None else None
 
 
 def record_verification_event(
@@ -107,46 +139,46 @@ def expired_verification_instances(
     candidates = expired_attempt_instances(connection)
     if not candidates:
         return ()
-    rows = connection.execute(
-        "SELECT instance_id FROM example_insurance.verification_workflows "
-        "WHERE instance_id = ANY(%s) AND lifecycle = 'active' "
-        "ORDER BY created_at, workflow_id",
-        (list(candidates),),
-    ).fetchall()
-    return tuple(UUID(str(row[0])) for row in rows)
+    with connection.cursor(row_factory=dict_row) as cursor:
+        records = cursor.execute(
+            "SELECT instance_id FROM example_insurance.verification_workflows "
+            "WHERE instance_id = ANY(%s) AND lifecycle = 'active' "
+            "ORDER BY created_at, workflow_id",
+            (list(candidates),),
+        ).fetchall()
+    return tuple(UUID(str(record["instance_id"])) for record in records)
 
 
 def has_active_verification_workflows(
     connection: Connection[tuple[Any, ...]],
 ) -> bool:
-    row = connection.execute(
-        "SELECT EXISTS (SELECT 1 FROM example_insurance.verification_workflows "
-        "WHERE lifecycle = 'active')"
-    ).fetchone()
-    return row is not None and bool(row[0])
+    with connection.cursor(row_factory=dict_row) as cursor:
+        record = cursor.execute(
+            "SELECT EXISTS (SELECT 1 FROM example_insurance.verification_workflows "
+            "WHERE lifecycle = 'active') AS active"
+        ).fetchone()
+    return record is not None and bool(record["active"])
 
 
 def fail_verification_workflow(
-    connection: Connection[tuple[Any, ...]], *, workflow_id: UUID, challenge_id: UUID
+    connection: Connection[tuple[Any, ...]], *, workflow_id: UUID
 ) -> None:
     connection.execute(
         "UPDATE example_insurance.verification_workflows SET lifecycle = 'failed', "
         "completed_at = clock_timestamp() WHERE workflow_id = %s AND lifecycle = 'active'",
         (workflow_id,),
     )
-    connection.execute(
-        "UPDATE example_insurance.verification_challenges SET state = 'delivery_failed' "
-        "WHERE challenge_id = %s AND state = 'pending'",
-        (challenge_id,),
-    )
 
 
 __all__ = [
     "VerificationAttemptState",
+    "VerificationDeliveryIdentity",
     "complete_verification_workflow",
     "expired_verification_instances",
     "fail_verification_workflow",
     "has_active_verification_workflows",
     "lock_verification_attempt",
     "record_verification_event",
+    "record_verification_workflow",
+    "verification_delivery_identity",
 ]

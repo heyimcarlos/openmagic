@@ -25,6 +25,7 @@ class AuthoritySnapshot:
     workflow_authority_revoked: bool
     party_exists: bool
     identifier_id: UUID | None
+    identifier_delivery_thread_id: UUID | None
     identifier_current_and_verified: bool
     active_broker_authority: bool
     exact_approval_grant: bool
@@ -35,6 +36,23 @@ class ProvisionedAuthority:
     identifier_id: UUID
     membership_id: UUID
     participant_id: UUID
+
+
+@dataclass(frozen=True)
+class IdentifierDestination:
+    identifier_id: UUID
+    party_id: UUID
+    canonical_email: str
+    delivery_thread_id: UUID
+
+    @classmethod
+    def decode(cls, record: dict[str, Any]) -> IdentifierDestination:
+        return cls(
+            identifier_id=UUID(str(record["identifier_id"])),
+            party_id=UUID(str(record["party_id"])),
+            canonical_email=str(record["canonical_value"]),
+            delivery_thread_id=UUID(str(record["delivery_thread_id"])),
+        )
 
 
 def _renewal_lifecycle(value: object) -> Literal["active", "cancelled", "completed"]:
@@ -50,40 +68,97 @@ def _renewal_lifecycle(value: object) -> Literal["active", "cancelled", "complet
 def provision_authority(
     connection: Connection[tuple[Any, ...]], value: ProvisionVerificationAuthorityInput
 ) -> ProvisionedAuthority:
-    workflow = connection.execute(
-        "SELECT authorized_actor_id FROM example_insurance.renewal_workflows "
-        "WHERE workflow_id = %s FOR UPDATE",
-        (value.workflow_id,),
-    ).fetchone()
-    if workflow is None or str(workflow[0]) != str(value.party_id):
+    with connection.cursor(row_factory=dict_row) as cursor:
+        workflow = cursor.execute(
+            "SELECT authorized_actor_id FROM example_insurance.renewal_workflows "
+            "WHERE workflow_id = %s FOR UPDATE",
+            (value.workflow_id,),
+        ).fetchone()
+    if workflow is None or str(workflow["authorized_actor_id"]) != str(value.party_id):
         raise ValueError("Provisioned Party must be the renewal's authorized Actor")
-    identifier_id = uuid4()
-    membership_id = uuid4()
-    participant_id = uuid4()
     connection.execute(
         "INSERT INTO example_insurance.parties (party_id, party_kind) "
-        "VALUES (%s, 'person'), (%s, 'organization')",
+        "VALUES (%s, 'person'), (%s, 'organization') ON CONFLICT DO NOTHING",
         (value.party_id, value.organization_party_id),
     )
-    connection.execute(
-        "WITH timestamp AS (SELECT clock_timestamp() AS value) "
-        "INSERT INTO example_insurance.party_identifiers "
-        "(identifier_id, party_id, identifier_kind, canonical_value, verified_at, created_at) "
-        "SELECT %s, %s, 'email', %s, value, value FROM timestamp",
-        (identifier_id, value.party_id, value.email.strip().casefold()),
+    canonical_email = value.email.strip().casefold()
+    with connection.cursor(row_factory=dict_row) as cursor:
+        identifier = cursor.execute(
+            "SELECT identifier_id FROM example_insurance.party_identifiers "
+            "WHERE party_id = %s AND identifier_kind = 'email' AND canonical_value = %s "
+            "AND delivery_thread_id = %s AND revoked_at IS NULL FOR UPDATE",
+            (value.party_id, canonical_email, value.delivery_thread_id),
+        ).fetchone()
+    if identifier is None:
+        identifier_id = uuid4()
+        connection.execute(
+            "UPDATE example_insurance.party_identifiers SET revoked_at = clock_timestamp() "
+            "WHERE party_id = %s AND identifier_kind = 'email' AND revoked_at IS NULL",
+            (value.party_id,),
+        )
+        connection.execute(
+            "WITH timestamp AS (SELECT clock_timestamp() AS value) "
+            "INSERT INTO example_insurance.party_identifiers "
+            "(identifier_id, party_id, identifier_kind, canonical_value, "
+            "delivery_thread_id, verified_at, created_at) "
+            "SELECT %s, %s, 'email', %s, %s, value, value FROM timestamp",
+            (identifier_id, value.party_id, canonical_email, value.delivery_thread_id),
+        )
+    else:
+        identifier_id = UUID(str(identifier["identifier_id"]))
+    with connection.cursor(row_factory=dict_row) as cursor:
+        membership = cursor.execute(
+            "SELECT membership_id FROM example_insurance.organization_memberships "
+            "WHERE party_id = %s AND organization_party_id = %s "
+            "AND revoked_at IS NULL FOR UPDATE",
+            (value.party_id, value.organization_party_id),
+        ).fetchone()
+    if membership is None:
+        membership_id = uuid4()
+        connection.execute(
+            "INSERT INTO example_insurance.organization_memberships "
+            "(membership_id, party_id, organization_party_id) VALUES (%s, %s, %s)",
+            (membership_id, value.party_id, value.organization_party_id),
+        )
+    else:
+        membership_id = UUID(str(membership["membership_id"]))
+    with connection.cursor(row_factory=dict_row) as cursor:
+        participant = cursor.execute(
+            "SELECT participant_id FROM example_insurance.workflow_participants "
+            "WHERE workflow_id = %s AND party_id = %s AND membership_id = %s "
+            "AND role = 'broker' AND revoked_at IS NULL FOR UPDATE",
+            (value.workflow_id, value.party_id, membership_id),
+        ).fetchone()
+    if participant is None:
+        participant_id = uuid4()
+        connection.execute(
+            "INSERT INTO example_insurance.workflow_participants "
+            "(participant_id, workflow_id, party_id, membership_id, role) "
+            "VALUES (%s, %s, %s, %s, 'broker')",
+            (participant_id, value.workflow_id, value.party_id, membership_id),
+        )
+    else:
+        participant_id = UUID(str(participant["participant_id"]))
+    return ProvisionedAuthority(
+        identifier_id=identifier_id,
+        membership_id=membership_id,
+        participant_id=participant_id,
     )
-    connection.execute(
-        "INSERT INTO example_insurance.organization_memberships "
-        "(membership_id, party_id, organization_party_id) VALUES (%s, %s, %s)",
-        (membership_id, value.party_id, value.organization_party_id),
-    )
-    connection.execute(
-        "INSERT INTO example_insurance.workflow_participants "
-        "(participant_id, workflow_id, party_id, membership_id, role) "
-        "VALUES (%s, %s, %s, %s, 'broker')",
-        (participant_id, value.workflow_id, value.party_id, membership_id),
-    )
-    return ProvisionedAuthority(identifier_id, membership_id, participant_id)
+
+
+def lock_identifier_destination(
+    connection: Connection[tuple[Any, ...]], *, party_id: UUID
+) -> IdentifierDestination | None:
+    with connection.cursor(row_factory=dict_row) as cursor:
+        record = cursor.execute(
+            "SELECT identifier_id, party_id, canonical_value, delivery_thread_id "
+            "FROM example_insurance.party_identifiers WHERE party_id = %s "
+            "AND identifier_kind = 'email' AND verified_at IS NOT NULL "
+            "AND revoked_at IS NULL ORDER BY created_at DESC, identifier_id DESC "
+            "LIMIT 1 FOR UPDATE",
+            (party_id,),
+        ).fetchone()
+    return IdentifierDestination.decode(record) if record is not None else None
 
 
 def revoke_authority(
@@ -154,7 +229,7 @@ def lock_authority(
     ).fetchone()
     with connection.cursor(row_factory=dict_row) as cursor:
         identifier = cursor.execute(
-            "SELECT identifier_id, verified_at, revoked_at FROM "
+            "SELECT identifier_id, delivery_thread_id, verified_at, revoked_at FROM "
             "example_insurance.party_identifiers WHERE party_id = %s "
             "AND identifier_kind = 'email' ORDER BY created_at DESC, identifier_id "
             "LIMIT 1 FOR UPDATE",
@@ -176,6 +251,9 @@ def lock_authority(
         (approval_grant_id, workflow_id),
     ).fetchone()
     identifier_id = UUID(str(identifier["identifier_id"])) if identifier is not None else None
+    identifier_thread_id = (
+        UUID(str(identifier["delivery_thread_id"])) if identifier is not None else None
+    )
     return AuthoritySnapshot(
         workflow_id=UUID(str(workflow["workflow_id"])),
         instance_id=UUID(str(workflow["instance_id"])),
@@ -185,6 +263,7 @@ def lock_authority(
         workflow_authority_revoked=bool(workflow["authority_revoked"]),
         party_exists=party is not None,
         identifier_id=identifier_id,
+        identifier_delivery_thread_id=identifier_thread_id,
         identifier_current_and_verified=(
             identifier is not None
             and identifier["verified_at"] is not None
@@ -197,8 +276,10 @@ def lock_authority(
 
 __all__ = [
     "AuthoritySnapshot",
+    "IdentifierDestination",
     "ProvisionedAuthority",
     "lock_authority",
+    "lock_identifier_destination",
     "provision_authority",
     "revoke_authority",
 ]

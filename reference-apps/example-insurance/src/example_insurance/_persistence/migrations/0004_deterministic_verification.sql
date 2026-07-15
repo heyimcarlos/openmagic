@@ -9,13 +9,19 @@ CREATE TABLE example_insurance.party_identifiers (
     party_id uuid NOT NULL REFERENCES example_insurance.parties(party_id),
     identifier_kind text NOT NULL CHECK (identifier_kind = 'email'),
     canonical_value text NOT NULL,
+    delivery_thread_id uuid NOT NULL REFERENCES openmagic_runtime.threads(thread_id),
     verified_at timestamptz,
     revoked_at timestamptz,
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-    CHECK (verified_at IS NULL OR verified_at >= created_at)
+    CHECK (verified_at IS NULL OR verified_at >= created_at),
+    UNIQUE (identifier_id, delivery_thread_id, party_id)
 );
 
 CREATE UNIQUE INDEX one_current_party_identifier
+    ON example_insurance.party_identifiers(party_id, identifier_kind)
+    WHERE revoked_at IS NULL;
+
+CREATE UNIQUE INDEX one_current_identifier_value
     ON example_insurance.party_identifiers(identifier_kind, canonical_value)
     WHERE revoked_at IS NULL;
 
@@ -79,11 +85,15 @@ CREATE TABLE example_insurance.verification_challenges (
     purpose text NOT NULL CHECK (purpose = 'renewal.read_approved_details'),
     destination_identifier_id uuid NOT NULL
         REFERENCES example_insurance.party_identifiers(identifier_id),
+    destination_thread_id uuid NOT NULL REFERENCES openmagic_runtime.threads(thread_id),
     delivery_workflow_id uuid NOT NULL UNIQUE,
     delivery_instance_id uuid NOT NULL UNIQUE
         REFERENCES openmagic_runtime.instances(instance_id),
     state text NOT NULL CHECK (
-        state IN ('pending', 'accepted', 'expired', 'delivery_failed')
+        state IN (
+            'pending', 'accepted', 'expired', 'delivery_failed',
+            'attempts_exhausted', 'rejected'
+        )
     ),
     failed_attempts integer NOT NULL DEFAULT 0 CHECK (failed_attempts BETWEEN 0 AND 5),
     expires_at timestamptz NOT NULL,
@@ -98,15 +108,17 @@ CREATE TABLE example_insurance.verification_challenges (
     ) REFERENCES example_insurance.protected_commands (
         protected_command_id, party_id, thread_id, workflow_id, purpose
     ),
-    UNIQUE (challenge_id, party_id, thread_id, destination_identifier_id),
+    FOREIGN KEY (destination_identifier_id, destination_thread_id, party_id)
+        REFERENCES example_insurance.party_identifiers (
+            identifier_id, delivery_thread_id, party_id
+        ),
+    UNIQUE (
+        challenge_id, party_id, thread_id, destination_identifier_id, destination_thread_id
+    ),
     UNIQUE (
         delivery_workflow_id, challenge_id, delivery_instance_id, protected_workflow_id
     )
 );
-
-CREATE UNIQUE INDEX one_pending_challenge_per_party_thread
-    ON example_insurance.verification_challenges(party_id, thread_id)
-    WHERE state = 'pending';
 
 CREATE TABLE example_insurance.verification_workflows (
     workflow_id uuid PRIMARY KEY,
@@ -126,6 +138,12 @@ CREATE TABLE example_insurance.verification_workflows (
     ),
     UNIQUE (workflow_id, challenge_id, instance_id, protected_workflow_id)
 );
+
+CREATE UNIQUE INDEX one_pending_exact_verification_challenge
+    ON example_insurance.verification_challenges(
+        party_id, thread_id, protected_workflow_id, purpose, protected_command_id
+    )
+    WHERE state = 'pending';
 
 CREATE TABLE example_insurance.verification_events (
     event_id uuid PRIMARY KEY,
@@ -152,13 +170,14 @@ CREATE TABLE example_insurance.verification_sessions (
     party_id uuid NOT NULL REFERENCES example_insurance.parties(party_id),
     thread_id uuid NOT NULL REFERENCES openmagic_runtime.threads(thread_id),
     identifier_id uuid NOT NULL REFERENCES example_insurance.party_identifiers(identifier_id),
+    identifier_thread_id uuid NOT NULL REFERENCES openmagic_runtime.threads(thread_id),
     established_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     expires_at timestamptz NOT NULL,
     revoked_at timestamptz,
     CHECK (expires_at > established_at),
-    FOREIGN KEY (challenge_id, party_id, thread_id, identifier_id)
+    FOREIGN KEY (challenge_id, party_id, thread_id, identifier_id, identifier_thread_id)
         REFERENCES example_insurance.verification_challenges (
-            challenge_id, party_id, thread_id, destination_identifier_id
+            challenge_id, party_id, thread_id, destination_identifier_id, destination_thread_id
         )
 );
 

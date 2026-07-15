@@ -26,6 +26,7 @@ VerificationCodeOutcome = Literal[
     "expired",
     "already_used",
     "delivery_unconfirmed",
+    "delivery_failed",
     "identifier_revoked",
     "authority_revoked",
     "workflow_closed",
@@ -43,6 +44,7 @@ class ProvisionVerificationAuthorityInput:
     organization_party_id: UUID
     workflow_id: UUID
     email: str
+    delivery_thread_id: UUID
 
 
 @dataclass(frozen=True)
@@ -103,12 +105,38 @@ class RequestProtectedRenewalDetails:
 
 @dataclass(frozen=True)
 class RequestProtectedRenewalDetailsResult:
-    outcome: ProtectedOutcome | Literal["verification_in_progress", "verification_required"]
+    outcome: ProtectedOutcome | Literal["verification_required"]
     workflow_id: UUID
     challenge_id: UUID | None
     verification_workflow_id: UUID | None
     verification_instance_id: UUID | None
     authorized_delivery_id: UUID | None
+
+    def __post_init__(self) -> None:
+        verification_ids = (
+            self.challenge_id,
+            self.verification_workflow_id,
+            self.verification_instance_id,
+        )
+        if self.outcome == "verification_required":
+            if (
+                any(value is None for value in verification_ids)
+                or self.authorized_delivery_id is not None
+            ):
+                raise ValueError("A verification-required receipt needs exact verification IDs")
+            return
+        if self.outcome == "authorized":
+            if (
+                any(value is not None for value in verification_ids)
+                or self.authorized_delivery_id is None
+            ):
+                raise ValueError("An authorized receipt needs only its authorized Delivery ID")
+            return
+        if (
+            any(value is not None for value in verification_ids)
+            or self.authorized_delivery_id is not None
+        ):
+            raise ValueError("A rejected receipt cannot contain verification or Delivery IDs")
 
 
 @dataclass(frozen=True)
@@ -137,6 +165,25 @@ class SubmitVerificationCodeResult:
     protected_command_id: UUID
     session_id: UUID | None
     authorized_delivery_id: UUID | None
+
+    def __post_init__(self) -> None:
+        if self.verification_outcome == "verified":
+            if (
+                self.protected_outcome != "authorized"
+                or self.session_id is None
+                or self.authorized_delivery_id is None
+            ):
+                raise ValueError("A verified receipt needs assurance and authorized Delivery IDs")
+            return
+        if self.session_id is not None or self.authorized_delivery_id is not None:
+            raise ValueError("A rejected verification receipt cannot contain assurance IDs")
+        required_protected_outcome = {
+            "identifier_revoked": "identifier_revoked",
+            "authority_revoked": "authority_revoked",
+            "workflow_closed": "workflow_closed",
+        }.get(self.verification_outcome)
+        if self.protected_outcome != required_protected_outcome:
+            raise ValueError("A rejected verification receipt has inconsistent outcomes")
 
 
 def _validate_lineage(actor: Actor, cause: Cause) -> None:

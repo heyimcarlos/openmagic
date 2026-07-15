@@ -16,6 +16,7 @@ _DELIVERY_FIELDS = (
     FieldContract("challenge_id", "uuid"),
     FieldContract("protected_workflow_id", "uuid"),
     FieldContract("thread_id", "uuid"),
+    FieldContract("destination_thread_id", "uuid"),
 )
 
 VERIFICATION_DEFINITION = WorkflowDefinition(
