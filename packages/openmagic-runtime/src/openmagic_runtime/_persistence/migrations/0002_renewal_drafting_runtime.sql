@@ -187,7 +187,7 @@ CREATE TABLE openmagic_runtime.agent_runs (
 
 CREATE TABLE openmagic_runtime.deliveries (
     delivery_id uuid PRIMARY KEY,
-    domain_event_id uuid NOT NULL UNIQUE,
+    domain_event_id uuid NOT NULL,
     thread_id uuid NOT NULL REFERENCES openmagic_runtime.threads(thread_id),
     audience jsonb NOT NULL,
     message_author jsonb NOT NULL,

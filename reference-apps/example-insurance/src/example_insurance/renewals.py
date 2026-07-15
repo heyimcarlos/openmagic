@@ -5,11 +5,21 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
+from threading import Event
 from typing import Any
 from uuid import UUID, uuid4
 
 import psycopg
-from openmagic_runtime.agents import AgentRunInput, AgentRuns
+from openmagic_runtime.agents import (
+    AgentAudience,
+    AgentConfiguration,
+    AgentExecutionInput,
+    AgentField,
+    AgentRecord,
+    AgentRunInput,
+    AgentRuns,
+    AgentTask,
+)
 from openmagic_runtime.commands import (
     Actor,
     Cause,
@@ -30,17 +40,26 @@ from openmagic_runtime.execution import (
     AttemptExecution,
     CancellationToken,
     DeterministicExecutor,
+    ExecutionAuthorityLost,
     FreshAgentExecutor,
+    execute_with_renewable_authority,
 )
 from openmagic_runtime.kernel.control import KernelControl, StartInstance
 from openmagic_runtime.kernel.definitions import DefinitionCatalog
-from openmagic_runtime.kernel.work import ClaimedAttempt, ClaimWork, KernelWork, claim_once
+from openmagic_runtime.kernel.work import (
+    ClaimedAttempt,
+    ClaimWork,
+    KernelWork,
+    claim_once,
+    renew_once,
+)
 from openmagic_runtime.threads import ThreadAccess
 from psycopg import Connection
 from psycopg.types.json import Jsonb
 
 from example_insurance.renewal_definition import RENEWAL_DEFINITION
 from example_insurance.renewal_evidence import RenewalEvidenceProjector
+from example_insurance.renewal_facts import RenewalFacts, RenewalFactSource
 from example_insurance.renewal_policies import (
     RenewalCompletionPolicy,
     RenewalDeliveryPolicy,
@@ -102,15 +121,46 @@ def _validate_start_command(command: StartRenewalOutreach) -> None:
         raise ValueError("Expiring premium must be positive")
 
 
-def _draft_agent_factory() -> Callable[[dict[str, Any]], RenewalDraftCandidate]:
-    def run(value: dict[str, Any]) -> RenewalDraftCandidate:
-        premium = int(value["expiring_premium_cents"]) / 100
+def _draft_agent_factory() -> Callable[[AgentExecutionInput], RenewalDraftCandidate]:
+    def run(execution: AgentExecutionInput) -> RenewalDraftCandidate:
+        run_input = execution.run_input
+        if run_input.configuration != AgentConfiguration(
+            agent_key="example_insurance.renewal_draft",
+            agent_version=1,
+            instruction_key="example_insurance.renewal_draft.en_ca.v1",
+        ):
+            raise ValueError("Persisted Agent configuration is unsupported")
+        if run_input.task.task_type != "renewal.draft" or run_input.task.task_version != 1:
+            raise ValueError("Persisted Agent task is unsupported")
+        if run_input.audience_context != AgentAudience("workflow_role", "broker"):
+            raise ValueError("Persisted Agent audience is unsupported")
+        if run_input.locale != "en-CA":
+            raise ValueError("Persisted Agent locale is unsupported")
+        value = run_input.task.input
+        expected_fields = {
+            "expiring_premium_cents",
+            "policy_number",
+            "policyholder_name",
+            "renewal_date",
+            "thread_id",
+            "workflow_id",
+        }
+        if (
+            value.schema_key != "example_insurance.renewal_draft.input"
+            or value.schema_version != 1
+            or {field.name for field in value.fields} != expected_fields
+        ):
+            raise ValueError("Persisted Agent task input is unsupported")
+        premium = int(value.value("expiring_premium_cents")) / 100
+        context_note = ""
+        if execution.thread_context.messages:
+            context_note = " Prior Thread context: " + execution.thread_context.messages[-1].content
         return RenewalDraftCandidate(
-            subject=f"Renewal review for policy {value['policy_number']}",
+            subject=f"Renewal review for policy {value.value('policy_number')}",
             body=(
-                f"Hello {value['policyholder_name']}, your policy renews on "
-                f"{value['renewal_date']}. The expiring premium is CAD {premium:,.2f}. "
-                "Please review this draft before any renewal email is sent."
+                f"Hello {value.value('policyholder_name')}, your policy renews on "
+                f"{value.value('renewal_date')}. The expiring premium is CAD {premium:,.2f}. "
+                f"Please review this draft before any renewal email is sent.{context_note}"
             ),
         )
 
@@ -144,15 +194,9 @@ class ExampleInsurance:
         self._workflow_policy = RenewalWorkflowPolicy()
         self._delivery_policy = RenewalDeliveryPolicy()
         self._completion_policy = RenewalCompletionPolicy()
+        self._renewal_facts = RenewalFactSource(database_url=database_url)
         self._executors = {
-            "example_insurance.renewal_facts.v1": DeterministicExecutor(
-                lambda value: {
-                    "policy_number": value["policy_number"],
-                    "policyholder_name": value["policyholder_name"],
-                    "renewal_date": value["renewal_date"],
-                    "expiring_premium_cents": value["expiring_premium_cents"],
-                }
-            ),
+            "example_insurance.renewal_facts.v1": DeterministicExecutor(self._renewal_facts.gather),
             "example_insurance.renewal_draft_agent.v1": FreshAgentExecutor(
                 _draft_agent_factory,
                 result_class=RenewalDraftCandidate,
@@ -167,6 +211,9 @@ class ExampleInsurance:
     def prepare(self) -> None:
         DefinitionCatalog(database_url=self._database_url).register(RENEWAL_DEFINITION)
 
+    def replace_renewal_facts(self, facts: RenewalFacts) -> None:
+        self._renewal_facts.replace(facts)
+
     def start_renewal_outreach(
         self, command: StartRenewalOutreach
     ) -> CommandReceipt[StartRenewalOutreachResult]:
@@ -176,12 +223,18 @@ class ExampleInsurance:
             command=command,
         )
 
-    def run_workflow_worker_once(self, *, worker_id: str) -> WorkflowAttemptResult | None:
+    def run_workflow_worker_once(
+        self, *, worker_id: str, worker_shutdown: Event | None = None
+    ) -> WorkflowAttemptResult | None:
         self.recover_expired_workflow_attempt()
         attempt = self.claim_workflow_attempt(worker_id=worker_id, claim_request_id=uuid4())
         if attempt is None:
             return None
-        return self.complete_workflow_attempt(attempt=attempt, worker_id=worker_id)
+        return self.complete_workflow_attempt(
+            attempt=attempt,
+            worker_id=worker_id,
+            worker_shutdown=worker_shutdown,
+        )
 
     def recover_expired_workflow_attempt(self) -> bool:
         with psycopg.connect(self._database_url) as connection, connection.transaction():
@@ -217,9 +270,14 @@ class ExampleInsurance:
         )
 
     def complete_workflow_attempt(
-        self, *, attempt: ClaimedAttempt, worker_id: str
+        self,
+        *,
+        attempt: ClaimedAttempt,
+        worker_id: str,
+        worker_shutdown: Event | None = None,
     ) -> WorkflowAttemptResult:
         agent_run_id: UUID | None = None
+        agent_execution_input: AgentExecutionInput | None = None
         with psycopg.connect(self._database_url) as connection, connection.transaction():
             authority = KernelWork(connection).execution_authority(
                 attempt,
@@ -243,22 +301,37 @@ class ExampleInsurance:
                 agent_run = agent_runs.start(
                     attempt_id=durable_attempt.attempt_id,
                     input=AgentRunInput(
-                        agent_key="example_insurance.renewal_draft",
-                        agent_version=1,
-                        task_type="renewal.draft",
-                        task_version=1,
+                        configuration=AgentConfiguration(
+                            agent_key="example_insurance.renewal_draft",
+                            agent_version=1,
+                            instruction_key="example_insurance.renewal_draft.en_ca.v1",
+                        ),
+                        task=AgentTask(
+                            task_type="renewal.draft",
+                            task_version=1,
+                            input=AgentRecord(
+                                schema_key="example_insurance.renewal_draft.input",
+                                schema_version=1,
+                                fields=tuple(
+                                    AgentField(name=key, value=value)
+                                    for key, value in sorted(durable_attempt.input.items())
+                                ),
+                            ),
+                        ),
                         thread_id=thread_id,
                         context_through_sequence=cutoff,
                         domain_event_context=(),
-                        audience_context={
-                            "kind": "workflow_role",
-                            "identifier": "broker",
-                        },
+                        audience_context=AgentAudience(
+                            kind="workflow_role",
+                            identifier="broker",
+                        ),
                         locale="en-CA",
-                        task_input=dict(durable_attempt.input),
                     ),
                 )
                 agent_run_id = agent_run.agent_run_id
+                agent_execution_input = agent_runs.execution_input_for_attempt(
+                    durable_attempt.attempt_id
+                )
         if authority.directive == "replay":
             return self.submit_workflow_observation(
                 attempt=durable_attempt,
@@ -267,8 +340,9 @@ class ExampleInsurance:
             )
         executor = self._executors[durable_attempt.executor_key]
         try:
-            observation = executor.execute(
-                AttemptExecution(
+            observation = execute_with_renewable_authority(
+                executor=executor,
+                execution=AttemptExecution(
                     instance_id=durable_attempt.instance_id,
                     step_id=durable_attempt.step_id,
                     attempt_id=durable_attempt.attempt_id,
@@ -276,9 +350,20 @@ class ExampleInsurance:
                     template_key=durable_attempt.template_key,
                     executor_key=durable_attempt.executor_key,
                     input=durable_attempt.input,
+                    agent_input=agent_execution_input,
                 ),
-                CancellationToken(),
+                cancellation=CancellationToken(),
+                renew=lambda: renew_once(
+                    database_url=self._database_url,
+                    attempt=durable_attempt,
+                    worker_id=worker_id,
+                    renewal_id=uuid4(),
+                ),
+                lease_seconds=durable_attempt.lease_seconds,
+                worker_shutdown=worker_shutdown,
             )
+        except ExecutionAuthorityLost:
+            raise
         except Exception as error:
             if agent_run_id is not None:
                 with psycopg.connect(self._database_url) as connection, connection.transaction():
@@ -520,6 +605,7 @@ class ExampleInsurance:
 
 __all__ = [
     "ExampleInsurance",
+    "RenewalFacts",
     "StartRenewalOutreach",
     "StartRenewalOutreachInput",
     "StartRenewalOutreachResult",

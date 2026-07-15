@@ -3,31 +3,447 @@ from __future__ import annotations
 import json
 import random
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import replace
-from threading import Barrier
+from dataclasses import dataclass, replace
+from threading import Barrier, Event, Thread
+from typing import Any
 from uuid import UUID, uuid4
 
 import psycopg
 import pytest
 from example_insurance.migrations import apply_migrations
+from example_insurance.renewal_facts import StaleRenewalFacts
 from example_insurance.renewals import (
     ExampleInsurance,
+    RenewalFacts,
     StartRenewalOutreach,
     StartRenewalOutreachInput,
+    StartRenewalOutreachResult,
 )
 from openmagic_evals.harness import TestDeployment
 from openmagic_evals.harness._postgres import postgres_container
-from openmagic_runtime.commands import Actor, Cause, IdempotencyConflict, InvalidCommand
+from openmagic_runtime.agents import (
+    AgentAudience,
+    AgentConfiguration,
+    AgentExecutionInput,
+    AgentField,
+    AgentRecord,
+    AgentRunInput,
+    AgentTask,
+)
+from openmagic_runtime.commands import (
+    Actor,
+    Cause,
+    CommandReceipt,
+    IdempotencyConflict,
+    InvalidCommand,
+)
 from openmagic_runtime.delivery import (
     ClaimDelivery,
+    ClaimedDelivery,
+    DeliveryControl,
+    DeliveryRetryPolicy,
+    StaleDeliveryAuthority,
     acknowledge_delivery,
     claim_delivery_once,
 )
+from openmagic_runtime.evidence import RuntimeEvidenceReader
+from openmagic_runtime.execution import (
+    AttemptExecution,
+    CancellationToken,
+    ExecutionAuthorityLost,
+    FreshAgentExecutor,
+    execute_with_renewable_authority,
+)
 from openmagic_runtime.kernel.control import KernelControl, StartInstance, start_instance
+from openmagic_runtime.kernel.definitions import (
+    DefinitionCatalog,
+    DefinitionIdentity,
+    FieldBinding,
+    FieldContract,
+    RetryPolicy,
+    Route,
+    RouteOutput,
+    StepTemplate,
+    WorkflowDefinition,
+)
 from openmagic_runtime.kernel.inspection import KernelInspection
-from openmagic_runtime.kernel.work import AttemptResultConflict, DispositionRequired
-from openmagic_runtime.threads import CreateThread, ThreadStore
+from openmagic_runtime.kernel.work import (
+    AttemptResultConflict,
+    ClaimedAttempt,
+    ClaimWork,
+    DispositionRequired,
+    KernelWork,
+    StaleAuthority,
+    claim_once,
+    renew_once,
+)
+from openmagic_runtime.threads import AppendMessage, CreateThread, ThreadContext, ThreadStore
+
+
+def _record_command_facts(application: ExampleInsurance, command: StartRenewalOutreach) -> None:
+    value = command.input
+    application.replace_renewal_facts(
+        RenewalFacts(
+            policy_id=value.policy_id,
+            policy_number=value.policy_number,
+            policyholder_name=value.policyholder_name,
+            renewal_date=value.renewal_date,
+            expiring_premium_cents=value.expiring_premium_cents,
+        )
+    )
+
+
+def _start_prepared(
+    application: ExampleInsurance, command: StartRenewalOutreach
+) -> CommandReceipt[StartRenewalOutreachResult]:
+    _record_command_facts(application, command)
+    return application.start_renewal_outreach(command)
+
+
+def _renewal_command(
+    *,
+    thread_id: UUID,
+    policy_number: str,
+    policyholder_name: str,
+    renewal_date: str,
+    expiring_premium_cents: int,
+) -> StartRenewalOutreach:
+    return StartRenewalOutreach(
+        command_id=uuid4(),
+        actor=Actor(kind="party", identifier=str(uuid4())),
+        cause=Cause(kind="message", identifier=str(uuid4())),
+        input=StartRenewalOutreachInput(
+            workflow_id=uuid4(),
+            thread_id=thread_id,
+            policy_id=uuid4(),
+            policy_number=policy_number,
+            policyholder_name=policyholder_name,
+            renewal_date=renewal_date,
+            expiring_premium_cents=expiring_premium_cents,
+        ),
+    )
+
+
+def _single_step_definition(*, key: str, executor_key: str) -> WorkflowDefinition:
+    contract = (FieldContract("subject_id", "uuid"),)
+    return WorkflowDefinition(
+        identity=DefinitionIdentity(key, 1),
+        instance_input_contract=contract,
+        step_templates=(
+            StepTemplate(
+                key="work",
+                executor_key=executor_key,
+                input_contract=contract,
+                observation_contract=(FieldContract("result", "string"),),
+                output_contract=(FieldContract("result", "string"),),
+                lease_seconds=1,
+                maximum_attempt_seconds=5,
+                retry_policy=RetryPolicy(()),
+            ),
+        ),
+        wait_templates=(),
+        routes=(
+            Route(
+                key="start",
+                activation="start",
+                activation_contract=contract,
+                outputs=(
+                    RouteOutput(
+                        slot="work",
+                        kind="step",
+                        template_key="work",
+                        input_bindings=(FieldBinding("subject_id", "subject_id"),),
+                    ),
+                ),
+            ),
+        ),
+    )
+
+
+@dataclass(frozen=True)
+class _SlowDraftCandidate:
+    result: str
+
+
+def _slow_draft_agent_factory() -> Callable[[AgentExecutionInput], _SlowDraftCandidate]:
+    def run(execution: AgentExecutionInput) -> _SlowDraftCandidate:
+        assert execution.run_input.configuration.agent_key == "example.renewable_draft"
+        time.sleep(1.4)
+        return _SlowDraftCandidate(result="drafted")
+
+    return run
+
+
+def test_claim_skips_older_instance_without_a_compatible_executor() -> None:
+    with postgres_container(database_name=f"openmagic_test_{uuid4().hex}") as postgres:
+        database_url = postgres.get_connection_url(driver=None)
+        apply_migrations(database_url)
+        catalog = DefinitionCatalog(database_url=database_url)
+        catalog.register(
+            _single_step_definition(
+                key="example.incompatible_work",
+                executor_key="example.incompatible.v1",
+            )
+        )
+        catalog.register(
+            _single_step_definition(
+                key="example.compatible_work",
+                executor_key="example.compatible.v1",
+            )
+        )
+        subject_id = str(uuid4())
+        older = start_instance(
+            database_url=database_url,
+            request=StartInstance(
+                command_id=uuid4(),
+                definition_key="example.incompatible_work",
+                definition_version=1,
+                instance_input={"subject_id": subject_id},
+                route_input={"subject_id": subject_id},
+            ),
+        )
+        time.sleep(0.01)
+        compatible = start_instance(
+            database_url=database_url,
+            request=StartInstance(
+                command_id=uuid4(),
+                definition_key="example.compatible_work",
+                definition_version=1,
+                instance_input={"subject_id": subject_id},
+                route_input={"subject_id": subject_id},
+            ),
+        )
+
+        request = ClaimWork(
+            claim_request_id=uuid4(),
+            worker_id="compatible-worker",
+            executor_keys=("example.compatible.v1",),
+        )
+        claim = claim_once(database_url=database_url, request=request)
+
+        assert claim is not None
+        assert claim.instance_id == compatible.instance_id
+        assert claim.instance_id != older.instance_id
+        assert claim_once(database_url=database_url, request=request) == claim
+        with pytest.raises(ValueError, match="conflicting input"):
+            claim_once(
+                database_url=database_url,
+                request=replace(request, worker_id="conflicting-worker"),
+            )
+
+
+def test_renewed_draft_attempt_remains_reportable_past_initial_lease_within_hard_bound() -> None:
+    with postgres_container(database_name=f"openmagic_test_{uuid4().hex}") as postgres:
+        database_url = postgres.get_connection_url(driver=None)
+        apply_migrations(database_url)
+        catalog = DefinitionCatalog(database_url=database_url)
+        catalog.register(
+            _single_step_definition(
+                key="example.renewable_draft",
+                executor_key="example.renewable_draft.v1",
+            )
+        )
+        subject_id = str(uuid4())
+        start_instance(
+            database_url=database_url,
+            request=StartInstance(
+                command_id=uuid4(),
+                definition_key="example.renewable_draft",
+                definition_version=1,
+                instance_input={"subject_id": subject_id},
+                route_input={"subject_id": subject_id},
+            ),
+        )
+        worker_id = "renewing-draft-worker"
+        claim = claim_once(
+            database_url=database_url,
+            request=ClaimWork(
+                claim_request_id=uuid4(),
+                worker_id=worker_id,
+                executor_keys=("example.renewable_draft.v1",),
+            ),
+        )
+        assert claim is not None
+        renewal_id = uuid4()
+        renewal_barrier = Barrier(2)
+
+        def renew_concurrently(_: int) -> object:
+            renewal_barrier.wait()
+            return renew_once(
+                database_url=database_url,
+                attempt=claim,
+                worker_id=worker_id,
+                renewal_id=renewal_id,
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            first_renewal, replayed_renewal = executor.map(renew_concurrently, range(2))
+        assert replayed_renewal == first_renewal
+        assert (
+            KernelInspection(database_url=database_url)
+            .snapshot(claim.instance_id)
+            .observed_through_sequence
+            == 3
+        )
+        with pytest.raises(ValueError, match="conflicting input"):
+            renew_once(
+                database_url=database_url,
+                attempt=replace(claim, input={"subject_id": str(uuid4())}),
+                worker_id=worker_id,
+                renewal_id=renewal_id,
+            )
+
+        run_input = AgentRunInput(
+            configuration=AgentConfiguration(
+                "example.renewable_draft",
+                1,
+                "example.renewable_draft.instructions.v1",
+            ),
+            task=AgentTask(
+                "renewal.draft",
+                1,
+                AgentRecord(
+                    "example.renewable_draft.input",
+                    1,
+                    (AgentField("subject_id", subject_id),),
+                ),
+            ),
+            thread_id=uuid4(),
+            context_through_sequence=0,
+            domain_event_context=(),
+            audience_context=AgentAudience("workflow_role", "broker"),
+            locale="en-CA",
+        )
+
+        started = time.monotonic()
+        observation = execute_with_renewable_authority(
+            executor=FreshAgentExecutor(
+                _slow_draft_agent_factory,
+                result_class=_SlowDraftCandidate,
+                encoder=lambda candidate: {"result": candidate.result},
+                timeout_seconds=5,
+            ),
+            execution=AttemptExecution(
+                instance_id=claim.instance_id,
+                step_id=claim.step_id,
+                attempt_id=claim.attempt_id,
+                attempt_number=claim.attempt_number,
+                template_key=claim.template_key,
+                executor_key=claim.executor_key,
+                input=claim.input,
+                agent_input=AgentExecutionInput(
+                    agent_run_id=uuid4(),
+                    attempt_id=claim.attempt_id,
+                    run_input=run_input,
+                    thread_context=ThreadContext(run_input.thread_id, 0, ()),
+                ),
+            ),
+            cancellation=CancellationToken(),
+            renew=lambda: renew_once(
+                database_url=database_url,
+                attempt=claim,
+                worker_id=worker_id,
+                renewal_id=uuid4(),
+            ),
+            lease_seconds=claim.lease_seconds,
+        )
+        elapsed = time.monotonic() - started
+        with psycopg.connect(database_url) as connection, connection.transaction():
+            accepted = KernelWork(connection).accept_result(
+                claim,
+                worker_id=worker_id,
+                observation=observation.value,
+            )
+
+        assert elapsed > 1
+        assert elapsed < 5
+        assert accepted.observation == {"result": "drafted"}
+
+        catalog.register(
+            _single_step_definition(
+                key="example.shutdown_draft",
+                executor_key="example.shutdown_draft.v1",
+            )
+        )
+        shutdown_start = start_instance(
+            database_url=database_url,
+            request=StartInstance(
+                command_id=uuid4(),
+                definition_key="example.shutdown_draft",
+                definition_version=1,
+                instance_input={"subject_id": subject_id},
+                route_input={"subject_id": subject_id},
+            ),
+        )
+        shutdown_claim = claim_once(
+            database_url=database_url,
+            request=ClaimWork(
+                claim_request_id=uuid4(),
+                worker_id=worker_id,
+                executor_keys=("example.shutdown_draft.v1",),
+            ),
+        )
+        assert shutdown_claim is not None
+        assert shutdown_claim.instance_id == shutdown_start.instance_id
+        shutdown = Event()
+
+        def stop_worker() -> None:
+            time.sleep(0.2)
+            shutdown.set()
+
+        stopper = Thread(target=stop_worker)
+        stopper.start()
+        with pytest.raises(ExecutionAuthorityLost, match="durable authority"):
+            execute_with_renewable_authority(
+                executor=FreshAgentExecutor(
+                    _slow_draft_agent_factory,
+                    result_class=_SlowDraftCandidate,
+                    encoder=lambda candidate: {"result": candidate.result},
+                    timeout_seconds=5,
+                ),
+                execution=AttemptExecution(
+                    instance_id=shutdown_claim.instance_id,
+                    step_id=shutdown_claim.step_id,
+                    attempt_id=shutdown_claim.attempt_id,
+                    attempt_number=shutdown_claim.attempt_number,
+                    template_key=shutdown_claim.template_key,
+                    executor_key=shutdown_claim.executor_key,
+                    input=shutdown_claim.input,
+                    agent_input=AgentExecutionInput(
+                        agent_run_id=uuid4(),
+                        attempt_id=shutdown_claim.attempt_id,
+                        run_input=run_input,
+                        thread_context=ThreadContext(run_input.thread_id, 0, ()),
+                    ),
+                ),
+                cancellation=CancellationToken(),
+                renew=lambda: renew_once(
+                    database_url=database_url,
+                    attempt=shutdown_claim,
+                    worker_id=worker_id,
+                    renewal_id=uuid4(),
+                ),
+                lease_seconds=shutdown_claim.lease_seconds,
+                worker_shutdown=shutdown,
+            )
+        stopper.join(timeout=1)
+        time.sleep(0.8)
+        with psycopg.connect(database_url) as connection, connection.transaction():
+            abandoned = KernelWork(connection).recover_expired()
+        assert abandoned is not None
+        assert abandoned.attempt_id == shutdown_claim.attempt_id
+        with (
+            psycopg.connect(database_url) as connection,
+            connection.transaction(),
+            pytest.raises(StaleAuthority, match="stale"),
+        ):
+            KernelWork(connection).accept_result(
+                shutdown_claim,
+                worker_id=worker_id,
+                observation={"result": "late"},
+            )
 
 
 def test_start_command_commits_and_replays_value_identically() -> None:
@@ -36,29 +452,23 @@ def test_start_command_commits_and_replays_value_identically() -> None:
         apply_migrations(database_url)
         application = ExampleInsurance(database_url=database_url)
         application.prepare()
-        thread = ThreadStore(database_url=database_url).create(
+        threads = ThreadStore(database_url=database_url)
+        thread = threads.create(
             CreateThread(
                 thread_id=uuid4(),
                 channel_kind="email",
                 channel_reference="broker-conversation-17",
             )
         )
-        command = StartRenewalOutreach(
-            command_id=uuid4(),
-            actor=Actor(kind="party", identifier=str(uuid4())),
-            cause=Cause(kind="message", identifier=str(uuid4())),
-            input=StartRenewalOutreachInput(
-                workflow_id=uuid4(),
-                thread_id=thread.thread_id,
-                policy_id=uuid4(),
-                policy_number="OM-2048",
-                policyholder_name="Avery Chen",
-                renewal_date="2027-01-31",
-                expiring_premium_cents=125_000,
-            ),
+        command = _renewal_command(
+            thread_id=thread.thread_id,
+            policy_number="OM-2048",
+            policyholder_name="Avery Chen",
+            renewal_date="2027-01-31",
+            expiring_premium_cents=125_000,
         )
 
-        first = application.start_renewal_outreach(command)
+        first = _start_prepared(application, command)
         replay = application.start_renewal_outreach(command)
         conflict = replace(
             command,
@@ -87,9 +497,8 @@ def test_command_validation_rejects_nested_types_and_semantics_before_commit() -
         apply_migrations(database_url)
         application = ExampleInsurance(database_url=database_url)
         application.prepare()
-        thread = ThreadStore(database_url=database_url).create(
-            CreateThread(uuid4(), "email", "broker-command-validation")
-        )
+        threads = ThreadStore(database_url=database_url)
+        thread = threads.create(CreateThread(uuid4(), "email", "broker-command-validation"))
         command_id = uuid4()
         invalid_type = StartRenewalOutreach(
             command_id=command_id,
@@ -102,7 +511,7 @@ def test_command_validation_rejects_nested_types_and_semantics_before_commit() -
                 policy_number="OM-TYPE",
                 policyholder_name="Validation",
                 renewal_date="2027-01-31",
-                expiring_premium_cents="100000",  # type: ignore[arg-type]
+                expiring_premium_cents="100000",  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
             ),
         )
         invalid_semantics = replace(
@@ -118,7 +527,7 @@ def test_command_validation_rejects_nested_types_and_semantics_before_commit() -
             application.start_renewal_outreach(invalid_type)
         with pytest.raises(InvalidCommand):
             application.start_renewal_outreach(invalid_semantics)
-        receipt = application.start_renewal_outreach(corrected)
+        receipt = _start_prepared(application, corrected)
 
         assert receipt.command_id == command_id
 
@@ -132,21 +541,14 @@ def test_exact_attempt_result_replay_does_not_repeat_route_effects() -> None:
         thread = ThreadStore(database_url=database_url).create(
             CreateThread(uuid4(), "email", "broker-result-replay")
         )
-        command = StartRenewalOutreach(
-            command_id=uuid4(),
-            actor=Actor(kind="party", identifier=str(uuid4())),
-            cause=Cause(kind="message", identifier=str(uuid4())),
-            input=StartRenewalOutreachInput(
-                workflow_id=uuid4(),
-                thread_id=thread.thread_id,
-                policy_id=uuid4(),
-                policy_number="OM-REPLAY",
-                policyholder_name="Replay Test",
-                renewal_date="2027-03-31",
-                expiring_premium_cents=100_000,
-            ),
+        command = _renewal_command(
+            thread_id=thread.thread_id,
+            policy_number="OM-REPLAY",
+            policyholder_name="Replay Test",
+            renewal_date="2027-03-31",
+            expiring_premium_cents=100_000,
         )
-        started = application.start_renewal_outreach(command)
+        started = _start_prepared(application, command)
         attempt = application.claim_workflow_attempt(
             worker_id="workflow-replay",
             claim_request_id=uuid4(),
@@ -224,28 +626,32 @@ def test_workflow_worker_uses_one_executor_seam_for_facts_and_agent_draft() -> N
         apply_migrations(database_url)
         application = ExampleInsurance(database_url=database_url)
         application.prepare()
-        thread = ThreadStore(database_url=database_url).create(
+        threads = ThreadStore(database_url=database_url)
+        thread = threads.create(
             CreateThread(
                 thread_id=uuid4(),
                 channel_kind="email",
                 channel_reference="broker-conversation-18",
             )
         )
-        command = StartRenewalOutreach(
-            command_id=uuid4(),
-            actor=Actor(kind="party", identifier=str(uuid4())),
-            cause=Cause(kind="message", identifier=str(uuid4())),
-            input=StartRenewalOutreachInput(
-                workflow_id=uuid4(),
+        threads.append(
+            AppendMessage(
                 thread_id=thread.thread_id,
-                policy_id=uuid4(),
-                policy_number="OM-4096",
-                policyholder_name="Morgan Lee",
-                renewal_date="2027-02-28",
-                expiring_premium_cents=198_500,
-            ),
+                author_kind="party",
+                author_id="broker",
+                source_kind="channel",
+                source_id=uuid4(),
+                content="Use the policyholder's preferred formal greeting.",
+            )
         )
-        started = application.start_renewal_outreach(command)
+        command = _renewal_command(
+            thread_id=thread.thread_id,
+            policy_number="OM-4096",
+            policyholder_name="Morgan Lee",
+            renewal_date="2027-02-28",
+            expiring_premium_cents=198_500,
+        )
+        started = _start_prepared(application, command)
 
         first_attempt = application.run_workflow_worker_once(worker_id="workflow-a")
         after_facts = KernelInspection(database_url=database_url).snapshot(
@@ -255,6 +661,13 @@ def test_workflow_worker_uses_one_executor_seam_for_facts_and_agent_draft() -> N
         after_draft = KernelInspection(database_url=database_url).snapshot(
             started.result.instance_id
         )
+        with psycopg.connect(database_url) as connection:
+            agent_evidence = connection.execute(
+                "SELECT d.body, r.input FROM example_insurance.renewal_drafts AS d "
+                "JOIN openmagic_runtime.agent_runs AS r ON r.agent_run_id = d.agent_run_id "
+                "WHERE d.workflow_id = %s",
+                (command.input.workflow_id,),
+            ).fetchone()
 
         assert first_attempt is not None
         assert first_attempt.template_key == "gather_renewal_facts"
@@ -275,6 +688,52 @@ def test_workflow_worker_uses_one_executor_seam_for_facts_and_agent_draft() -> N
         assert second_attempt.executor_key == "example_insurance.renewal_draft_agent.v1"
         assert second_attempt.agent_run_id is not None
         assert second_attempt.agent_runtime_generation == 1
+        assert agent_evidence is not None
+        assert "preferred formal greeting" in str(agent_evidence[0])
+        assert agent_evidence[1]["configuration"] == {
+            "agent_key": "example_insurance.renewal_draft",
+            "agent_version": 1,
+            "instruction_key": "example_insurance.renewal_draft.en_ca.v1",
+        }
+        assert agent_evidence[1]["context_through_sequence"] == 1
+
+
+def test_gather_facts_rejects_stale_command_assertions_against_durable_business_state() -> None:
+    with postgres_container(database_name=f"openmagic_test_{uuid4().hex}") as postgres:
+        database_url = postgres.get_connection_url(driver=None)
+        apply_migrations(database_url)
+        application = ExampleInsurance(database_url=database_url)
+        application.prepare()
+        thread = ThreadStore(database_url=database_url).create(
+            CreateThread(uuid4(), "email", "broker-stale-renewal-facts")
+        )
+        command = _renewal_command(
+            thread_id=thread.thread_id,
+            policy_number="OM-STALE-FACTS",
+            policyholder_name="Durable State",
+            renewal_date="2027-08-31",
+            expiring_premium_cents=250_000,
+        )
+        _start_prepared(application, command)
+        application.replace_renewal_facts(
+            RenewalFacts(
+                policy_id=command.input.policy_id,
+                policy_number=command.input.policy_number,
+                policyholder_name=command.input.policyholder_name,
+                renewal_date=command.input.renewal_date,
+                expiring_premium_cents=275_000,
+            )
+        )
+
+        with pytest.raises(StaleRenewalFacts, match="changed"):
+            application.run_workflow_worker_once(worker_id="stale-facts-worker")
+
+        snapshot = KernelInspection(database_url=database_url).snapshot(
+            application.start_renewal_outreach(command).result.instance_id
+        )
+        assert [(step.template_key, step.state) for step in snapshot.steps] == [
+            ("gather_renewal_facts", "pending")
+        ]
 
 
 def test_agent_attempt_replay_uses_one_durable_run_without_reexecution() -> None:
@@ -286,21 +745,14 @@ def test_agent_attempt_replay_uses_one_durable_run_without_reexecution() -> None
         thread = ThreadStore(database_url=database_url).create(
             CreateThread(uuid4(), "email", "broker-agent-replay")
         )
-        command = StartRenewalOutreach(
-            command_id=uuid4(),
-            actor=Actor(kind="party", identifier=str(uuid4())),
-            cause=Cause(kind="message", identifier=str(uuid4())),
-            input=StartRenewalOutreachInput(
-                workflow_id=uuid4(),
-                thread_id=thread.thread_id,
-                policy_id=uuid4(),
-                policy_number="OM-AGENT-REPLAY",
-                policyholder_name="Agent Replay",
-                renewal_date="2027-05-31",
-                expiring_premium_cents=300_000,
-            ),
+        command = _renewal_command(
+            thread_id=thread.thread_id,
+            policy_number="OM-AGENT-REPLAY",
+            policyholder_name="Agent Replay",
+            renewal_date="2027-05-31",
+            expiring_premium_cents=300_000,
         )
-        application.start_renewal_outreach(command)
+        _start_prepared(application, command)
         application.run_workflow_worker_once(worker_id="workflow-agent-replay")
         draft_attempt = application.claim_workflow_attempt(
             worker_id="workflow-agent-replay",
@@ -366,20 +818,14 @@ def test_competing_command_and_step_claims_preserve_cardinality_one() -> None:
         thread = ThreadStore(database_url=database_url).create(
             CreateThread(uuid4(), "email", "broker-conversation-command-race")
         )
-        command = StartRenewalOutreach(
-            command_id=uuid4(),
-            actor=Actor(kind="party", identifier=str(uuid4())),
-            cause=Cause(kind="message", identifier=str(uuid4())),
-            input=StartRenewalOutreachInput(
-                workflow_id=uuid4(),
-                thread_id=thread.thread_id,
-                policy_id=uuid4(),
-                policy_number="OM-RACE-1",
-                policyholder_name="Casey Nguyen",
-                renewal_date="2027-07-31",
-                expiring_premium_cents=512_000,
-            ),
+        command = _renewal_command(
+            thread_id=thread.thread_id,
+            policy_number="OM-RACE-1",
+            policyholder_name="Casey Nguyen",
+            renewal_date="2027-07-31",
+            expiring_premium_cents=512_000,
         )
+        _record_command_facts(application, command)
         command_barrier = Barrier(2)
 
         def submit_command() -> object:
@@ -414,21 +860,14 @@ def test_stale_workflow_result_and_wrong_thread_delivery_proposal_are_rejected()
         threads = ThreadStore(database_url=database_url)
         intended = threads.create(CreateThread(uuid4(), "email", "broker-stale-intended"))
         wrong = threads.create(CreateThread(uuid4(), "email", "broker-stale-wrong"))
-        command = StartRenewalOutreach(
-            command_id=uuid4(),
-            actor=Actor(kind="party", identifier=str(uuid4())),
-            cause=Cause(kind="message", identifier=str(uuid4())),
-            input=StartRenewalOutreachInput(
-                workflow_id=uuid4(),
-                thread_id=intended.thread_id,
-                policy_id=uuid4(),
-                policy_number="OM-FENCE-1",
-                policyholder_name="Jordan Ali",
-                renewal_date="2027-08-31",
-                expiring_premium_cents=618_000,
-            ),
+        command = _renewal_command(
+            thread_id=intended.thread_id,
+            policy_number="OM-FENCE-1",
+            policyholder_name="Jordan Ali",
+            renewal_date="2027-08-31",
+            expiring_premium_cents=618_000,
         )
-        application.start_renewal_outreach(command)
+        _start_prepared(application, command)
         stale = application.claim_workflow_attempt(
             worker_id="lost-worker",
             claim_request_id=uuid4(),
@@ -461,28 +900,87 @@ def test_stale_workflow_result_and_wrong_thread_delivery_proposal_are_rejected()
             worker_id="replacement-worker",
         )
         application.run_workflow_worker_once(worker_id="replacement-worker")
-        delivery = claim_delivery_once(
+        expired_delivery = claim_delivery_once(
             database_url=database_url,
             request=ClaimDelivery(uuid4(), "delivery-worker"),
         )
+        assert expired_delivery is not None
+        time.sleep(1.1)
+        delivery = claim_delivery_once(
+            database_url=database_url,
+            request=ClaimDelivery(uuid4(), "replacement-delivery-worker"),
+        )
         assert delivery is not None
 
+        with pytest.raises(StaleDeliveryAuthority, match="stale"):
+            acknowledge_delivery(
+                database_url=database_url,
+                claim=expired_delivery,
+                worker_id="delivery-worker",
+                proposed_thread_id=intended.thread_id,
+            )
         with pytest.raises(RuntimeError, match="wrong exact Thread"):
             acknowledge_delivery(
                 database_url=database_url,
                 claim=delivery,
-                worker_id="delivery-worker",
+                worker_id="replacement-delivery-worker",
                 proposed_thread_id=wrong.thread_id,
             )
         acknowledgement = acknowledge_delivery(
             database_url=database_url,
             claim=delivery,
-            worker_id="delivery-worker",
+            worker_id="replacement-delivery-worker",
             proposed_thread_id=intended.thread_id,
         )
 
         assert acknowledgement.thread_id == intended.thread_id
         assert threads.read(wrong.thread_id).messages == ()
+
+
+def test_one_domain_event_can_create_multiple_exact_destination_delivery_obligations() -> None:
+    with postgres_container(database_name=f"openmagic_test_{uuid4().hex}") as postgres:
+        database_url = postgres.get_connection_url(driver=None)
+        apply_migrations(database_url)
+        threads = ThreadStore(database_url=database_url)
+        first = threads.create(CreateThread(uuid4(), "email", "multi-delivery-first"))
+        second = threads.create(CreateThread(uuid4(), "email", "multi-delivery-second"))
+        domain_event_id = uuid4()
+        retry_policy = DeliveryRetryPolicy(
+            version=1,
+            max_attempts=2,
+            delays_seconds=(0,),
+            lease_seconds=1,
+            retryable_failure_classes=("transient",),
+            terminal_failure_classes=("permanent",),
+        )
+        with psycopg.connect(database_url) as connection, connection.transaction():
+            control = DeliveryControl(connection)
+            first_intent = control.create(
+                domain_event_id=domain_event_id,
+                thread_id=first.thread_id,
+                audience={"kind": "party", "identifier": "first"},
+                message_author={"kind": "system", "identifier": "renewal"},
+                content_descriptor={"template": "renewal.first.v1"},
+                message_content="First exact destination",
+                retry_policy=retry_policy,
+            )
+            second_intent = control.create(
+                domain_event_id=domain_event_id,
+                thread_id=second.thread_id,
+                audience={"kind": "party", "identifier": "second"},
+                message_author={"kind": "system", "identifier": "renewal"},
+                content_descriptor={"template": "renewal.second.v1"},
+                message_content="Second exact destination",
+                retry_policy=retry_policy,
+            )
+            projected = RuntimeEvidenceReader(connection).deliveries(domain_event_id)
+
+        assert first_intent.thread_id == first.thread_id
+        assert second_intent.thread_id == second.thread_id
+        assert {item.delivery_id for item in projected} == {
+            first_intent.delivery_id,
+            second_intent.delivery_id,
+        }
 
 
 @pytest.mark.integration
@@ -498,28 +996,21 @@ def test_seeded_step_and_delivery_claim_races_hold_cardinality_one_100_times() -
         )
         with ThreadPoolExecutor(max_workers=2) as executor:
             for seed in seeds:
-                command = StartRenewalOutreach(
-                    command_id=uuid4(),
-                    actor=Actor(kind="party", identifier=str(uuid4())),
-                    cause=Cause(kind="message", identifier=str(uuid4())),
-                    input=StartRenewalOutreachInput(
-                        workflow_id=uuid4(),
-                        thread_id=thread.thread_id,
-                        policy_id=uuid4(),
-                        policy_number=f"OM-RACE-{seed}",
-                        policyholder_name=f"Seed {seed}",
-                        renewal_date="2027-10-31",
-                        expiring_premium_cents=800_000 + seed,
-                    ),
+                command = _renewal_command(
+                    thread_id=thread.thread_id,
+                    policy_number=f"OM-RACE-{seed}",
+                    policyholder_name=f"Seed {seed}",
+                    renewal_date="2027-10-31",
+                    expiring_premium_cents=800_000 + seed,
                 )
-                application.start_renewal_outreach(command)
+                _start_prepared(application, command)
                 step_barrier = Barrier(2)
 
                 def claim_step(
                     index: int,
                     barrier: Barrier = step_barrier,
                     race_seed: int = seed,
-                ) -> object:
+                ) -> ClaimedAttempt | None:
                     barrier.wait()
                     time.sleep(random.Random(race_seed * 2 + index).random() / 1000)
                     return application.claim_workflow_attempt(
@@ -543,7 +1034,7 @@ def test_seeded_step_and_delivery_claim_races_hold_cardinality_one_100_times() -
                     index: int,
                     barrier: Barrier = delivery_barrier,
                     race_seed: int = seed,
-                ) -> object:
+                ) -> ClaimedDelivery | None:
                     barrier.wait()
                     time.sleep(random.Random(race_seed * 2 + index + 10_000).random() / 1000)
                     return application.claim_delivery_attempt(
@@ -574,27 +1065,20 @@ def test_delivery_appends_once_to_only_the_frozen_exact_thread() -> None:
         threads = ThreadStore(database_url=database_url)
         intended = threads.create(CreateThread(uuid4(), "email", "broker-conversation-intended"))
         other = threads.create(CreateThread(uuid4(), "email", "broker-conversation-other"))
-        command = StartRenewalOutreach(
-            command_id=uuid4(),
-            actor=Actor(kind="party", identifier=str(uuid4())),
-            cause=Cause(kind="message", identifier=str(uuid4())),
-            input=StartRenewalOutreachInput(
-                workflow_id=uuid4(),
-                thread_id=intended.thread_id,
-                policy_id=uuid4(),
-                policy_number="OM-8192",
-                policyholder_name="Taylor Singh",
-                renewal_date="2027-03-31",
-                expiring_premium_cents=211_000,
-            ),
+        command = _renewal_command(
+            thread_id=intended.thread_id,
+            policy_number="OM-8192",
+            policyholder_name="Taylor Singh",
+            renewal_date="2027-03-31",
+            expiring_premium_cents=211_000,
         )
-        application.start_renewal_outreach(command)
+        _start_prepared(application, command)
         application.run_workflow_worker_once(worker_id="workflow-a")
         application.run_workflow_worker_once(worker_id="workflow-a")
 
         claim_barrier = Barrier(2)
 
-        def claim_delivery(worker_id: str) -> object:
+        def claim_delivery(worker_id: str) -> ClaimedDelivery | None:
             claim_barrier.wait()
             return application.claim_delivery_attempt(
                 worker_id=worker_id,
@@ -638,21 +1122,14 @@ def test_fresh_worker_processes_recover_the_complete_sanitized_evidence_chain(tm
         thread = ThreadStore(database_url=deployment.database_url).create(
             CreateThread(uuid4(), "email", "broker-conversation-process-recovery")
         )
-        command = StartRenewalOutreach(
-            command_id=uuid4(),
-            actor=Actor(kind="party", identifier=str(uuid4())),
-            cause=Cause(kind="message", identifier=str(uuid4())),
-            input=StartRenewalOutreachInput(
-                workflow_id=uuid4(),
-                thread_id=thread.thread_id,
-                policy_id=uuid4(),
-                policy_number="OM-16384",
-                policyholder_name="Jamie Patel",
-                renewal_date="2027-04-30",
-                expiring_premium_cents=305_500,
-            ),
+        command = _renewal_command(
+            thread_id=thread.thread_id,
+            policy_number="OM-16384",
+            policyholder_name="Jamie Patel",
+            renewal_date="2027-04-30",
+            expiring_premium_cents=305_500,
         )
-        application.start_renewal_outreach(command)
+        _start_prepared(application, command)
 
         workflow_process = deployment.restart_role("workflow-worker")
         _wait_for_outcome(
@@ -664,7 +1141,7 @@ def test_fresh_worker_processes_recover_the_complete_sanitized_evidence_chain(tm
         evidence = _wait_for_outcome(
             application,
             command.input.workflow_id,
-            "delivery_state",
+            "delivery_states",
             "delivered",
         )
 
@@ -677,14 +1154,14 @@ def test_fresh_worker_processes_recover_the_complete_sanitized_evidence_chain(tm
         assert evidence["outcomes"]["external_email_effect_count"] == 0
         assert evidence["outcomes"]["approval_wait_state"] == "unsatisfied"
         assert set(evidence["correlations"]) == {
-            "agent_run_id",
             "agent_run_ids",
             "attempt_ids",
             "command_id",
-            "delivery_id",
-            "domain_event_id",
+            "delivery_ids",
+            "domain_event_ids",
+            "draft_agent_run_ids",
             "instance_id",
-            "message_id",
+            "message_ids",
             "step_ids",
             "thread_id",
             "workflow_id",
@@ -700,21 +1177,14 @@ def test_process_loss_after_claim_is_recovered_and_fenced_by_a_fresh_process(tmp
         thread = ThreadStore(database_url=deployment.database_url).create(
             CreateThread(uuid4(), "email", "broker-conversation-claim-loss")
         )
-        command = StartRenewalOutreach(
-            command_id=uuid4(),
-            actor=Actor(kind="party", identifier=str(uuid4())),
-            cause=Cause(kind="message", identifier=str(uuid4())),
-            input=StartRenewalOutreachInput(
-                workflow_id=uuid4(),
-                thread_id=thread.thread_id,
-                policy_id=uuid4(),
-                policy_number="OM-32768",
-                policyholder_name="Riley Brooks",
-                renewal_date="2027-05-31",
-                expiring_premium_cents=411_000,
-            ),
+        command = _renewal_command(
+            thread_id=thread.thread_id,
+            policy_number="OM-32768",
+            policyholder_name="Riley Brooks",
+            renewal_date="2027-05-31",
+            expiring_premium_cents=411_000,
         )
-        application.start_renewal_outreach(command)
+        _start_prepared(application, command)
 
         lost_process = deployment.restart_role("workflow-worker")
         _wait_for_attempt_state(application, command.input.workflow_id, "leased")
@@ -746,21 +1216,14 @@ def test_agent_process_loss_terminalizes_run_and_retries_without_phantom_authori
         thread = ThreadStore(database_url=deployment.database_url).create(
             CreateThread(uuid4(), "email", "broker-agent-process-loss")
         )
-        command = StartRenewalOutreach(
-            command_id=uuid4(),
-            actor=Actor(kind="party", identifier=str(uuid4())),
-            cause=Cause(kind="message", identifier=str(uuid4())),
-            input=StartRenewalOutreachInput(
-                workflow_id=uuid4(),
-                thread_id=thread.thread_id,
-                policy_id=uuid4(),
-                policy_number="OM-AGENT-LOSS",
-                policyholder_name="Agent Loss",
-                renewal_date="2027-11-30",
-                expiring_premium_cents=910_000,
-            ),
+        command = _renewal_command(
+            thread_id=thread.thread_id,
+            policy_number="OM-AGENT-LOSS",
+            policyholder_name="Agent Loss",
+            renewal_date="2027-11-30",
+            expiring_premium_cents=910_000,
         )
-        application.start_renewal_outreach(command)
+        _start_prepared(application, command)
         application.run_workflow_worker_once(worker_id="workflow-facts")
         with psycopg.connect(deployment.database_url) as connection, connection.transaction():
             connection.execute(
@@ -818,21 +1281,14 @@ def test_delivery_process_loss_after_claim_recovers_without_duplicate_message(tm
         application.prepare()
         threads = ThreadStore(database_url=deployment.database_url)
         thread = threads.create(CreateThread(uuid4(), "email", "broker-delivery-claim-loss"))
-        command = StartRenewalOutreach(
-            command_id=uuid4(),
-            actor=Actor(kind="party", identifier=str(uuid4())),
-            cause=Cause(kind="message", identifier=str(uuid4())),
-            input=StartRenewalOutreachInput(
-                workflow_id=uuid4(),
-                thread_id=thread.thread_id,
-                policy_id=uuid4(),
-                policy_number="OM-65536",
-                policyholder_name="Quinn Martin",
-                renewal_date="2027-09-30",
-                expiring_premium_cents=720_000,
-            ),
+        command = _renewal_command(
+            thread_id=thread.thread_id,
+            policy_number="OM-65536",
+            policyholder_name="Quinn Martin",
+            renewal_date="2027-09-30",
+            expiring_premium_cents=720_000,
         )
-        application.start_renewal_outreach(command)
+        _start_prepared(application, command)
         application.run_workflow_worker_once(worker_id="workflow-direct")
         application.run_workflow_worker_once(worker_id="workflow-direct")
 
@@ -861,15 +1317,12 @@ def test_delivery_process_loss_after_claim_recovers_without_duplicate_message(tm
         evidence = _wait_for_outcome(
             application,
             command.input.workflow_id,
-            "delivery_state",
+            "delivery_states",
             "delivered",
         )
 
         assert recovery_process.pid != lost_process.pid
-        assert evidence["outcomes"]["delivery_attempt_states"] == [
-            "abandoned",
-            "succeeded",
-        ]
+        assert evidence["outcomes"]["delivery_attempt_states"] == [["abandoned", "succeeded"]]
         assert len(threads.read(thread.thread_id).messages) == 1
         assert evidence["invariant_violations"] == []
 
@@ -879,12 +1332,13 @@ def _wait_for_outcome(
     workflow_id: UUID,
     key: str,
     expected: str,
-) -> dict[str, object]:
+) -> dict[str, Any]:
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
         evidence = json.loads(application.renewal_evidence_json(workflow_id))
         outcomes = evidence["outcomes"]
-        if outcomes[key] == expected:
+        actual = outcomes[key]
+        if actual == expected or (isinstance(actual, list) and expected in actual):
             return evidence
         time.sleep(0.05)
     raise AssertionError(f"renewal evidence did not reach {key}={expected}")
@@ -894,7 +1348,7 @@ def _wait_for_attempt_state(
     application: ExampleInsurance,
     workflow_id: UUID,
     expected: str,
-) -> dict[str, object]:
+) -> dict[str, Any]:
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
         evidence = json.loads(application.renewal_evidence_json(workflow_id))
@@ -908,11 +1362,12 @@ def _wait_for_delivery_attempt_state(
     application: ExampleInsurance,
     workflow_id: UUID,
     expected: str,
-) -> dict[str, object]:
+) -> dict[str, Any]:
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
         evidence = json.loads(application.renewal_evidence_json(workflow_id))
-        if expected in evidence["outcomes"]["delivery_attempt_states"]:
+        attempts = evidence["outcomes"]["delivery_attempt_states"]
+        if any(expected in states for states in attempts):
             return evidence
         time.sleep(0.005)
     raise AssertionError(f"renewal evidence did not contain Delivery Attempt state {expected}")

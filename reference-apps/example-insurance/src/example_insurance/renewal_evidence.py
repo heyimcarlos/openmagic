@@ -24,19 +24,22 @@ class RenewalEvidenceProjector:
             if workflow is None:
                 raise KeyError(f"Renewal Workflow not found: {workflow_id}")
             runtime = RuntimeEvidenceReader(connection).instance(UUID(str(workflow[1])))
-            event = connection.execute(
+            events = connection.execute(
                 "SELECT event_id FROM example_insurance.domain_events "
-                "WHERE workflow_id = %s AND event_type = 'renewal.draft.ready'",
+                "WHERE workflow_id = %s AND event_type = 'renewal.draft.ready' "
+                "ORDER BY occurred_at, event_id",
                 (workflow_id,),
-            ).fetchone()
-            draft = connection.execute(
-                "SELECT agent_run_id FROM example_insurance.renewal_drafts WHERE workflow_id = %s",
+            ).fetchall()
+            drafts = connection.execute(
+                "SELECT agent_run_id FROM example_insurance.renewal_drafts "
+                "WHERE workflow_id = %s ORDER BY created_at, draft_id",
                 (workflow_id,),
-            ).fetchone()
-            delivery = (
-                RuntimeEvidenceReader(connection).delivery(UUID(str(event[0])))
-                if event is not None
-                else None
+            ).fetchall()
+            evidence_reader = RuntimeEvidenceReader(connection)
+            deliveries = tuple(
+                delivery
+                for event in events
+                for delivery in evidence_reader.deliveries(UUID(str(event[0])))
             )
             effect_events = connection.execute(
                 "SELECT count(*) FROM example_insurance.domain_events WHERE workflow_id = %s "
@@ -51,20 +54,15 @@ class RenewalEvidenceProjector:
             "step_ids": [str(step.step_id) for step in runtime.steps],
             "attempt_ids": [str(attempt_id) for attempt_id, _ in runtime.attempts],
             "agent_run_ids": [str(run_id) for run_id, _, _ in runtime.agent_runs],
+            "domain_event_ids": [str(event[0]) for event in events],
+            "delivery_ids": [str(delivery.delivery_id) for delivery in deliveries],
+            "message_ids": [
+                str(delivery.delivered_message_id)
+                for delivery in deliveries
+                if delivery.delivered_message_id is not None
+            ],
+            "draft_agent_run_ids": [str(draft[0]) for draft in drafts],
         }
-        if event is not None and delivery is not None and draft is not None:
-            correlations.update(
-                {
-                    "domain_event_id": str(event[0]),
-                    "delivery_id": str(delivery.delivery_id),
-                    "message_id": (
-                        str(delivery.delivered_message_id)
-                        if delivery.delivered_message_id is not None
-                        else None
-                    ),
-                    "agent_run_id": str(draft[0]),
-                }
-            )
         approval_waits = tuple(
             wait for wait in runtime.waits if wait.template_key == "renewal_draft_approval"
         )
@@ -80,14 +78,14 @@ class RenewalEvidenceProjector:
                 "step_states": {step.template_key: step.state for step in runtime.steps},
                 "attempt_states": [state for _, state in runtime.attempts],
                 "agent_run_states": [state for _, _, state in runtime.agent_runs],
-                "delivery_attempt_states": (
-                    list(delivery.attempt_states) if delivery is not None else []
-                ),
+                "delivery_attempt_states": [
+                    list(delivery.attempt_states) for delivery in deliveries
+                ],
                 "approval_wait_id": (
                     str(approval_wait.wait_id) if approval_wait is not None else None
                 ),
                 "approval_wait_state": (approval_wait.state if approval_wait is not None else None),
-                "delivery_state": delivery.status if delivery is not None else None,
+                "delivery_states": [delivery.status for delivery in deliveries],
                 "external_email_effect_count": int(effect_events[0]) if effect_events else 0,
             },
             invariant_violations=(),

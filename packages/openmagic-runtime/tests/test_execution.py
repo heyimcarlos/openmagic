@@ -7,11 +7,21 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from openmagic_runtime.agents import (
+    AgentAudience,
+    AgentConfiguration,
+    AgentExecutionInput,
+    AgentField,
+    AgentRecord,
+    AgentRunInput,
+    AgentTask,
+)
 from openmagic_runtime.execution import (
     AttemptExecution,
     CancellationToken,
     FreshAgentExecutor,
 )
+from openmagic_runtime.threads import ThreadContext
 
 
 @dataclass(frozen=True)
@@ -19,28 +29,49 @@ class Candidate:
     value: str
 
 
-def _candidate_factory():  # type: ignore[no-untyped-def]
-    return lambda value: Candidate(value["value"])
+def _candidate_factory():
+    return lambda execution: Candidate(str(execution.run_input.task.input.value("value")))
 
 
-def _slow_candidate_factory(marker: Path):  # type: ignore[no-untyped-def]
-    def run(value: dict[str, object]) -> Candidate:
+def _slow_candidate_factory(marker: Path):
+    def run(execution: AgentExecutionInput) -> Candidate:
         time.sleep(1.5)
-        marker.write_text(str(value["value"]))
+        marker.write_text(str(execution.run_input.task.input.value("value")))
         return Candidate("late")
 
     return run
 
 
 def _execution() -> AttemptExecution:
+    attempt_id = uuid4()
+    thread_id = uuid4()
+    run_input = AgentRunInput(
+        configuration=AgentConfiguration("test.agent", 1, "test.agent.instructions.v1"),
+        task=AgentTask(
+            "test.task",
+            1,
+            AgentRecord("test.task.input", 1, (AgentField("value", "candidate"),)),
+        ),
+        thread_id=thread_id,
+        context_through_sequence=0,
+        domain_event_context=(),
+        audience_context=AgentAudience("test", "recipient"),
+        locale="en-CA",
+    )
     return AttemptExecution(
         instance_id=uuid4(),
         step_id=uuid4(),
-        attempt_id=uuid4(),
+        attempt_id=attempt_id,
         attempt_number=1,
         template_key="test_agent",
         executor_key="test.agent.v1",
         input={"value": "candidate"},
+        agent_input=AgentExecutionInput(
+            agent_run_id=uuid4(),
+            attempt_id=attempt_id,
+            run_input=run_input,
+            thread_context=ThreadContext(thread_id, 0, ()),
+        ),
     )
 
 

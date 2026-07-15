@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import json
+import signal
 import threading
 from collections.abc import Callable
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Literal
+from typing import Any, Literal
 
 from openmagic_runtime.evidence import inspect_runtime_database
 
@@ -21,7 +22,7 @@ def serve_worker(
     host: str,
     port: int,
     worker_id: str,
-    tick: Callable[[], object],
+    tick: Callable[[threading.Event], object],
     polling_seconds: float = 0.05,
 ) -> None:
     inspect_runtime_database(database_url)
@@ -31,7 +32,7 @@ def serve_worker(
     def work_loop() -> None:
         while not stop.is_set():
             try:
-                tick()
+                tick(stop)
                 stop.wait(polling_seconds)
             except Exception as error:
                 failures[:] = [type(error).__name__]
@@ -64,12 +65,24 @@ def serve_worker(
             return
 
     server = ThreadingHTTPServer((host, port), HealthHandler)
+    previous_handlers: dict[int, Any] = {}
+
+    def request_shutdown(signum: int, frame: object) -> None:
+        del signum, frame
+        stop.set()
+        threading.Thread(target=server.shutdown, daemon=True).start()
+
+    for signum in (signal.SIGTERM, signal.SIGINT):
+        previous_handlers[signum] = signal.getsignal(signum)
+        signal.signal(signum, request_shutdown)
     try:
         server.serve_forever()
     finally:
         stop.set()
         server.server_close()
         worker_thread.join(timeout=max(1.0, polling_seconds * 4))
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
 
 
 __all__ = ["WorkerRole", "serve_worker"]

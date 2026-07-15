@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from threading import Event
 from uuid import uuid4
 
 from openmagic_runtime.workers import WorkerRole, serve_worker
@@ -22,7 +23,7 @@ def _main(role: WorkerRole) -> None:
     if role == "workflow-worker":
         claimed = None
 
-        def tick() -> object:
+        def tick(stop: Event) -> object:
             nonlocal claimed
             if claimed is None:
                 application.recover_expired_workflow_attempt()
@@ -36,12 +37,14 @@ def _main(role: WorkerRole) -> None:
             return application.complete_workflow_attempt(
                 attempt=current,
                 worker_id=arguments.worker_id,
+                worker_shutdown=stop,
             )
 
     else:
         delivery_claim = None
 
-        def tick() -> object:
+        def tick(stop: Event) -> object:
+            del stop
             nonlocal delivery_claim
             if delivery_claim is None:
                 delivery_claim = application.claim_delivery_attempt(

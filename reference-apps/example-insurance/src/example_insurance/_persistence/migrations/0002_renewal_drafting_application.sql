@@ -1,3 +1,13 @@
+CREATE TABLE example_insurance.policy_renewal_facts (
+    policy_id uuid PRIMARY KEY,
+    policy_number text NOT NULL,
+    policyholder_name text NOT NULL,
+    renewal_date date NOT NULL,
+    expiring_premium_cents bigint NOT NULL CHECK (expiring_premium_cents > 0),
+    revision bigint NOT NULL CHECK (revision > 0),
+    updated_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);
+
 CREATE TABLE example_insurance.renewal_workflows (
     workflow_id uuid PRIMARY KEY,
     start_command_id uuid NOT NULL UNIQUE,
@@ -25,7 +35,7 @@ CREATE TABLE example_insurance.domain_events (
 
 CREATE TABLE example_insurance.renewal_drafts (
     draft_id uuid PRIMARY KEY,
-    workflow_id uuid NOT NULL UNIQUE REFERENCES example_insurance.renewal_workflows(workflow_id),
+    workflow_id uuid NOT NULL REFERENCES example_insurance.renewal_workflows(workflow_id),
     step_id uuid NOT NULL UNIQUE REFERENCES openmagic_runtime.steps(step_id),
     agent_run_id uuid NOT NULL UNIQUE REFERENCES openmagic_runtime.agent_runs(agent_run_id),
     subject text NOT NULL,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
@@ -38,7 +39,15 @@ class ClaimedAttempt:
     attempt_number: int
     template_key: str
     executor_key: str
+    lease_seconds: int
     input: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class RenewedAttemptLease:
+    attempt_id: UUID
+    lease_expires_at: datetime
+    hard_deadline: datetime
 
 
 @dataclass(frozen=True)
@@ -79,12 +88,18 @@ class KernelWork:
         self._connection = connection
 
     def claim(self, request: ClaimWork) -> ClaimedAttempt | None:
+        self._connection.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+            (str(request.claim_request_id),),
+        )
         replay = self._connection.execute(
-            "SELECT receipt FROM openmagic_runtime.trace_events "
+            "SELECT receipt, input_digest FROM openmagic_runtime.trace_events "
             "WHERE source_kind = 'claim' AND source_id = %s",
             (request.claim_request_id,),
         ).fetchone()
         if replay is not None:
+            if str(replay[1]) != canonical_digest(request):
+                raise ValueError("Attempt claim identity has conflicting input")
             value = dict(replay[0])
             return ClaimedAttempt(
                 instance_id=UUID(value["instance_id"]),
@@ -93,12 +108,20 @@ class KernelWork:
                 attempt_number=value["attempt_number"],
                 template_key=value["template_key"],
                 executor_key=value["executor_key"],
+                lease_seconds=int(value["lease_seconds"]),
                 input=dict(value["input"]),
             )
         instance = self._connection.execute(
             "SELECT i.instance_id FROM openmagic_runtime.instances AS i "
+            "JOIN openmagic_runtime.workflow_definitions AS d "
+            "ON d.definition_key = i.definition_key "
+            "AND d.definition_version = i.definition_version "
             "WHERE i.state = 'open' AND EXISTS ("
-            "SELECT 1 FROM openmagic_runtime.steps AS s WHERE s.instance_id = i.instance_id "
+            "SELECT 1 FROM openmagic_runtime.steps AS s "
+            "JOIN LATERAL jsonb_array_elements(d.manifest->'step_templates') AS template "
+            "ON template->>'key' = s.template_key "
+            "WHERE s.instance_id = i.instance_id "
+            "AND template->>'executor_key' = ANY(%s) "
             "AND s.state = 'pending' AND s.claimable_at <= clock_timestamp() "
             "AND NOT EXISTS (SELECT 1 FROM openmagic_runtime.attempts AS a "
             "WHERE a.step_id = s.step_id AND a.state = 'leased') "
@@ -106,7 +129,8 @@ class KernelWork:
             "JOIN openmagic_runtime.steps AS prerequisite "
             "ON prerequisite.step_id = dep.prerequisite_step_id "
             "WHERE dep.step_id = s.step_id AND prerequisite.state <> 'succeeded')) "
-            "ORDER BY i.created_at, i.instance_id FOR UPDATE SKIP LOCKED LIMIT 1"
+            "ORDER BY i.created_at, i.instance_id FOR UPDATE OF i SKIP LOCKED LIMIT 1",
+            (list(request.executor_keys),),
         ).fetchone()
         if instance is None:
             return None
@@ -167,6 +191,7 @@ class KernelWork:
             "attempt_number": attempt_number,
             "template_key": str(selected[1]),
             "executor_key": selected_template.executor_key,
+            "lease_seconds": selected_template.lease_seconds,
             "input": dict(selected[2]),
         }
         append_trace(
@@ -185,6 +210,7 @@ class KernelWork:
             attempt_number=attempt_number,
             template_key=str(selected[1]),
             executor_key=selected_template.executor_key,
+            lease_seconds=selected_template.lease_seconds,
             input=dict(selected[2]),
         )
 
@@ -222,6 +248,7 @@ class KernelWork:
             attempt_number=int(row[7]),
             template_key=str(row[8]),
             executor_key=template.executor_key,
+            lease_seconds=template.lease_seconds,
             input=dict(row[9]),
         )
         if attempt != durable_claim:
@@ -239,6 +266,95 @@ class KernelWork:
             directive="execute",
             accepted_observation=None,
         )
+
+    def renew(
+        self,
+        attempt: ClaimedAttempt,
+        *,
+        worker_id: str,
+        renewal_id: UUID,
+    ) -> RenewedAttemptLease:
+        renewal_input = {"attempt": attempt, "worker_id": worker_id}
+        self._connection.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+            (str(renewal_id),),
+        )
+        replay = self._connection.execute(
+            "SELECT receipt, input_digest FROM openmagic_runtime.trace_events "
+            "WHERE source_kind = 'attempt_lease_renewal' AND source_id = %s",
+            (renewal_id,),
+        ).fetchone()
+        if replay is not None:
+            if str(replay[1]) != canonical_digest(renewal_input):
+                raise ValueError("Attempt lease renewal identity has conflicting input")
+            receipt = dict(replay[0])
+            return RenewedAttemptLease(
+                attempt_id=UUID(receipt["attempt_id"]),
+                lease_expires_at=datetime.fromisoformat(receipt["lease_expires_at"]),
+                hard_deadline=datetime.fromisoformat(receipt["hard_deadline"]),
+            )
+        durable_instance = self._connection.execute(
+            "SELECT instance_id FROM openmagic_runtime.attempts WHERE attempt_id = %s",
+            (attempt.attempt_id,),
+        ).fetchone()
+        if durable_instance is None:
+            raise StaleAuthority("Attempt authority does not exist")
+        self._connection.execute(
+            "SELECT instance_id FROM openmagic_runtime.instances WHERE instance_id = %s FOR UPDATE",
+            (durable_instance[0],),
+        ).fetchone()
+        row = self._connection.execute(
+            "SELECT a.state, a.worker_id, a.lease_expires_at > clock_timestamp(), "
+            "a.hard_deadline > clock_timestamp(), a.instance_id, a.step_id, "
+            "a.attempt_number, s.template_key, s.input FROM openmagic_runtime.attempts AS a "
+            "JOIN openmagic_runtime.steps AS s ON s.step_id = a.step_id "
+            "WHERE a.attempt_id = %s FOR UPDATE OF a, s",
+            (attempt.attempt_id,),
+        ).fetchone()
+        if row is None:
+            raise StaleAuthority("Attempt authority does not exist")
+        template = _template(self._connection, UUID(str(row[4])), str(row[7]))
+        durable_claim = ClaimedAttempt(
+            instance_id=UUID(str(row[4])),
+            step_id=UUID(str(row[5])),
+            attempt_id=attempt.attempt_id,
+            attempt_number=int(row[6]),
+            template_key=str(row[7]),
+            executor_key=template.executor_key,
+            lease_seconds=template.lease_seconds,
+            input=dict(row[8]),
+        )
+        if attempt != durable_claim:
+            raise StaleAuthority("Worker claim does not match durable Attempt authority")
+        if row[0] != "leased" or row[1] != worker_id or not row[2] or not row[3]:
+            raise StaleAuthority("Attempt authority is stale")
+        renewed = self._connection.execute(
+            "UPDATE openmagic_runtime.attempts SET lease_expires_at = "
+            "LEAST(clock_timestamp() + (%s * interval '1 second'), hard_deadline) "
+            "WHERE attempt_id = %s RETURNING lease_expires_at, hard_deadline",
+            (template.lease_seconds, attempt.attempt_id),
+        ).fetchone()
+        if renewed is None:
+            raise StaleAuthority("Attempt authority could not be renewed")
+        result = RenewedAttemptLease(
+            attempt_id=attempt.attempt_id,
+            lease_expires_at=renewed[0],
+            hard_deadline=renewed[1],
+        )
+        append_trace(
+            self._connection,
+            instance_id=attempt.instance_id,
+            event_type="attempt_lease_renewed",
+            source_kind="attempt_lease_renewal",
+            source_id=renewal_id,
+            input_value=renewal_input,
+            receipt={
+                "attempt_id": str(result.attempt_id),
+                "lease_expires_at": result.lease_expires_at.isoformat(),
+                "hard_deadline": result.hard_deadline.isoformat(),
+            },
+        )
+        return result
 
     def recover_expired(self) -> DispositionRequired | None:
         instance = self._connection.execute(
@@ -383,6 +499,17 @@ def claim_once(*, database_url: str, request: ClaimWork) -> ClaimedAttempt | Non
         raise
 
 
+def renew_once(
+    *, database_url: str, attempt: ClaimedAttempt, worker_id: str, renewal_id: UUID
+) -> RenewedAttemptLease:
+    with psycopg.connect(database_url) as connection, connection.transaction():
+        return KernelWork(connection).renew(
+            attempt,
+            worker_id=worker_id,
+            renewal_id=renewal_id,
+        )
+
+
 __all__ = [
     "AttemptExecutionAuthority",
     "AttemptResultConflict",
@@ -390,6 +517,8 @@ __all__ = [
     "ClaimedAttempt",
     "DispositionRequired",
     "KernelWork",
+    "RenewedAttemptLease",
     "StaleAuthority",
     "claim_once",
+    "renew_once",
 ]

@@ -5,10 +5,12 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from multiprocessing import get_context
-from threading import Event
+from threading import Event, Thread
 from time import monotonic
 from typing import Any, Generic, Protocol, TypeVar
 from uuid import UUID
+
+from openmagic_runtime.agents import AgentExecutionInput
 
 
 @dataclass(frozen=True)
@@ -20,6 +22,7 @@ class AttemptExecution:
     template_key: str
     executor_key: str
     input: dict[str, Any]
+    agent_input: AgentExecutionInput | None = None
 
 
 @dataclass(frozen=True)
@@ -39,10 +42,77 @@ class CancellationToken:
         self._event.set()
 
 
+class ExecutionAuthorityLost(RuntimeError):
+    """Raised when execution is cancelled because its durable authority ended."""
+
+
 class Executor(Protocol):
     def execute(
         self, execution: AttemptExecution, cancellation: CancellationToken
     ) -> AttemptObservation: ...
+
+
+def execute_with_renewable_authority(
+    *,
+    executor: Executor,
+    execution: AttemptExecution,
+    cancellation: CancellationToken,
+    renew: Callable[[], object],
+    lease_seconds: int,
+    worker_shutdown: Event | None = None,
+) -> AttemptObservation:
+    """Execute while renewing durable authority and cancel immediately when it is lost."""
+    if lease_seconds <= 0:
+        raise ValueError("Attempt lease duration must be positive")
+    if worker_shutdown is not None and worker_shutdown.is_set():
+        cancellation.cancel()
+        raise ExecutionAuthorityLost("Worker shutdown cancelled Attempt execution")
+    try:
+        renew()
+    except BaseException as error:
+        cancellation.cancel()
+        raise ExecutionAuthorityLost("Attempt execution lost durable authority") from error
+    stopped = Event()
+    authority_failure: list[BaseException] = []
+    interval = max(0.05, lease_seconds / 3)
+
+    def maintain() -> None:
+        while not stopped.wait(interval):
+            if worker_shutdown is not None and worker_shutdown.is_set():
+                authority_failure.append(
+                    RuntimeError("Worker shutdown cancelled Attempt execution")
+                )
+                cancellation.cancel()
+                return
+            try:
+                renew()
+            except BaseException as error:
+                authority_failure.append(error)
+                cancellation.cancel()
+                return
+
+    maintainer = Thread(target=maintain, name="openmagic-attempt-lease", daemon=True)
+    maintainer.start()
+    try:
+        try:
+            result = executor.execute(execution, cancellation)
+        except BaseException:
+            if authority_failure:
+                raise ExecutionAuthorityLost("Attempt execution lost durable authority") from (
+                    authority_failure[0]
+                )
+            raise
+    finally:
+        stopped.set()
+        maintainer.join(timeout=1)
+    if authority_failure:
+        raise ExecutionAuthorityLost("Attempt execution lost durable authority") from (
+            authority_failure[0]
+        )
+    if worker_shutdown is not None and worker_shutdown.is_set():
+        cancellation.cancel()
+        raise ExecutionAuthorityLost("Worker shutdown cancelled Attempt execution")
+    return result
 
 
 class DeterministicExecutor:
@@ -64,8 +134,8 @@ CandidateT = TypeVar("CandidateT")
 
 
 def _run_agent_child(
-    factory: Callable[[], Callable[[dict[str, Any]], Any]],
-    input_value: dict[str, Any],
+    factory: Callable[[], Callable[[AgentExecutionInput], Any]],
+    input_value: AgentExecutionInput,
     sender: Any,
 ) -> None:
     try:
@@ -79,7 +149,7 @@ def _run_agent_child(
 class FreshAgentExecutor(Generic[CandidateT]):
     def __init__(
         self,
-        factory: Callable[[], Callable[[dict[str, Any]], CandidateT]],
+        factory: Callable[[], Callable[[AgentExecutionInput], CandidateT]],
         *,
         result_class: type[CandidateT],
         encoder: Callable[[CandidateT], dict[str, Any]],
@@ -97,11 +167,13 @@ class FreshAgentExecutor(Generic[CandidateT]):
     ) -> AttemptObservation:
         if cancellation.cancelled:
             raise RuntimeError("Attempt execution was cancelled")
+        if execution.agent_input is None:
+            raise RuntimeError("Agent execution requires its durable typed Run Input")
         context = get_context("spawn")
         receiver, sender = context.Pipe(duplex=False)
         process = context.Process(
             target=_run_agent_child,
-            args=(self._factory, dict(execution.input), sender),
+            args=(self._factory, execution.agent_input, sender),
             name="openmagic-agent-attempt",
         )
         process.start()
@@ -142,6 +214,8 @@ __all__ = [
     "AttemptObservation",
     "CancellationToken",
     "DeterministicExecutor",
+    "ExecutionAuthorityLost",
     "Executor",
     "FreshAgentExecutor",
+    "execute_with_renewable_authority",
 ]

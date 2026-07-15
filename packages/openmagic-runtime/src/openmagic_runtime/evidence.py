@@ -129,24 +129,28 @@ class RuntimeEvidenceReader:
             ),
         )
 
-    def delivery(self, domain_event_id: UUID) -> RuntimeDeliveryEvidence | None:
-        delivery = self._connection.execute(
+    def deliveries(self, domain_event_id: UUID) -> tuple[RuntimeDeliveryEvidence, ...]:
+        deliveries = self._connection.execute(
             "SELECT delivery_id, status, delivered_message_id "
-            "FROM openmagic_runtime.deliveries WHERE domain_event_id = %s",
+            "FROM openmagic_runtime.deliveries WHERE domain_event_id = %s "
+            "ORDER BY created_at, delivery_id",
             (domain_event_id,),
-        ).fetchone()
-        if delivery is None:
-            return None
-        attempt_states = self._connection.execute(
-            "SELECT state FROM openmagic_runtime.delivery_attempts WHERE delivery_id = %s "
-            "ORDER BY created_at, delivery_attempt_id",
-            (delivery[0],),
         ).fetchall()
-        return RuntimeDeliveryEvidence(
-            delivery_id=UUID(str(delivery[0])),
-            status=str(delivery[1]),
-            delivered_message_id=(UUID(str(delivery[2])) if delivery[2] is not None else None),
-            attempt_states=tuple(str(row[0]) for row in attempt_states),
+        return tuple(
+            RuntimeDeliveryEvidence(
+                delivery_id=UUID(str(delivery[0])),
+                status=str(delivery[1]),
+                delivered_message_id=(UUID(str(delivery[2])) if delivery[2] is not None else None),
+                attempt_states=tuple(
+                    str(row[0])
+                    for row in self._connection.execute(
+                        "SELECT state FROM openmagic_runtime.delivery_attempts "
+                        "WHERE delivery_id = %s ORDER BY created_at, delivery_attempt_id",
+                        (delivery[0],),
+                    ).fetchall()
+                ),
+            )
+            for delivery in deliveries
         )
 
 
