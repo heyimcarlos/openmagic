@@ -1,8 +1,20 @@
 # OpenMagic Workflow Domain
 
-OpenMagic coordinates durable insurance work across conversations, people, organizations, and replaceable execution processes. This glossary names the business concepts that remain stable when channels, providers, and agent runtimes change.
+OpenMagic coordinates durable work across conversations, people, organizations, and replaceable execution processes. Application Packages supply the business vocabulary and rules. This glossary names the concepts that remain stable when applications, channels, providers, and agent runtimes change.
 
 ## Language
+
+**OpenMagic Runtime**:
+The reusable product that executes application-owned durable work through stable public interfaces. It includes the generic Workflow kernel and multi-Agent execution capabilities but contains no insurance, commerce, or other application-specific rules.
+_Avoid_: Application Package, Reference Application, insurance runtime
+
+**Application Package**:
+The user-owned business definition built on the OpenMagic Runtime. It owns its Commands, Workflow Definitions, qualified Policies, Domain Events, Executor configurations, tools, templates, and completion rules without changing the reusable runtime.
+_Avoid_: OpenMagic Runtime, tenant, kernel plugin
+
+**Reference Application**:
+A named illustrative Application Package, such as Example Insurance or Example Commerce, used to demonstrate and prove reuse of the OpenMagic Runtime. Its business rules are examples rather than runtime contracts.
+_Avoid_: Company A, production tenant, OpenMagic Runtime
 
 **Party**:
 A person or organization represented by OpenMagic independently of any particular Workflow. Every human or organizational identity is a Party; an application user is not a separate domain concept.
