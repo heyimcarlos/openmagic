@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 from uuid import UUID, uuid4
 
 import psycopg
 from psycopg import Connection
-from psycopg.rows import dict_row
 
 
 @dataclass(frozen=True)
@@ -24,14 +22,6 @@ class ThreadView:
     thread_id: UUID
     channel_kind: str
     channel_reference: str
-
-    @classmethod
-    def decode(cls, record: Mapping[str, Any]) -> ThreadView:
-        return cls(
-            thread_id=UUID(str(record["thread_id"])),
-            channel_kind=str(record["channel_kind"]),
-            channel_reference=str(record["channel_reference"]),
-        )
 
 
 @dataclass(frozen=True)
@@ -169,17 +159,6 @@ class ThreadAccess:
         ).fetchone()
         if row is None:
             raise KeyError(f"Thread not found: {thread_id}")
-
-    def metadata(self, thread_id: UUID) -> ThreadView:
-        with self._connection.cursor(row_factory=dict_row) as cursor:
-            record = cursor.execute(
-                "SELECT thread_id, channel_kind, channel_reference "
-                "FROM openmagic_runtime.threads WHERE thread_id = %s",
-                (thread_id,),
-            ).fetchone()
-        if record is None:
-            raise KeyError(f"Thread not found: {thread_id}")
-        return ThreadView.decode(record)
 
     def context_cutoff(self, thread_id: UUID) -> int:
         self.require(thread_id)

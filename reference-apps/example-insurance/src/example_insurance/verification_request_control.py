@@ -7,7 +7,7 @@ from uuid import UUID, uuid4
 
 from openmagic_runtime.commands import StateConflict
 from openmagic_runtime.kernel.control import KernelControl, StartInstance
-from openmagic_runtime.threads import ThreadAccess
+from openmagic_runtime.threads import ThreadStore
 from psycopg import Connection
 
 from example_insurance.renewal_records import record_event
@@ -49,18 +49,20 @@ class VerificationRequestControl:
         policy: VerificationPolicy,
         lifecycle: VerificationChallengeLifecycle,
         deliveries: ProtectedRenewalDeliveryControl,
+        threads: ThreadStore,
     ) -> None:
         self._challenge_ttl_seconds = challenge_ttl_seconds
         self._policy = policy
         self._lifecycle = lifecycle
         self._deliveries = deliveries
+        self._threads = threads
 
     def provision(
         self,
         command: ProvisionVerificationAuthority,
         connection: Connection[tuple[Any, ...]],
     ) -> ProvisionVerificationAuthorityResult:
-        self._require_identifier_thread(command, connection)
+        self._require_immutable_identifier_channel(command)
         pending = self._lifecycle.lock_pending_instances(
             connection,
             party_id=command.input.party_id,
@@ -83,14 +85,13 @@ class VerificationRequestControl:
             participant_id=provisioned.participant_id,
         )
 
-    @staticmethod
-    def _require_identifier_thread(
+    def _require_immutable_identifier_channel(
+        self,
         command: ProvisionVerificationAuthority,
-        connection: Connection[tuple[Any, ...]],
     ) -> None:
         value = command.input
         try:
-            thread = ThreadAccess(connection).metadata(value.delivery_thread_id)
+            thread = self._threads.read(value.delivery_thread_id)
         except KeyError as error:
             raise ValueError("Verification identifier Thread is unavailable") from error
         if (

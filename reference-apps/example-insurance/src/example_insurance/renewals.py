@@ -39,7 +39,7 @@ from openmagic_runtime.kernel.definitions import DefinitionCatalog
 from openmagic_runtime.kernel.work import (
     ClaimedAttempt,
 )
-from openmagic_runtime.threads import ThreadAccess
+from openmagic_runtime.threads import ThreadAccess, ThreadStore
 from psycopg import Connection
 
 from example_insurance.application_registry import application_command_dispatcher
@@ -208,6 +208,7 @@ class ExampleInsurance:
         self._verification_control = (
             VerificationControl(
                 codes=verification_codes,
+                threads=ThreadStore(database_url=database_url),
                 challenge_ttl_seconds=challenge_ttl_seconds,
                 session_ttl_seconds=session_ttl_seconds,
             )

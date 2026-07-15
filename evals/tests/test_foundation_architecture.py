@@ -202,8 +202,8 @@ def test_worker_and_verification_control_depend_on_narrow_application_seams() ->
         }
         for module, _ in worker_imports
     )
-    assert ("openmagic_runtime.threads", "ThreadAccess") in request_imports
-    assert ("openmagic_runtime.threads", "ThreadStore") not in request_imports
+    assert ("openmagic_runtime.threads", "ThreadStore") in request_imports
+    assert ("openmagic_runtime.threads", "ThreadAccess") not in request_imports
 
 
 def test_playground_safety_is_verified_through_its_process_interface() -> None:
