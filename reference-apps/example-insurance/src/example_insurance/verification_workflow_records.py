@@ -4,12 +4,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Literal
-from uuid import UUID
+from uuid import UUID, uuid4
 
+from openmagic_runtime.commands import Actor, Cause
 from openmagic_runtime.kernel.records import expired_attempt_instances
 from psycopg import Connection
 from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 
+from example_insurance.application_event_records import actor_record, cause_record
 from example_insurance.verification_challenge_records import DurableChallenge
 
 VerificationWorkflowLifecycle = Literal["active", "completed", "failed"]
@@ -30,7 +33,6 @@ class VerificationAttemptState:
     workflow_id: UUID
     challenge: DurableChallenge
     lifecycle: VerificationWorkflowLifecycle
-    delivery_id: UUID | None
 
 
 def lock_verification_attempt(
@@ -38,7 +40,7 @@ def lock_verification_attempt(
 ) -> VerificationAttemptState:
     with connection.cursor(row_factory=dict_row) as cursor:
         workflow = cursor.execute(
-            "SELECT workflow_id, challenge_id, lifecycle, delivery_id FROM "
+            "SELECT workflow_id, challenge_id, lifecycle FROM "
             "example_insurance.verification_workflows WHERE instance_id = %s FOR UPDATE",
             (instance_id,),
         ).fetchone()
@@ -53,13 +55,35 @@ def lock_verification_attempt(
         ).fetchone()
     if challenge is None:
         raise RuntimeError("Verification Challenge is unavailable")
-    delivery_id = workflow["delivery_id"]
     return VerificationAttemptState(
         workflow_id=UUID(str(workflow["workflow_id"])),
         challenge=DurableChallenge.decode(challenge),
         lifecycle=_workflow_lifecycle(workflow["lifecycle"]),
-        delivery_id=UUID(str(delivery_id)) if delivery_id is not None else None,
     )
+
+
+def record_verification_event(
+    connection: Connection[tuple[Any, ...]],
+    *,
+    workflow_id: UUID,
+    actor: Actor,
+    cause: Cause,
+    payload: dict[str, Any],
+) -> UUID:
+    event_id = uuid4()
+    connection.execute(
+        "INSERT INTO example_insurance.verification_events "
+        "(event_id, workflow_id, event_type, schema_version, actor, cause, payload) "
+        "VALUES (%s, %s, 'verification.challenge.delivery_ready', 1, %s, %s, %s)",
+        (
+            event_id,
+            workflow_id,
+            Jsonb(actor_record(actor)),
+            Jsonb(cause_record(cause)),
+            Jsonb(payload),
+        ),
+    )
+    return event_id
 
 
 def complete_verification_workflow(
@@ -92,6 +116,16 @@ def expired_verification_instances(
     return tuple(UUID(str(row[0])) for row in rows)
 
 
+def has_active_verification_workflows(
+    connection: Connection[tuple[Any, ...]],
+) -> bool:
+    row = connection.execute(
+        "SELECT EXISTS (SELECT 1 FROM example_insurance.verification_workflows "
+        "WHERE lifecycle = 'active')"
+    ).fetchone()
+    return row is not None and bool(row[0])
+
+
 def fail_verification_workflow(
     connection: Connection[tuple[Any, ...]], *, workflow_id: UUID, challenge_id: UUID
 ) -> None:
@@ -112,5 +146,7 @@ __all__ = [
     "complete_verification_workflow",
     "expired_verification_instances",
     "fail_verification_workflow",
+    "has_active_verification_workflows",
     "lock_verification_attempt",
+    "record_verification_event",
 ]

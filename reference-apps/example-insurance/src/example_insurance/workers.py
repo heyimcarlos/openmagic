@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 from threading import Event
 from uuid import uuid4
 
@@ -18,19 +19,22 @@ def _main(role: WorkerRole) -> None:
     parser.add_argument("--port", required=True, type=int)
     parser.add_argument("--worker-id", required=True)
     parser.add_argument("--email-provider-url")
-    parser.add_argument("--verification-code-secret")
+    parser.add_argument("--verification-code-secret-file")
     arguments = parser.parse_args()
+    if role == "workflow-worker" and arguments.verification_code_secret_file is None:
+        parser.error("Workflow Worker requires --verification-code-secret-file")
+    verification_code_secret = (
+        Path(arguments.verification_code_secret_file).read_bytes()
+        if arguments.verification_code_secret_file is not None
+        else None
+    )
     application = ExampleInsurance(
         database_url=arguments.database_url,
         email_provider_url=arguments.email_provider_url,
-        verification_code_secret=(
-            arguments.verification_code_secret.encode()
-            if arguments.verification_code_secret is not None
-            else None
-        ),
+        verification_code_secret=verification_code_secret,
     )
-    application.prepare()
     if role == "workflow-worker":
+        application.prepare_workflow_worker()
         claimed = None
 
         def tick(stop: Event) -> object:
@@ -51,6 +55,7 @@ def _main(role: WorkerRole) -> None:
             )
 
     else:
+        application.prepare()
         delivery_claim = None
 
         def tick(stop: Event) -> object:

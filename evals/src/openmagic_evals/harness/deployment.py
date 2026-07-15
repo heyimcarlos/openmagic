@@ -19,6 +19,8 @@ from testcontainers.postgres import PostgresContainer
 from openmagic_evals.harness._network import free_port
 from openmagic_evals.harness._postgres import postgres_container
 
+_SYNTHETIC_VERIFICATION_SECRET = "openmagic-evals-verification-secret"
+
 ProcessRole = Literal["api", "workflow-worker", "delivery-worker"]
 
 
@@ -152,8 +154,14 @@ class TestDeployment:
             worker_arguments = ["--worker-id", f"{role}-{uuid4().hex}"]
         if role == "workflow-worker" and self.email_provider_url is not None:
             worker_arguments.extend(["--email-provider-url", self.email_provider_url])
-        if role == "workflow-worker" and self.verification_code_secret is not None:
-            worker_arguments.extend(["--verification-code-secret", self.verification_code_secret])
+        if role == "workflow-worker":
+            secret_path = self.working_directory / "verification-code-secret"
+            secret_path.write_text(
+                self.verification_code_secret or _SYNTHETIC_VERIFICATION_SECRET,
+                encoding="utf-8",
+            )
+            secret_path.chmod(0o600)
+            worker_arguments.extend(["--verification-code-secret-file", str(secret_path)])
         command = [
             str(script),
             "--database-url",

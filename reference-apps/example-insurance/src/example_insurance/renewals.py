@@ -109,6 +109,9 @@ from example_insurance.verification_commands import (
 from example_insurance.verification_control import VerificationControl
 from example_insurance.verification_definition import VERIFICATION_DEFINITION
 from example_insurance.verification_registry import VerificationCommandHandlers
+from example_insurance.verification_workflow_records import (
+    has_active_verification_workflows,
+)
 from example_insurance.workflow_worker_control import WorkflowWorkerControl
 
 
@@ -255,7 +258,17 @@ class ExampleInsurance:
 
     def prepare(self) -> None:
         DefinitionCatalog(database_url=self._database_url).register(RENEWAL_DEFINITION)
-        DefinitionCatalog(database_url=self._database_url).register(VERIFICATION_DEFINITION)
+        if self._verification_control is not None:
+            DefinitionCatalog(database_url=self._database_url).register(VERIFICATION_DEFINITION)
+
+    def prepare_workflow_worker(self) -> None:
+        if self._verification_control is None:
+            with psycopg.connect(self._database_url) as connection, connection.transaction():
+                if has_active_verification_workflows(connection):
+                    raise RuntimeError(
+                        "Open verification Workflows require deterministic executor support"
+                    )
+        self.prepare()
 
     def replace_renewal_facts(self, facts: RenewalFacts) -> None:
         self._renewal_facts.replace(facts)

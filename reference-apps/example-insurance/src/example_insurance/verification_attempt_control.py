@@ -13,7 +13,6 @@ from openmagic_runtime.kernel.work import ClaimedAttempt, KernelWork
 from psycopg import Connection
 
 from example_insurance.renewal_commands import WorkflowAttemptResult
-from example_insurance.renewal_records import record_event
 from example_insurance.verification_codes import VerificationCodes
 from example_insurance.verification_policy import (
     VERIFICATION_ATTEMPT_RETRY_POLICY,
@@ -24,6 +23,7 @@ from example_insurance.verification_workflow_records import (
     expired_verification_instances,
     fail_verification_workflow,
     lock_verification_attempt,
+    record_verification_event,
 )
 
 _CLOSURE_NAMESPACE = UUID("64d018be-17fb-4970-9c1c-9e00d4fa504d")
@@ -54,10 +54,9 @@ class VerificationAttemptControl:
             raise RuntimeError("Verification delivery observation conflicts with its Challenge")
         if workflow.lifecycle == "completed":
             return self._result(attempt)
-        event_id = record_event(
+        event_id = record_verification_event(
             connection,
-            event_type="verification.challenge.delivery_ready",
-            workflow_id=challenge.protected_workflow_id,
+            workflow_id=workflow.workflow_id,
             actor=Actor("system", "verification-control-plane"),
             cause=Cause("attempt", str(attempt.attempt_id)),
             payload={

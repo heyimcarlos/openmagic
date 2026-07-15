@@ -26,8 +26,7 @@ class AuthoritySnapshot:
     party_exists: bool
     identifier_id: UUID | None
     identifier_current_and_verified: bool
-    active_membership: bool
-    active_broker_role: bool
+    active_broker_authority: bool
     exact_approval_grant: bool
 
 
@@ -80,8 +79,9 @@ def provision_authority(
     )
     connection.execute(
         "INSERT INTO example_insurance.workflow_participants "
-        "(participant_id, workflow_id, party_id, role) VALUES (%s, %s, %s, 'broker')",
-        (participant_id, value.workflow_id, value.party_id),
+        "(participant_id, workflow_id, party_id, membership_id, role) "
+        "VALUES (%s, %s, %s, %s, 'broker')",
+        (participant_id, value.workflow_id, value.party_id, membership_id),
     )
     return ProvisionedAuthority(identifier_id, membership_id, participant_id)
 
@@ -105,12 +105,20 @@ def revoke_authority(
         ).fetchone()
     elif target == "membership":
         row = connection.execute(
-            "UPDATE example_insurance.organization_memberships SET revoked_at = "
-            "clock_timestamp() WHERE membership_id = (SELECT membership_id FROM "
-            "example_insurance.organization_memberships WHERE party_id = %s "
-            "AND revoked_at IS NULL ORDER BY joined_at, membership_id LIMIT 1 FOR UPDATE) "
+            "UPDATE example_insurance.organization_memberships AS membership "
+            "SET revoked_at = clock_timestamp() WHERE membership.membership_id = ("
+            "SELECT participant.membership_id FROM "
+            "example_insurance.workflow_participants AS participant "
+            "JOIN example_insurance.organization_memberships AS linked_membership "
+            "ON linked_membership.membership_id = participant.membership_id "
+            "AND linked_membership.party_id = participant.party_id "
+            "WHERE participant.workflow_id = %s AND participant.party_id = %s "
+            "AND participant.role = 'broker' AND participant.revoked_at IS NULL "
+            "AND linked_membership.revoked_at IS NULL "
+            "ORDER BY participant.assigned_at, participant.participant_id "
+            "LIMIT 1 FOR UPDATE OF participant, linked_membership) "
             "RETURNING membership_id",
-            (party_id,),
+            (workflow_id, party_id),
         ).fetchone()
     else:
         row = connection.execute(
@@ -152,16 +160,13 @@ def lock_authority(
             "LIMIT 1 FOR UPDATE",
             (party_id,),
         ).fetchone()
-    membership = connection.execute(
-        "SELECT membership_id FROM example_insurance.organization_memberships "
-        "WHERE party_id = %s AND revoked_at IS NULL ORDER BY joined_at, membership_id "
-        "LIMIT 1 FOR UPDATE",
-        (party_id,),
-    ).fetchone()
-    participant = connection.execute(
-        "SELECT participant_id FROM example_insurance.workflow_participants "
-        "WHERE workflow_id = %s AND party_id = %s AND role = 'broker' "
-        "AND revoked_at IS NULL LIMIT 1 FOR UPDATE",
+    broker_authority = connection.execute(
+        "SELECT p.participant_id FROM example_insurance.workflow_participants AS p "
+        "JOIN example_insurance.organization_memberships AS m "
+        "ON m.membership_id = p.membership_id AND m.party_id = p.party_id "
+        "WHERE p.workflow_id = %s AND p.party_id = %s AND p.role = 'broker' "
+        "AND p.revoked_at IS NULL AND m.revoked_at IS NULL "
+        "FOR UPDATE OF p, m",
         (workflow_id, party_id),
     ).fetchone()
     grant = connection.execute(
@@ -185,8 +190,7 @@ def lock_authority(
             and identifier["verified_at"] is not None
             and identifier["revoked_at"] is None
         ),
-        active_membership=membership is not None,
-        active_broker_role=participant is not None,
+        active_broker_authority=broker_authority is not None,
         exact_approval_grant=grant is not None,
     )
 

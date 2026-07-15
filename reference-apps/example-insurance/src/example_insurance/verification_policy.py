@@ -42,11 +42,7 @@ class VerificationPolicy:
             return "workflow_closed"
         if not authority.identifier_current_and_verified:
             return "identifier_revoked"
-        if (
-            authority.workflow_authority_revoked
-            or not authority.active_membership
-            or not authority.active_broker_role
-        ):
+        if authority.workflow_authority_revoked or not authority.active_broker_authority:
             return "authority_revoked"
         if not authority.exact_approval_grant:
             return "approval_required"

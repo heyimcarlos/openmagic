@@ -488,6 +488,7 @@ def test_verification_delivery_failure_does_not_mutate_protected_workflow() -> N
         renewal_before = KernelInspection(database_url=database_url).snapshot(
             application.start_renewal_outreach(renewal).result.instance_id
         )
+        evidence_before = application.renewal_evidence_json(renewal.input.workflow_id)
         claim = application.claim_delivery_attempt(
             worker_id="failed-verification-delivery",
             claim_request_id=uuid4(),
@@ -520,10 +521,12 @@ def test_verification_delivery_failure_does_not_mutate_protected_workflow() -> N
         verification = KernelInspection(database_url=database_url).snapshot(
             required.result.verification_instance_id
         )
+        evidence_after = application.renewal_evidence_json(renewal.input.workflow_id)
 
         assert failure.outcome == "failed"
         assert rejected.result.verification_outcome == "delivery_unconfirmed"
         assert renewal_after == renewal_before
+        assert evidence_after == evidence_before
         assert verification.state == "closed"
 
 
@@ -538,6 +541,7 @@ def test_verification_delivery_retry_recovers_through_fresh_attempt() -> None:
             application, threads, deliver=False
         )
         assert required.result.challenge_id is not None
+        evidence_before = application.renewal_evidence_json(renewal.input.workflow_id)
         first = application.claim_delivery_attempt(
             worker_id="first-verification-delivery",
             claim_request_id=uuid4(),
@@ -558,6 +562,7 @@ def test_verification_delivery_retry_recovers_through_fresh_attempt() -> None:
             claim=second,
             worker_id="recovered-verification-delivery",
         )
+        evidence_after_recovery = application.renewal_evidence_json(renewal.input.workflow_id)
         code_match = re.search(
             r"\b(\d{6})\b", threads.read(renewal.input.thread_id).messages[-1].content
         )
@@ -581,6 +586,7 @@ def test_verification_delivery_retry_recovers_through_fresh_attempt() -> None:
         assert retry.outcome == "retry_scheduled"
         assert second.attempt_number == first.attempt_number + 1
         assert acknowledged.thread_id == renewal.input.thread_id
+        assert evidence_after_recovery == evidence_before
         assert accepted.result.verification_outcome == "verified"
 
 
@@ -660,6 +666,13 @@ def test_verification_attempt_recovers_after_worker_loss_from_fresh_application(
         )
         assert lost is not None
         assert lost.template_key == "deliver_verification_challenge"
+        without_support = ExampleInsurance(database_url=database_url)
+        without_support.prepare()
+        with pytest.raises(
+            RuntimeError,
+            match="Open verification Workflows require deterministic executor support",
+        ):
+            without_support.prepare_workflow_worker()
         time.sleep(1.05)
 
         restarted = ExampleInsurance(

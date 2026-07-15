@@ -25,7 +25,8 @@ CREATE TABLE example_insurance.organization_memberships (
     organization_party_id uuid NOT NULL REFERENCES example_insurance.parties(party_id),
     joined_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     revoked_at timestamptz,
-    CHECK (party_id <> organization_party_id)
+    CHECK (party_id <> organization_party_id),
+    UNIQUE (membership_id, party_id)
 );
 
 CREATE UNIQUE INDEX one_current_organization_membership
@@ -36,9 +37,12 @@ CREATE TABLE example_insurance.workflow_participants (
     participant_id uuid PRIMARY KEY,
     workflow_id uuid NOT NULL REFERENCES example_insurance.renewal_workflows(workflow_id),
     party_id uuid NOT NULL REFERENCES example_insurance.parties(party_id),
+    membership_id uuid NOT NULL,
     role text NOT NULL CHECK (role IN ('broker', 'reporter', 'policyholder', 'claimant')),
     assigned_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-    revoked_at timestamptz
+    revoked_at timestamptz,
+    FOREIGN KEY (membership_id, party_id)
+        REFERENCES example_insurance.organization_memberships(membership_id, party_id)
 );
 
 CREATE UNIQUE INDEX one_current_workflow_role
@@ -112,7 +116,7 @@ CREATE TABLE example_insurance.verification_workflows (
     protected_workflow_id uuid NOT NULL
         REFERENCES example_insurance.renewal_workflows(workflow_id),
     lifecycle text NOT NULL CHECK (lifecycle IN ('active', 'completed', 'failed')),
-    delivery_event_id uuid UNIQUE REFERENCES example_insurance.domain_events(event_id),
+    delivery_event_id uuid UNIQUE,
     delivery_id uuid UNIQUE REFERENCES openmagic_runtime.deliveries(delivery_id),
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     completed_at timestamptz,
@@ -122,6 +126,24 @@ CREATE TABLE example_insurance.verification_workflows (
     ),
     UNIQUE (workflow_id, challenge_id, instance_id, protected_workflow_id)
 );
+
+CREATE TABLE example_insurance.verification_events (
+    event_id uuid PRIMARY KEY,
+    workflow_id uuid NOT NULL
+        REFERENCES example_insurance.verification_workflows(workflow_id),
+    event_type text NOT NULL CHECK (event_type = 'verification.challenge.delivery_ready'),
+    schema_version integer NOT NULL CHECK (schema_version = 1),
+    actor jsonb NOT NULL,
+    cause jsonb NOT NULL,
+    payload jsonb NOT NULL,
+    occurred_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    UNIQUE (event_id, workflow_id)
+);
+
+ALTER TABLE example_insurance.verification_workflows
+    ADD CONSTRAINT exact_verification_delivery_event
+    FOREIGN KEY (delivery_event_id, workflow_id)
+        REFERENCES example_insurance.verification_events(event_id, workflow_id);
 
 CREATE TABLE example_insurance.verification_sessions (
     session_id uuid PRIMARY KEY,
