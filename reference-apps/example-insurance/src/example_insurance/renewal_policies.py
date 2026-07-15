@@ -7,6 +7,9 @@ from typing import Any, ClassVar, Literal
 from uuid import UUID
 
 from openmagic_runtime.delivery import DeliveryRetryPolicy
+from openmagic_runtime.kernel.definitions import RetryPolicy
+
+RENEWAL_ATTEMPT_RETRY_POLICY = RetryPolicy((0, 0))
 
 
 @dataclass(frozen=True)
@@ -57,7 +60,7 @@ class RenewalWorkflowPolicy:
                 action="fail",
                 failure={"class": "unknown_step_template"},
             )
-        if attempt_number < 3:
+        if attempt_number < RENEWAL_ATTEMPT_RETRY_POLICY.max_attempts:
             return RecoveryDecision(action="retry")
         return RecoveryDecision(
             action="fail",
@@ -105,6 +108,7 @@ class RenewalCompletionPolicy:
 
 
 __all__ = [
+    "RENEWAL_ATTEMPT_RETRY_POLICY",
     "RecoveryDecision",
     "RenewalCompletionPolicy",
     "RenewalDeliveryPolicy",

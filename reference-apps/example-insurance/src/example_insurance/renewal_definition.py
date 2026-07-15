@@ -6,7 +6,6 @@ from openmagic_runtime.kernel.definitions import (
     DefinitionIdentity,
     FieldBinding,
     FieldContract,
-    RetryPolicy,
     Route,
     RouteOutput,
     StepTemplate,
@@ -14,6 +13,8 @@ from openmagic_runtime.kernel.definitions import (
     WaitTemplate,
     WorkflowDefinition,
 )
+
+from example_insurance.renewal_policies import RENEWAL_ATTEMPT_RETRY_POLICY
 
 
 def _fields(*items: tuple[str, ValueType]) -> tuple[FieldContract, ...]:
@@ -47,7 +48,7 @@ RENEWAL_DEFINITION = WorkflowDefinition(
             output_contract=POLICY_FIELDS,
             lease_seconds=1,
             maximum_attempt_seconds=5,
-            retry_policy=RetryPolicy((0, 0)),
+            retry_policy=RENEWAL_ATTEMPT_RETRY_POLICY,
         ),
         StepTemplate(
             key="draft_renewal_email",
@@ -61,7 +62,7 @@ RENEWAL_DEFINITION = WorkflowDefinition(
             output_contract=_fields(("draft_id", "uuid")),
             lease_seconds=1,
             maximum_attempt_seconds=5,
-            retry_policy=RetryPolicy((0, 0)),
+            retry_policy=RENEWAL_ATTEMPT_RETRY_POLICY,
         ),
     ),
     wait_templates=(

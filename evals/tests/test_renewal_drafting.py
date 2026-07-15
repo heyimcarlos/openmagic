@@ -3,8 +3,9 @@ from __future__ import annotations
 import json
 import random
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from threading import Barrier, Event, Thread
 from typing import Any
@@ -80,6 +81,31 @@ from openmagic_runtime.kernel.work import (
     renew_once,
 )
 from openmagic_runtime.threads import AppendMessage, CreateThread, ThreadContext, ThreadStore
+
+
+@dataclass(frozen=True)
+class _RenewalEvalContext:
+    database_url: str
+    application: ExampleInsurance
+    threads: ThreadStore
+
+
+def _prepared_renewal_context(database_url: str) -> _RenewalEvalContext:
+    application = ExampleInsurance(database_url=database_url)
+    application.prepare()
+    return _RenewalEvalContext(
+        database_url=database_url,
+        application=application,
+        threads=ThreadStore(database_url=database_url),
+    )
+
+
+@contextmanager
+def _renewal_postgres_context() -> Iterator[_RenewalEvalContext]:
+    with postgres_container(database_name=f"openmagic_test_{uuid4().hex}") as postgres:
+        database_url = postgres.get_connection_url(driver=None)
+        apply_migrations(database_url)
+        yield _prepared_renewal_context(database_url)
 
 
 def _record_command_facts(application: ExampleInsurance, command: StartRenewalOutreach) -> None:
@@ -177,9 +203,8 @@ def _slow_draft_agent_factory() -> Callable[[AgentExecutionInput], _SlowDraftCan
 
 
 def test_claim_skips_older_instance_without_a_compatible_executor() -> None:
-    with postgres_container(database_name=f"openmagic_test_{uuid4().hex}") as postgres:
-        database_url = postgres.get_connection_url(driver=None)
-        apply_migrations(database_url)
+    with _renewal_postgres_context() as context:
+        database_url = context.database_url
         catalog = DefinitionCatalog(database_url=database_url)
         catalog.register(
             _single_step_definition(
@@ -235,9 +260,8 @@ def test_claim_skips_older_instance_without_a_compatible_executor() -> None:
 
 
 def test_renewed_draft_attempt_remains_reportable_past_initial_lease_within_hard_bound() -> None:
-    with postgres_container(database_name=f"openmagic_test_{uuid4().hex}") as postgres:
-        database_url = postgres.get_connection_url(driver=None)
-        apply_migrations(database_url)
+    with _renewal_postgres_context() as context:
+        database_url = context.database_url
         catalog = DefinitionCatalog(database_url=database_url)
         catalog.register(
             _single_step_definition(
@@ -447,12 +471,10 @@ def test_renewed_draft_attempt_remains_reportable_past_initial_lease_within_hard
 
 
 def test_start_command_commits_and_replays_value_identically() -> None:
-    with postgres_container(database_name=f"openmagic_test_{uuid4().hex}") as postgres:
-        database_url = postgres.get_connection_url(driver=None)
-        apply_migrations(database_url)
-        application = ExampleInsurance(database_url=database_url)
-        application.prepare()
-        threads = ThreadStore(database_url=database_url)
+    with _renewal_postgres_context() as context:
+        database_url = context.database_url
+        application = context.application
+        threads = context.threads
         thread = threads.create(
             CreateThread(
                 thread_id=uuid4(),
@@ -492,12 +514,9 @@ def test_start_command_commits_and_replays_value_identically() -> None:
 
 
 def test_command_validation_rejects_nested_types_and_semantics_before_commit() -> None:
-    with postgres_container(database_name=f"openmagic_test_{uuid4().hex}") as postgres:
-        database_url = postgres.get_connection_url(driver=None)
-        apply_migrations(database_url)
-        application = ExampleInsurance(database_url=database_url)
-        application.prepare()
-        threads = ThreadStore(database_url=database_url)
+    with _renewal_postgres_context() as context:
+        application = context.application
+        threads = context.threads
         thread = threads.create(CreateThread(uuid4(), "email", "broker-command-validation"))
         command_id = uuid4()
         invalid_type = StartRenewalOutreach(
@@ -533,14 +552,10 @@ def test_command_validation_rejects_nested_types_and_semantics_before_commit() -
 
 
 def test_exact_attempt_result_replay_does_not_repeat_route_effects() -> None:
-    with postgres_container(database_name=f"openmagic_test_{uuid4().hex}") as postgres:
-        database_url = postgres.get_connection_url(driver=None)
-        apply_migrations(database_url)
-        application = ExampleInsurance(database_url=database_url)
-        application.prepare()
-        thread = ThreadStore(database_url=database_url).create(
-            CreateThread(uuid4(), "email", "broker-result-replay")
-        )
+    with _renewal_postgres_context() as context:
+        database_url = context.database_url
+        application = context.application
+        thread = context.threads.create(CreateThread(uuid4(), "email", "broker-result-replay"))
         command = _renewal_command(
             thread_id=thread.thread_id,
             policy_number="OM-REPLAY",
@@ -621,12 +636,10 @@ def test_exact_attempt_result_replay_does_not_repeat_route_effects() -> None:
 
 
 def test_workflow_worker_uses_one_executor_seam_for_facts_and_agent_draft() -> None:
-    with postgres_container(database_name=f"openmagic_test_{uuid4().hex}") as postgres:
-        database_url = postgres.get_connection_url(driver=None)
-        apply_migrations(database_url)
-        application = ExampleInsurance(database_url=database_url)
-        application.prepare()
-        threads = ThreadStore(database_url=database_url)
+    with _renewal_postgres_context() as context:
+        database_url = context.database_url
+        application = context.application
+        threads = context.threads
         thread = threads.create(
             CreateThread(
                 thread_id=uuid4(),
@@ -699,12 +712,10 @@ def test_workflow_worker_uses_one_executor_seam_for_facts_and_agent_draft() -> N
 
 
 def test_gather_facts_rejects_stale_command_assertions_against_durable_business_state() -> None:
-    with postgres_container(database_name=f"openmagic_test_{uuid4().hex}") as postgres:
-        database_url = postgres.get_connection_url(driver=None)
-        apply_migrations(database_url)
-        application = ExampleInsurance(database_url=database_url)
-        application.prepare()
-        thread = ThreadStore(database_url=database_url).create(
+    with _renewal_postgres_context() as context:
+        database_url = context.database_url
+        application = context.application
+        thread = context.threads.create(
             CreateThread(uuid4(), "email", "broker-stale-renewal-facts")
         )
         command = _renewal_command(
@@ -737,14 +748,9 @@ def test_gather_facts_rejects_stale_command_assertions_against_durable_business_
 
 
 def test_agent_attempt_replay_uses_one_durable_run_without_reexecution() -> None:
-    with postgres_container(database_name=f"openmagic_test_{uuid4().hex}") as postgres:
-        database_url = postgres.get_connection_url(driver=None)
-        apply_migrations(database_url)
-        application = ExampleInsurance(database_url=database_url)
-        application.prepare()
-        thread = ThreadStore(database_url=database_url).create(
-            CreateThread(uuid4(), "email", "broker-agent-replay")
-        )
+    with _renewal_postgres_context() as context:
+        application = context.application
+        thread = context.threads.create(CreateThread(uuid4(), "email", "broker-agent-replay"))
         command = _renewal_command(
             thread_id=thread.thread_id,
             policy_number="OM-AGENT-REPLAY",
@@ -776,10 +782,8 @@ def test_agent_attempt_replay_uses_one_durable_run_without_reexecution() -> None
 
 
 def test_start_route_replay_returns_the_same_complete_occurrence_batch() -> None:
-    with postgres_container(database_name=f"openmagic_test_{uuid4().hex}") as postgres:
-        database_url = postgres.get_connection_url(driver=None)
-        apply_migrations(database_url)
-        ExampleInsurance(database_url=database_url).prepare()
+    with _renewal_postgres_context() as context:
+        database_url = context.database_url
         command_id = uuid4()
         request = StartInstance(
             command_id=command_id,
@@ -810,12 +814,9 @@ def test_start_route_replay_returns_the_same_complete_occurrence_batch() -> None
 
 
 def test_competing_command_and_step_claims_preserve_cardinality_one() -> None:
-    with postgres_container(database_name=f"openmagic_test_{uuid4().hex}") as postgres:
-        database_url = postgres.get_connection_url(driver=None)
-        apply_migrations(database_url)
-        application = ExampleInsurance(database_url=database_url)
-        application.prepare()
-        thread = ThreadStore(database_url=database_url).create(
+    with _renewal_postgres_context() as context:
+        application = context.application
+        thread = context.threads.create(
             CreateThread(uuid4(), "email", "broker-conversation-command-race")
         )
         command = _renewal_command(
@@ -852,12 +853,10 @@ def test_competing_command_and_step_claims_preserve_cardinality_one() -> None:
 
 
 def test_stale_workflow_result_and_wrong_thread_delivery_proposal_are_rejected() -> None:
-    with postgres_container(database_name=f"openmagic_test_{uuid4().hex}") as postgres:
-        database_url = postgres.get_connection_url(driver=None)
-        apply_migrations(database_url)
-        application = ExampleInsurance(database_url=database_url)
-        application.prepare()
-        threads = ThreadStore(database_url=database_url)
+    with _renewal_postgres_context() as context:
+        database_url = context.database_url
+        application = context.application
+        threads = context.threads
         intended = threads.create(CreateThread(uuid4(), "email", "broker-stale-intended"))
         wrong = threads.create(CreateThread(uuid4(), "email", "broker-stale-wrong"))
         command = _renewal_command(
@@ -938,10 +937,9 @@ def test_stale_workflow_result_and_wrong_thread_delivery_proposal_are_rejected()
 
 
 def test_one_domain_event_can_create_multiple_exact_destination_delivery_obligations() -> None:
-    with postgres_container(database_name=f"openmagic_test_{uuid4().hex}") as postgres:
-        database_url = postgres.get_connection_url(driver=None)
-        apply_migrations(database_url)
-        threads = ThreadStore(database_url=database_url)
+    with _renewal_postgres_context() as context:
+        database_url = context.database_url
+        threads = context.threads
         first = threads.create(CreateThread(uuid4(), "email", "multi-delivery-first"))
         second = threads.create(CreateThread(uuid4(), "email", "multi-delivery-second"))
         domain_event_id = uuid4()
@@ -986,14 +984,9 @@ def test_one_domain_event_can_create_multiple_exact_destination_delivery_obligat
 @pytest.mark.integration
 def test_seeded_step_and_delivery_claim_races_hold_cardinality_one_100_times() -> None:
     seeds = tuple(range(100))
-    with postgres_container(database_name=f"openmagic_test_{uuid4().hex}") as postgres:
-        database_url = postgres.get_connection_url(driver=None)
-        apply_migrations(database_url)
-        application = ExampleInsurance(database_url=database_url)
-        application.prepare()
-        thread = ThreadStore(database_url=database_url).create(
-            CreateThread(uuid4(), "email", "broker-cardinality-races")
-        )
+    with _renewal_postgres_context() as context:
+        application = context.application
+        thread = context.threads.create(CreateThread(uuid4(), "email", "broker-cardinality-races"))
         with ThreadPoolExecutor(max_workers=2) as executor:
             for seed in seeds:
                 command = _renewal_command(
@@ -1057,12 +1050,9 @@ def test_seeded_step_and_delivery_claim_races_hold_cardinality_one_100_times() -
 
 
 def test_delivery_appends_once_to_only_the_frozen_exact_thread() -> None:
-    with postgres_container(database_name=f"openmagic_test_{uuid4().hex}") as postgres:
-        database_url = postgres.get_connection_url(driver=None)
-        apply_migrations(database_url)
-        application = ExampleInsurance(database_url=database_url)
-        application.prepare()
-        threads = ThreadStore(database_url=database_url)
+    with _renewal_postgres_context() as context:
+        application = context.application
+        threads = context.threads
         intended = threads.create(CreateThread(uuid4(), "email", "broker-conversation-intended"))
         other = threads.create(CreateThread(uuid4(), "email", "broker-conversation-other"))
         command = _renewal_command(
@@ -1117,9 +1107,9 @@ def test_fresh_worker_processes_recover_the_complete_sanitized_evidence_chain(tm
     with TestDeployment(working_directory=tmp_path) as deployment:
         deployment.terminate_role("workflow-worker")
         deployment.terminate_role("delivery-worker")
-        application = ExampleInsurance(database_url=deployment.database_url)
-        application.prepare()
-        thread = ThreadStore(database_url=deployment.database_url).create(
+        context = _prepared_renewal_context(deployment.database_url)
+        application = context.application
+        thread = context.threads.create(
             CreateThread(uuid4(), "email", "broker-conversation-process-recovery")
         )
         command = _renewal_command(
@@ -1172,9 +1162,9 @@ def test_process_loss_after_claim_is_recovered_and_fenced_by_a_fresh_process(tmp
     with TestDeployment(working_directory=tmp_path) as deployment:
         deployment.terminate_role("workflow-worker")
         deployment.terminate_role("delivery-worker")
-        application = ExampleInsurance(database_url=deployment.database_url)
-        application.prepare()
-        thread = ThreadStore(database_url=deployment.database_url).create(
+        context = _prepared_renewal_context(deployment.database_url)
+        application = context.application
+        thread = context.threads.create(
             CreateThread(uuid4(), "email", "broker-conversation-claim-loss")
         )
         command = _renewal_command(
@@ -1211,11 +1201,9 @@ def test_agent_process_loss_terminalizes_run_and_retries_without_phantom_authori
     with TestDeployment(working_directory=tmp_path) as deployment:
         deployment.terminate_role("workflow-worker")
         deployment.terminate_role("delivery-worker")
-        application = ExampleInsurance(database_url=deployment.database_url)
-        application.prepare()
-        thread = ThreadStore(database_url=deployment.database_url).create(
-            CreateThread(uuid4(), "email", "broker-agent-process-loss")
-        )
+        context = _prepared_renewal_context(deployment.database_url)
+        application = context.application
+        thread = context.threads.create(CreateThread(uuid4(), "email", "broker-agent-process-loss"))
         command = _renewal_command(
             thread_id=thread.thread_id,
             policy_number="OM-AGENT-LOSS",
@@ -1277,9 +1265,9 @@ def test_delivery_process_loss_after_claim_recovers_without_duplicate_message(tm
     with TestDeployment(working_directory=tmp_path) as deployment:
         deployment.terminate_role("workflow-worker")
         deployment.terminate_role("delivery-worker")
-        application = ExampleInsurance(database_url=deployment.database_url)
-        application.prepare()
-        threads = ThreadStore(database_url=deployment.database_url)
+        context = _prepared_renewal_context(deployment.database_url)
+        application = context.application
+        threads = context.threads
         thread = threads.create(CreateThread(uuid4(), "email", "broker-delivery-claim-loss"))
         command = _renewal_command(
             thread_id=thread.thread_id,
