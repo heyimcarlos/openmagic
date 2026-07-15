@@ -24,6 +24,7 @@ from example_insurance.verification_challenge_records import (
 from example_insurance.verification_codes import VerificationCodes
 from example_insurance.verification_commands import (
     ProtectedOutcome,
+    ProtectedPolicyRejection,
     SubmitVerificationCode,
     SubmitVerificationCodeResult,
     VerificationCodeOutcome,
@@ -80,20 +81,16 @@ class VerificationSubmissionControl:
         if challenge_is_expired(connection, challenge):
             resolve_terminal_challenge(
                 connection,
-                challenge_id=challenge.challenge_id,
-                protected_command_id=protected.protected_command_id,
-                state="expired",
-                outcome="verification_expired",
+                challenge=challenge,
+                resolution="verification_expired",
             )
             return self._result(command, "expired")
         delivery_status = self._lifecycle.delivery_status(connection, challenge)
         if delivery_status == "failed":
             resolve_terminal_challenge(
                 connection,
-                challenge_id=challenge.challenge_id,
-                protected_command_id=protected.protected_command_id,
-                state="delivery_failed",
-                outcome="verification_delivery_failed",
+                challenge=challenge,
+                resolution="verification_delivery_failed",
             )
             return self._result(command, "delivery_failed")
         if delivery_status != "delivered":
@@ -101,8 +98,7 @@ class VerificationSubmissionControl:
         if not code_matches:
             record_failed_code(
                 connection,
-                challenge.challenge_id,
-                protected.protected_command_id,
+                challenge,
                 maximum_attempts=MAX_FAILED_CODE_ATTEMPTS,
             )
             return self._result(command, "invalid_code")
@@ -176,14 +172,12 @@ class VerificationSubmissionControl:
         connection: Connection[tuple[Any, ...]],
         challenge: DurableChallenge,
         protected: DurableProtectedCommand,
-        protected_outcome: ProtectedOutcome,
+        protected_outcome: ProtectedPolicyRejection,
     ) -> SubmitVerificationCodeResult:
         resolve_terminal_challenge(
             connection,
-            challenge_id=challenge.challenge_id,
-            protected_command_id=protected.protected_command_id,
-            state="rejected",
-            outcome=protected_outcome,
+            challenge=challenge,
+            resolution=protected_outcome,
         )
         return self._result(
             command,
@@ -229,7 +223,7 @@ class VerificationSubmissionControl:
         return None
 
     @staticmethod
-    def _verification_rejection(outcome: ProtectedOutcome) -> VerificationCodeOutcome:
+    def _verification_rejection(outcome: ProtectedPolicyRejection) -> VerificationCodeOutcome:
         if outcome == "identifier_revoked":
             return "identifier_revoked"
         if outcome == "workflow_closed":
@@ -237,7 +231,7 @@ class VerificationSubmissionControl:
         return "authority_revoked"
 
     @staticmethod
-    def _terminal_protected_outcome(value: str | None) -> ProtectedOutcome:
+    def _terminal_protected_outcome(value: str | None) -> ProtectedPolicyRejection:
         if value == "identifier_revoked":
             return "identifier_revoked"
         if value == "authority_revoked":

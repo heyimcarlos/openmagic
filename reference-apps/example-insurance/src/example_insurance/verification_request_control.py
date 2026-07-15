@@ -21,6 +21,7 @@ from example_insurance.verification_challenge_lifecycle import VerificationChall
 from example_insurance.verification_challenge_records import active_session, record_challenge
 from example_insurance.verification_commands import (
     ProtectedOutcome,
+    ProtectedPolicyRejection,
     ProvisionVerificationAuthority,
     ProvisionVerificationAuthorityResult,
     RequestProtectedRenewalDetails,
@@ -219,7 +220,7 @@ class VerificationRequestControl:
         command: RequestProtectedRenewalDetails,
         party_id: UUID,
         connection: Connection[tuple[Any, ...]],
-        outcome: ProtectedOutcome,
+        outcome: ProtectedPolicyRejection,
     ) -> RequestProtectedRenewalDetailsResult:
         self._lifecycle.reconcile_pending(
             connection,

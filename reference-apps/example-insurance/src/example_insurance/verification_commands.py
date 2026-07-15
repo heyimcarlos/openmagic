@@ -10,8 +10,7 @@ from openmagic_runtime.commands import Actor, Cause
 
 VerificationPurpose = Literal["renewal.read_approved_details"]
 VerificationAuthorityTarget = Literal["identifier", "membership", "workflow_role"]
-ProtectedOutcome = Literal[
-    "authorized",
+ProtectedPolicyRejection = Literal[
     "approval_required",
     "authority_revoked",
     "identifier_revoked",
@@ -20,6 +19,7 @@ ProtectedOutcome = Literal[
     "wrong_purpose",
     "wrong_thread",
 ]
+ProtectedOutcome = Literal["authorized"] | ProtectedPolicyRejection
 VerificationCodeOutcome = Literal[
     "verified",
     "invalid_code",
@@ -36,19 +36,15 @@ VerificationCodeOutcome = Literal[
     "wrong_workflow",
     "wrong_purpose",
 ]
-ProtectedCommandOutcome = Literal[
-    "authorized",
-    "approval_required",
-    "authority_revoked",
-    "identifier_revoked",
-    "workflow_closed",
-    "wrong_party",
-    "wrong_purpose",
-    "wrong_thread",
-    "verification_expired",
-    "verification_delivery_failed",
-    "verification_attempts_exhausted",
-]
+ChallengeTerminalResolution = (
+    ProtectedPolicyRejection
+    | Literal[
+        "verification_expired",
+        "verification_delivery_failed",
+        "verification_attempts_exhausted",
+    ]
+)
+ProtectedCommandOutcome = Literal["authorized"] | ChallengeTerminalResolution
 _REQUEST_OUTCOMES = {
     "authorized",
     "approval_required",
@@ -283,8 +279,10 @@ def validate_code_submission(command: SubmitVerificationCode) -> None:
 
 
 __all__ = [
+    "ChallengeTerminalResolution",
     "ProtectedCommandOutcome",
     "ProtectedOutcome",
+    "ProtectedPolicyRejection",
     "ProvisionVerificationAuthority",
     "ProvisionVerificationAuthorityInput",
     "ProvisionVerificationAuthorityResult",

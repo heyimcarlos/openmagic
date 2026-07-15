@@ -82,10 +82,8 @@ class VerificationAttemptControl:
             )
             resolve_terminal_challenge(
                 connection,
-                challenge_id=challenge.challenge_id,
-                protected_command_id=challenge.protected_command_id,
-                state="rejected",
-                outcome="identifier_revoked",
+                challenge=challenge,
+                resolution="identifier_revoked",
             )
             return self._result(attempt)
         event_id = record_verification_event(
@@ -152,10 +150,8 @@ class VerificationAttemptControl:
                 )
                 resolve_terminal_challenge(
                     connection,
-                    challenge_id=challenge.challenge_id,
-                    protected_command_id=challenge.protected_command_id,
-                    state="delivery_failed",
-                    outcome="verification_delivery_failed",
+                    challenge=challenge,
+                    resolution="verification_delivery_failed",
                 )
             return True
         return False

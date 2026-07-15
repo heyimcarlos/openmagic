@@ -16,7 +16,7 @@ from example_insurance.verification_challenge_records import (
     pending_challenge_identities,
     resolve_terminal_challenge,
 )
-from example_insurance.verification_commands import ProtectedOutcome
+from example_insurance.verification_commands import ProtectedPolicyRejection
 from example_insurance.verification_workflow_records import verification_delivery_identity
 
 DeliveryStatus = Literal["pending", "delivered", "failed", "unavailable"]
@@ -81,7 +81,7 @@ class VerificationChallengeLifecycle:
             locked = lock_challenge_and_command(connection, identity.challenge_id)
             if locked is None:
                 continue
-            challenge, protected = locked
+            challenge, _ = locked
             if (
                 challenge.state != "pending"
                 or challenge.destination_identifier_id == current_identifier_id
@@ -89,10 +89,8 @@ class VerificationChallengeLifecycle:
                 continue
             resolve_terminal_challenge(
                 connection,
-                challenge_id=challenge.challenge_id,
-                protected_command_id=protected.protected_command_id,
-                state="rejected",
-                outcome="identifier_revoked",
+                challenge=challenge,
+                resolution="identifier_revoked",
             )
 
     def reconcile_pending(
@@ -102,7 +100,7 @@ class VerificationChallengeLifecycle:
         party_id: UUID,
         thread_id: UUID | None,
         workflow_id: UUID,
-        terminal_outcome: ProtectedOutcome | None,
+        terminal_outcome: ProtectedPolicyRejection | None,
     ) -> None:
         identities = pending_challenge_identities(
             connection,
@@ -116,32 +114,26 @@ class VerificationChallengeLifecycle:
             locked = lock_challenge_and_command(connection, identity.challenge_id)
             if locked is None:
                 continue
-            challenge, protected = locked
+            challenge, _ = locked
             if challenge.state != "pending":
                 continue
             if terminal_outcome is not None:
                 resolve_terminal_challenge(
                     connection,
-                    challenge_id=challenge.challenge_id,
-                    protected_command_id=protected.protected_command_id,
-                    state="rejected",
-                    outcome=terminal_outcome,
+                    challenge=challenge,
+                    resolution=terminal_outcome,
                 )
             elif challenge_is_expired(connection, challenge):
                 resolve_terminal_challenge(
                     connection,
-                    challenge_id=challenge.challenge_id,
-                    protected_command_id=protected.protected_command_id,
-                    state="expired",
-                    outcome="verification_expired",
+                    challenge=challenge,
+                    resolution="verification_expired",
                 )
             elif self.delivery_status(connection, challenge) == "failed":
                 resolve_terminal_challenge(
                     connection,
-                    challenge_id=challenge.challenge_id,
-                    protected_command_id=protected.protected_command_id,
-                    state="delivery_failed",
-                    outcome="verification_delivery_failed",
+                    challenge=challenge,
+                    resolution="verification_delivery_failed",
                 )
 
 

@@ -12,6 +12,7 @@ from psycopg import Connection
 from psycopg.rows import dict_row
 
 from example_insurance.verification_commands import (
+    ChallengeTerminalResolution,
     ProtectedCommandOutcome,
 )
 
@@ -24,7 +25,6 @@ ChallengeState = Literal[
     "rejected",
 ]
 ProtectedCommandState = Literal["waiting", "authorized", "rejected"]
-TerminalChallengeState = Literal["expired", "delivery_failed", "rejected"]
 
 
 def _challenge_state(value: object) -> ChallengeState:
@@ -357,8 +357,7 @@ def challenge_is_expired(
 
 def record_failed_code(
     connection: Connection[tuple[Any, ...]],
-    challenge_id: UUID,
-    protected_command_id: UUID,
+    challenge: DurableChallenge,
     *,
     maximum_attempts: int,
 ) -> bool:
@@ -368,13 +367,13 @@ def record_failed_code(
             "LEAST(failed_attempts + 1, %s), state = CASE WHEN failed_attempts + 1 >= %s "
             "THEN 'attempts_exhausted' ELSE state END "
             "WHERE challenge_id = %s AND state = 'pending' RETURNING state",
-            (maximum_attempts, maximum_attempts, challenge_id),
+            (maximum_attempts, maximum_attempts, challenge.challenge_id),
         ).fetchone()
     exhausted = record is not None and record["state"] == "attempts_exhausted"
     if exhausted:
         resolve_protected_command(
             connection,
-            protected_command_id=protected_command_id,
+            protected_command_id=challenge.protected_command_id,
             outcome="verification_attempts_exhausted",
             delivery_id=None,
         )
@@ -384,22 +383,26 @@ def record_failed_code(
 def resolve_terminal_challenge(
     connection: Connection[tuple[Any, ...]],
     *,
-    challenge_id: UUID,
-    protected_command_id: UUID,
-    state: TerminalChallengeState,
-    outcome: ProtectedCommandOutcome,
+    challenge: DurableChallenge,
+    resolution: ChallengeTerminalResolution,
 ) -> None:
-    if outcome == "authorized":
-        raise ValueError("A terminal Challenge cannot authorize a protected Command")
+    if resolution == "verification_expired":
+        state: ChallengeState = "expired"
+    elif resolution == "verification_delivery_failed":
+        state = "delivery_failed"
+    elif resolution == "verification_attempts_exhausted":
+        state = "attempts_exhausted"
+    else:
+        state = "rejected"
     connection.execute(
         "UPDATE example_insurance.verification_challenges SET state = %s "
         "WHERE challenge_id = %s AND state = 'pending'",
-        (state, challenge_id),
+        (state, challenge.challenge_id),
     )
     resolve_protected_command(
         connection,
-        protected_command_id=protected_command_id,
-        outcome=outcome,
+        protected_command_id=challenge.protected_command_id,
+        outcome=resolution,
         delivery_id=None,
     )
 

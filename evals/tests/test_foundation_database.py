@@ -76,6 +76,15 @@ def test_cold_migrations_create_independently_owned_schemas_without_reverse_fore
                 "AND tc.table_schema = 'example_insurance' "
                 "AND tc.table_name = 'renewal_drafts' AND kcu.column_name = 'step_id'"
             ).fetchone()
+            protected_command_checks = connection.execute(
+                "SELECT pg_get_constraintdef(constraint_row.oid) "
+                "FROM pg_constraint AS constraint_row "
+                "JOIN pg_class AS table_row ON table_row.oid = constraint_row.conrelid "
+                "JOIN pg_namespace AS schema_row ON schema_row.oid = table_row.relnamespace "
+                "WHERE schema_row.nspname = 'example_insurance' "
+                "AND table_row.relname = 'protected_commands' "
+                "AND constraint_row.contype = 'c'"
+            ).fetchall()
 
         assert histories == [
             ("example_insurance", "0001_example_insurance_baseline"),
@@ -89,6 +98,10 @@ def test_cold_migrations_create_independently_owned_schemas_without_reverse_fore
         assert reverse_foreign_keys == []
         assert invalid_singleton_constraints == []
         assert draft_step_uniqueness == (1,)
+        assert any(
+            definition.count("outcome IS NOT NULL") == 2
+            for (definition,) in protected_command_checks
+        )
 
 
 @pytest.mark.integration

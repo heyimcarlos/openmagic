@@ -95,11 +95,11 @@ CREATE TABLE example_insurance.protected_commands (
             AND authorized_delivery_id IS NULL AND resolved_at IS NULL
         )
         OR (
-            state = 'authorized' AND outcome = 'authorized'
+            state = 'authorized' AND outcome IS NOT NULL AND outcome = 'authorized'
             AND authorized_delivery_id IS NOT NULL AND resolved_at IS NOT NULL
         )
         OR (
-            state = 'rejected' AND outcome <> 'authorized'
+            state = 'rejected' AND outcome IS NOT NULL AND outcome <> 'authorized'
             AND authorized_delivery_id IS NULL AND resolved_at IS NOT NULL
         )
     ),
