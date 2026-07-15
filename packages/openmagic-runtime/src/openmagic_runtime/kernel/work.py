@@ -12,7 +12,8 @@ from psycopg import Connection
 from psycopg.types.json import Jsonb
 
 from openmagic_runtime._canonical import canonical_digest
-from openmagic_runtime.kernel._trace import append_trace
+from openmagic_runtime.kernel._trace import append_trace, read_trace_replay
+from openmagic_runtime.kernel._transition_records import read_instance_definition
 from openmagic_runtime.kernel.definitions import validate_payload, verified_definition
 
 
@@ -65,21 +66,16 @@ class DispositionRequired:
     attempt_number: int
     template_key: str
     observation: dict[str, Any]
+    basis_state: Literal["completed", "abandoned"] = "completed"
     consumed: bool = False
     replayed: bool = False
 
 
 def _template(connection: Connection[tuple[Any, ...]], instance_id: UUID, key: str) -> Any:
-    row = connection.execute(
-        "SELECT d.manifest, d.manifest_digest FROM openmagic_runtime.instances AS i "
-        "JOIN openmagic_runtime.workflow_definitions AS d "
-        "ON d.definition_key = i.definition_key AND d.definition_version = i.definition_version "
-        "WHERE i.instance_id = %s",
-        (instance_id,),
-    ).fetchone()
-    if row is None:
+    record = read_instance_definition(connection, instance_id)
+    if record is None:
         raise RuntimeError("Pinned Workflow Definition is unavailable")
-    definition = verified_definition(dict(row[0]), str(row[1]))
+    definition = verified_definition(record.manifest, record.manifest_digest)
     return next(item for item in definition.step_templates if item.key == key)
 
 
@@ -92,15 +88,15 @@ class KernelWork:
             "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
             (str(request.claim_request_id),),
         )
-        replay = self._connection.execute(
-            "SELECT receipt, input_digest FROM openmagic_runtime.trace_events "
-            "WHERE source_kind = 'claim' AND source_id = %s",
-            (request.claim_request_id,),
-        ).fetchone()
+        replay = read_trace_replay(
+            self._connection,
+            source_kind="claim",
+            source_id=request.claim_request_id,
+        )
         if replay is not None:
-            if str(replay[1]) != canonical_digest(request):
+            if replay.input_digest != canonical_digest(request):
                 raise ValueError("Attempt claim identity has conflicting input")
-            value = dict(replay[0])
+            value = replay.receipt
             return ClaimedAttempt(
                 instance_id=UUID(value["instance_id"]),
                 step_id=UUID(value["step_id"]),
@@ -201,7 +197,7 @@ class KernelWork:
             source_kind="claim",
             source_id=request.claim_request_id,
             input_value=request,
-            receipt=payload,
+            receipt=lambda _: payload,
         )
         return ClaimedAttempt(
             instance_id=instance_id,
@@ -279,15 +275,15 @@ class KernelWork:
             "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
             (str(renewal_id),),
         )
-        replay = self._connection.execute(
-            "SELECT receipt, input_digest FROM openmagic_runtime.trace_events "
-            "WHERE source_kind = 'attempt_lease_renewal' AND source_id = %s",
-            (renewal_id,),
-        ).fetchone()
+        replay = read_trace_replay(
+            self._connection,
+            source_kind="attempt_lease_renewal",
+            source_id=renewal_id,
+        )
         if replay is not None:
-            if str(replay[1]) != canonical_digest(renewal_input):
+            if replay.input_digest != canonical_digest(renewal_input):
                 raise ValueError("Attempt lease renewal identity has conflicting input")
-            receipt = dict(replay[0])
+            receipt = replay.receipt
             return RenewedAttemptLease(
                 attempt_id=UUID(receipt["attempt_id"]),
                 lease_expires_at=datetime.fromisoformat(receipt["lease_expires_at"]),
@@ -348,7 +344,7 @@ class KernelWork:
             source_kind="attempt_lease_renewal",
             source_id=renewal_id,
             input_value=renewal_input,
-            receipt={
+            receipt=lambda _: {
                 "attempt_id": str(result.attempt_id),
                 "lease_expires_at": result.lease_expires_at.isoformat(),
                 "hard_deadline": result.hard_deadline.isoformat(),
@@ -356,14 +352,16 @@ class KernelWork:
         )
         return result
 
-    def recover_expired(self) -> DispositionRequired | None:
+    def recover_expired(self, instance_id: UUID | None = None) -> DispositionRequired | None:
         instance = self._connection.execute(
             "SELECT i.instance_id FROM openmagic_runtime.instances AS i WHERE i.state = 'open' "
+            "AND (%s::uuid IS NULL OR i.instance_id = %s) "
             "AND EXISTS (SELECT 1 FROM openmagic_runtime.attempts AS a "
             "WHERE a.instance_id = i.instance_id AND a.state = 'leased' "
             "AND (a.lease_expires_at <= clock_timestamp() "
             "OR a.hard_deadline <= clock_timestamp())) "
-            "ORDER BY i.created_at, i.instance_id FOR UPDATE SKIP LOCKED LIMIT 1"
+            "ORDER BY i.created_at, i.instance_id FOR UPDATE SKIP LOCKED LIMIT 1",
+            (instance_id, instance_id),
         ).fetchone()
         if instance is None:
             return None
@@ -394,7 +392,7 @@ class KernelWork:
             source_kind="attempt_abandonment",
             source_id=attempt_id,
             input_value={"attempt_id": str(attempt_id)},
-            receipt={"attempt_id": str(attempt_id), "step_id": str(step_id)},
+            receipt=lambda _: {"attempt_id": str(attempt_id), "step_id": str(step_id)},
         )
         return DispositionRequired(
             instance_id=instance_id,
@@ -403,6 +401,7 @@ class KernelWork:
             attempt_number=int(attempt[2]),
             template_key=str(attempt[3]),
             observation={"expiry_cause": "lease_or_hard_deadline"},
+            basis_state="abandoned",
         )
 
     def accept_result(
@@ -454,6 +453,7 @@ class KernelWork:
                 attempt_number=attempt.attempt_number,
                 template_key=attempt.template_key,
                 observation=dict(existing[4]),
+                basis_state="completed",
                 consumed=True,
                 replayed=True,
             )
@@ -477,7 +477,7 @@ class KernelWork:
             source_kind="attempt_result",
             source_id=attempt.attempt_id,
             input_value=observation,
-            receipt={"attempt_id": str(attempt.attempt_id)},
+            receipt=lambda _: {"attempt_id": str(attempt.attempt_id)},
         )
         return DispositionRequired(
             instance_id=attempt.instance_id,
@@ -486,6 +486,7 @@ class KernelWork:
             attempt_number=attempt.attempt_number,
             template_key=attempt.template_key,
             observation=observation,
+            basis_state="completed",
         )
 
 

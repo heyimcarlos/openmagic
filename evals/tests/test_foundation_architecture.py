@@ -19,6 +19,7 @@ RUNTIME_PUBLIC_MODULES = (
     "openmagic_runtime.kernel.definitions",
     "openmagic_runtime.kernel.control",
     "openmagic_runtime.kernel.work",
+    "openmagic_runtime.kernel.records",
     "openmagic_runtime.kernel.inspection",
     "openmagic_runtime.commands",
     "openmagic_runtime.execution",
@@ -116,6 +117,22 @@ def test_legacy_implementation_and_compatibility_paths_are_absent() -> None:
     for source_root in production_roots:
         for path in source_root.rglob("*.py"):
             assert legacy_import not in path.read_text(encoding="utf-8")
+
+
+def test_application_sql_does_not_reference_private_runtime_tables() -> None:
+    application_root = ROOT / "reference-apps/example-insurance/src/example_insurance"
+    violations: list[str] = []
+    for path in application_root.rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Constant)
+                and isinstance(node.value, str)
+                and "openmagic_runtime." in node.value
+            ):
+                violations.append(f"{path.relative_to(ROOT)}:{node.lineno}")
+
+    assert violations == []
 
 
 def test_playground_safety_is_verified_through_its_process_interface() -> None:

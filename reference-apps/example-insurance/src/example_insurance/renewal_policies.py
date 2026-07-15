@@ -1,4 +1,4 @@
-"""Qualified application policy for renewal drafting orchestration."""
+"""Application Policy for renewal Workflow routes and Delivery."""
 
 from __future__ import annotations
 
@@ -20,14 +20,22 @@ class RouteDecision:
 
 
 @dataclass(frozen=True)
-class RecoveryDecision:
-    action: Literal["retry", "fail"]
-    failure: dict[str, Any] | None = None
+class RetryRecoveryDecision:
+    action: Literal["retry"] = "retry"
+
+
+@dataclass(frozen=True)
+class FailRecoveryDecision:
+    failure: dict[str, Any]
+    action: Literal["fail"] = "fail"
+
+
+RecoveryDecision = RetryRecoveryDecision | FailRecoveryDecision
 
 
 class RenewalWorkflowPolicy:
     definition_key = "example_insurance.renewal_outreach"
-    definition_version = 1
+    definition_version = 2
 
     def facts_succeeded(
         self,
@@ -42,30 +50,48 @@ class RenewalWorkflowPolicy:
             route_input={
                 "workflow_id": str(workflow_id),
                 "thread_id": str(thread_id),
+                "revision_instruction": "",
                 **observation,
             },
         )
 
-    def draft_succeeded(self, *, workflow_id: UUID, draft_id: UUID) -> RouteDecision:
+    def draft_succeeded(
+        self,
+        *,
+        workflow_id: UUID,
+        draft_id: UUID,
+        presentation_fingerprint: str,
+        recipient_email: str,
+        subject: str,
+        body: str,
+    ) -> RouteDecision:
         return RouteDecision(
             outcome_route="await_approval",
-            output={"draft_id": str(draft_id)},
-            route_input={"workflow_id": str(workflow_id), "draft_id": str(draft_id)},
+            output={
+                "draft_id": str(draft_id),
+                "presentation_fingerprint": presentation_fingerprint,
+            },
+            route_input={
+                "workflow_id": str(workflow_id),
+                "draft_id": str(draft_id),
+                "presentation_fingerprint": presentation_fingerprint,
+                "recipient_email": recipient_email,
+                "subject": subject,
+                "body": body,
+            },
         )
 
     @staticmethod
     def expired_attempt(*, template_key: str, attempt_number: int) -> RecoveryDecision:
-        if template_key not in {"gather_renewal_facts", "draft_renewal_email"}:
-            return RecoveryDecision(
-                action="fail",
-                failure={"class": "unknown_step_template"},
-            )
+        if template_key not in {
+            "gather_renewal_facts",
+            "draft_renewal_email",
+            "reconcile_renewal_email",
+        }:
+            return FailRecoveryDecision({"class": "unknown_step_template"})
         if attempt_number < RENEWAL_ATTEMPT_RETRY_POLICY.max_attempts:
-            return RecoveryDecision(action="retry")
-        return RecoveryDecision(
-            action="fail",
-            failure={"class": "attempt_budget_exhausted"},
-        )
+            return RetryRecoveryDecision()
+        return FailRecoveryDecision({"class": "attempt_budget_exhausted"})
 
 
 class RenewalDeliveryPolicy:
@@ -99,19 +125,12 @@ class RenewalDeliveryPolicy:
         return f"{observation['subject']}\n\n{observation['body']}"
 
 
-class RenewalCompletionPolicy:
-    """Defines completion without granting External Effect authority."""
-
-    @staticmethod
-    def is_complete(*, approval_wait_state: str, external_effect_count: int) -> bool:
-        return approval_wait_state == "satisfied" and external_effect_count > 0
-
-
 __all__ = [
     "RENEWAL_ATTEMPT_RETRY_POLICY",
+    "FailRecoveryDecision",
     "RecoveryDecision",
-    "RenewalCompletionPolicy",
     "RenewalDeliveryPolicy",
     "RenewalWorkflowPolicy",
+    "RetryRecoveryDecision",
     "RouteDecision",
 ]

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, fields, is_dataclass
 from datetime import datetime
 from types import UnionType
@@ -12,6 +12,7 @@ from uuid import UUID
 
 import psycopg
 from psycopg import Connection
+from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from openmagic_runtime._canonical import canonical_digest, canonical_value
@@ -42,6 +43,39 @@ class CommandReceipt(Generic[ResultT]):
     result: ResultT
     result_digest: str
     committed_at: datetime
+
+
+@dataclass(frozen=True)
+class CommittedCommandResult:
+    command_id: UUID
+    command_type: str
+    schema_version: int
+    result: dict[str, Any]
+    result_digest: str
+
+    @classmethod
+    def decode(cls, record: Mapping[str, Any]) -> CommittedCommandResult:
+        return cls(
+            command_id=UUID(str(record["command_id"])),
+            command_type=str(record["command_type"]),
+            schema_version=int(record["schema_version"]),
+            result=dict(record["result"]),
+            result_digest=str(record["result_digest"]),
+        )
+
+
+def read_committed_command_result(
+    connection: Connection[tuple[Any, ...]], command_id: UUID
+) -> CommittedCommandResult | None:
+    with connection.cursor(row_factory=dict_row) as cursor:
+        record = cursor.execute(
+            "SELECT command_id, command_type, schema_version, result, result_digest "
+            "FROM openmagic_runtime.command_receipts WHERE command_id = %s",
+            (command_id,),
+        ).fetchone()
+    if record is None:
+        return None
+    return CommittedCommandResult.decode(record)
 
 
 class CommandError(RuntimeError):
@@ -273,7 +307,9 @@ __all__ = [
     "CommandReceipt",
     "CommandRegistryBuilder",
     "CommandUnavailable",
+    "CommittedCommandResult",
     "IdempotencyConflict",
     "InvalidCommand",
     "StateConflict",
+    "read_committed_command_result",
 ]
