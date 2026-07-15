@@ -26,12 +26,22 @@ from openmagic_evals.harness._postgres import postgres_container
 
 
 @contextmanager
-def renewal_context() -> Iterator[tuple[str, ExampleInsurance, ThreadStore]]:
+def renewal_context(
+    *,
+    verification_code_secret: bytes | None = None,
+    challenge_ttl_seconds: int = 600,
+    session_ttl_seconds: int = 900,
+) -> Iterator[tuple[str, ExampleInsurance, ThreadStore]]:
     """Provide a migrated PostgreSQL renewal application through public interfaces."""
     with postgres_container(database_name=f"openmagic_test_{uuid4().hex}") as postgres:
         database_url = postgres.get_connection_url(driver=None)
         apply_migrations(database_url)
-        application = ExampleInsurance(database_url=database_url)
+        application = ExampleInsurance(
+            database_url=database_url,
+            verification_code_secret=verification_code_secret,
+            challenge_ttl_seconds=challenge_ttl_seconds,
+            session_ttl_seconds=session_ttl_seconds,
+        )
         application.prepare()
         yield database_url, application, ThreadStore(database_url=database_url)
 

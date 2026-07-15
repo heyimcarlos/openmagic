@@ -37,6 +37,7 @@ def test_cold_migrations_create_independently_owned_schemas_without_reverse_fore
                     "0001_example_insurance_baseline",
                     "0002_renewal_drafting_application",
                     "0003_renewal_approval_effect",
+                    "0004_deterministic_verification",
                 ),
             ),
         ]
@@ -47,7 +48,7 @@ def test_cold_migrations_create_independently_owned_schemas_without_reverse_fore
                 "SELECT 'openmagic_runtime', version FROM openmagic_runtime.migration_history "
                 "UNION ALL "
                 "SELECT 'example_insurance', version FROM example_insurance.migration_history "
-                "ORDER BY 1"
+                "ORDER BY 1, 2"
             ).fetchall()
             reverse_foreign_keys = connection.execute(
                 "SELECT constraint_name FROM information_schema.referential_constraints "
@@ -80,6 +81,7 @@ def test_cold_migrations_create_independently_owned_schemas_without_reverse_fore
             ("example_insurance", "0001_example_insurance_baseline"),
             ("example_insurance", "0002_renewal_drafting_application"),
             ("example_insurance", "0003_renewal_approval_effect"),
+            ("example_insurance", "0004_deterministic_verification"),
             ("openmagic_runtime", "0001_runtime_baseline"),
             ("openmagic_runtime", "0002_renewal_drafting_runtime"),
             ("openmagic_runtime", "0003_fenced_effect_kernel"),
