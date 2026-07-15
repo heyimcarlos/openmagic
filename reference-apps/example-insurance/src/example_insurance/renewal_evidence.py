@@ -108,7 +108,13 @@ class RenewalEvidenceProjector:
             outcomes={
                 "workflow_lifecycle": str(workflow[3]),
                 "instance_state": str(instance_state[0]) if instance_state is not None else None,
-                "step_states": {step.template_key: step.state for step in runtime.steps},
+                "step_states": {
+                    str(step.step_id): {
+                        "template_key": step.template_key,
+                        "state": step.state,
+                    }
+                    for step in runtime.steps
+                },
                 "attempt_states": [state for _, state in runtime.attempts],
                 "agent_run_states": [state for _, _, state in runtime.agent_runs],
                 "delivery_attempt_states": [

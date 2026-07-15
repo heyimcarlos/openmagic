@@ -241,6 +241,7 @@ def test_revision_creates_another_bounded_draft_and_exact_approval_wait() -> Non
         snapshot = KernelInspection(database_url=database_url).snapshot(
             application.start_renewal_outreach(command).result.instance_id
         )
+        evidence = json.loads(application.renewal_evidence_json(command.input.workflow_id))
 
         assert replay == receipt
         assert receipt.result.outcome == "revision_requested"
@@ -251,6 +252,11 @@ def test_revision_creates_another_bounded_draft_and_exact_approval_wait() -> Non
         assert "Requested revision: Use a warmer opening." in revised.proposed_effect.body
         assert [step.template_key for step in snapshot.steps].count("draft_renewal_email") == 2
         assert [wait.state for wait in snapshot.waits] == ["satisfied", "unsatisfied"]
+        step_states = evidence["outcomes"]["step_states"]
+        assert set(step_states) == set(evidence["correlations"]["step_ids"])
+        assert [item["template_key"] for item in step_states.values()].count(
+            "draft_renewal_email"
+        ) == 2
 
         cross_wired = application.approve_renewal_draft(
             ApproveRenewalDraft(
