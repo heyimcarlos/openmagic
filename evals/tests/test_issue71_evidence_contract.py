@@ -15,8 +15,10 @@ from openmagic_evals.evidence.contracts import (
     Correlations,
     DeterministicArtifact,
     DeterministicSummary,
+    DistributionSummary,
     ProcessMetrics,
     QueueDepth,
+    RaceTrialEvidence,
     ReproducibilityPin,
     canonical_artifact_json,
     parse_artifact,
@@ -44,6 +46,11 @@ def _pin() -> ReproducibilityPin:
         finished_at=datetime(2026, 7, 15, 20, 1, tzinfo=UTC),
         timeout_seconds=900,
         postgres_version="17.5",
+        postgres_image="postgres@sha256:" + "1" * 64,
+        postgres_configuration={
+            "synchronous_commit": "on",
+            "transaction_isolation": "read committed",
+        },
         postgres_configuration_digest="sha256:" + "b" * 64,
         migration_heads={
             "example_insurance": "0004_deterministic_verification",
@@ -79,6 +86,23 @@ def _agent_configuration() -> AgentConfigurationPin:
     )
 
 
+def _agent_case() -> ArtifactCase:
+    return ArtifactCase(
+        case_id="agent.development.tool-choice",
+        case_schema_version=1,
+        split="development",
+        expected_trials=1,
+        observed_trials=1,
+        seeds=(0,),
+        correlations=Correlations(),
+        observation_digests=("sha256:" + "9" * 64,),
+        pass_threshold=0.75,
+        passed_trials=1,
+        prohibited_actions=0,
+        verdict=CaseVerdict(status="passed", invariant_violations=()),
+    )
+
+
 def test_deterministic_artifact_round_trips_as_canonical_versioned_json() -> None:
     artifact = DeterministicArtifact(
         reproducibility=_pin(),
@@ -91,6 +115,7 @@ def test_deterministic_artifact_round_trips_as_canonical_versioned_json() -> Non
             infrastructure_errors=0,
             invariant_violations=0,
             strict_pass=True,
+            runner_exit_code=0,
         ),
         limitations=("single PostgreSQL deployment shape",),
         negative_claims=REQUIRED_NEGATIVE_CLAIMS,
@@ -118,11 +143,51 @@ def test_artifacts_reject_incomplete_denominators_and_lane_substitution() -> Non
             verdict=CaseVerdict(status="passed", invariant_violations=()),
         )
 
+    with pytest.raises(ValueError, match="at least 1 item"):
+        DeterministicArtifact(
+            reproducibility=_pin(),
+            cases=(),
+            summary=DeterministicSummary(
+                expected_cases=1,
+                observed_cases=1,
+                passed_cases=1,
+                failed_cases=0,
+                infrastructure_errors=0,
+                invariant_violations=0,
+                strict_pass=True,
+                runner_exit_code=0,
+            ),
+            limitations=("invalid empty fixture",),
+            negative_claims=REQUIRED_NEGATIVE_CLAIMS,
+        )
+
+
+def test_race_trial_requires_cardinality_one_and_durable_correlations() -> None:
+    with pytest.raises(ValueError, match="exactly one"):
+        RaceTrialEvidence(
+            seed=0,
+            jitter_microseconds=(1, 2),
+            public_outcomes=("won", "lost"),
+            constraint_rows=2,
+            correlations=Correlations(command_ids=("018f2f00-0000-7000-8000-000000000001",)),
+            observation_digest="sha256:" + "1" * 64,
+        )
+
+    with pytest.raises(ValueError, match="correlate"):
+        RaceTrialEvidence(
+            seed=0,
+            jitter_microseconds=(1, 2),
+            public_outcomes=("won", "lost"),
+            constraint_rows=1,
+            correlations=Correlations(),
+            observation_digest="sha256:" + "1" * 64,
+        )
+
     with pytest.raises(ValueError, match="Agent quality cannot determine"):
         AgentQualityArtifact(
             reproducibility=_pin(),
             agent_configuration=_agent_configuration(),
-            cases=(_case("agent.development.tool-choice"),),
+            cases=(_agent_case(),),
             summary=AgentQualitySummary(
                 development_cases=1,
                 held_out_cases=0,
@@ -132,6 +197,14 @@ def test_artifacts_reject_incomplete_denominators_and_lane_substitution() -> Non
                 prohibited_actions=0,
                 threshold_passed=True,
                 deterministic_release_pass=True,
+                latency_ms=DistributionSummary(
+                    count=1,
+                    mean=1,
+                    median=1,
+                    sample_standard_deviation=0,
+                    minimum=1,
+                    maximum=1,
+                ),
             ),
             limitations=("local scripted Agent only",),
         )
@@ -150,6 +223,7 @@ def test_artifact_requires_all_negative_claims() -> None:
                 infrastructure_errors=0,
                 invariant_violations=0,
                 strict_pass=True,
+                runner_exit_code=0,
             ),
             limitations=("single PostgreSQL deployment shape",),
             negative_claims=REQUIRED_NEGATIVE_CLAIMS[:-1],
@@ -162,7 +236,7 @@ def test_process_metrics_require_independent_roles_losses_and_drained_queues() -
         initial_queue=QueueDepth(pending_steps=12, pending_deliveries=0),
         drained_queue=QueueDepth(pending_steps=0, pending_deliveries=0),
         initial_capacity={"api": 1, "workflow-worker": 1, "delivery-worker": 1},
-        started_processes={"api": 0, "workflow-worker": 4, "delivery-worker": 3},
+        started_processes={"api": 1, "workflow-worker": 4, "delivery-worker": 3},
         forced_losses={"workflow-worker": 1, "delivery-worker": 1},
         fresh_interpreters=True,
         postgresql_only_reconstruction=True,

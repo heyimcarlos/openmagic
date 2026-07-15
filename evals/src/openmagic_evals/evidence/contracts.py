@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Iterable
 from datetime import datetime
-from typing import Annotated, Literal
+from typing import Annotated, Literal, TypeVar
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
@@ -21,6 +22,9 @@ REQUIRED_NEGATIVE_CLAIMS = (
 
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}")
 _GIT_SHA = re.compile(r"[0-9a-f]{40}")
+CorrelationValue = TypeVar("CorrelationValue")
+ProcessRole = Literal["api", "workflow-worker", "delivery-worker"]
+PROCESS_ROLES: tuple[ProcessRole, ...] = ("api", "workflow-worker", "delivery-worker")
 
 
 class EvidenceModel(BaseModel):
@@ -54,6 +58,8 @@ class ReproducibilityPin(EvidenceModel):
     finished_at: datetime
     timeout_seconds: int = Field(gt=0)
     postgres_version: str
+    postgres_image: str
+    postgres_configuration: dict[str, str]
     postgres_configuration_digest: str
     migration_heads: dict[str, str]
     definition_digests: dict[str, str]
@@ -66,6 +72,8 @@ class ReproducibilityPin(EvidenceModel):
             raise ValueError("suite version and exact command are required")
         if self.finished_at < self.started_at:
             raise ValueError("finished_at cannot precede started_at")
+        if "@sha256:" not in self.postgres_image or not self.postgres_configuration:
+            raise ValueError("PostgreSQL image and observed configuration must be pinned")
         _require_digest(self.postgres_configuration_digest, "postgres_configuration_digest")
         if self.case_corpus_digest is not None:
             _require_digest(self.case_corpus_digest, "case_corpus_digest")
@@ -100,6 +108,41 @@ class Correlations(EvidenceModel):
     provider_request_ids: tuple[str, ...] = ()
 
 
+def merge_correlations(values: Iterable[Correlations]) -> Correlations:
+    items = tuple(values)
+
+    def unique(source: Iterable[CorrelationValue]) -> tuple[CorrelationValue, ...]:
+        return tuple(dict.fromkeys(source))
+
+    return Correlations(
+        command_ids=unique(value for item in items for value in item.command_ids),
+        workflow_ids=unique(value for item in items for value in item.workflow_ids),
+        instance_ids=unique(value for item in items for value in item.instance_ids),
+        step_ids=unique(value for item in items for value in item.step_ids),
+        attempt_ids=unique(value for item in items for value in item.attempt_ids),
+        wait_ids=unique(value for item in items for value in item.wait_ids),
+        signal_ids=unique(value for item in items for value in item.signal_ids),
+        trace_event_ids=unique(value for item in items for value in item.trace_event_ids),
+        thread_ids=unique(value for item in items for value in item.thread_ids),
+        message_ids=unique(value for item in items for value in item.message_ids),
+        agent_run_ids=unique(value for item in items for value in item.agent_run_ids),
+        domain_event_ids=unique(value for item in items for value in item.domain_event_ids),
+        delivery_ids=unique(value for item in items for value in item.delivery_ids),
+        delivery_attempt_ids=unique(value for item in items for value in item.delivery_attempt_ids),
+        external_effect_ids=unique(value for item in items for value in item.external_effect_ids),
+        approval_grant_ids=unique(value for item in items for value in item.approval_grant_ids),
+        verification_challenge_ids=unique(
+            value for item in items for value in item.verification_challenge_ids
+        ),
+        verification_session_ids=unique(
+            value for item in items for value in item.verification_session_ids
+        ),
+        worker_ids=unique(value for item in items for value in item.worker_ids),
+        process_ids=unique(value for item in items for value in item.process_ids),
+        provider_request_ids=unique(value for item in items for value in item.provider_request_ids),
+    )
+
+
 class CaseVerdict(EvidenceModel):
     status: Literal["passed", "failed", "infrastructure_error", "unavailable"]
     invariant_violations: tuple[str, ...]
@@ -132,9 +175,11 @@ class ProcessMetrics(EvidenceModel):
 
     @model_validator(mode="after")
     def validate_process_evidence(self) -> ProcessMetrics:
-        roles = {"api", "workflow-worker", "delivery-worker"}
+        roles = set(PROCESS_ROLES)
         if set(self.initial_capacity) != roles or set(self.started_processes) != roles:
             raise ValueError("process evidence must report every independent role")
+        if any(self.started_processes[role] < 1 for role in PROCESS_ROLES):
+            raise ValueError("process evidence must restart every role in a fresh interpreter")
         if set(self.forced_losses) != {"workflow-worker", "delivery-worker"}:
             raise ValueError("process evidence must report both forced Worker losses")
         if self.initial_queue.pending_steps != self.queued_workflows:
@@ -142,6 +187,48 @@ class ProcessMetrics(EvidenceModel):
         if self.drained_queue.pending_steps or self.drained_queue.pending_deliveries:
             raise ValueError("process evidence must finish with both durable queues drained")
         return self
+
+
+class RaceTrialEvidence(EvidenceModel):
+    seed: int = Field(ge=0)
+    jitter_microseconds: tuple[int, int]
+    public_outcomes: tuple[str, ...] = Field(min_length=2)
+    constraint_rows: int = Field(ge=0)
+    correlations: Correlations
+    observation_digest: str
+
+    @model_validator(mode="after")
+    def validate_race_trial(self) -> RaceTrialEvidence:
+        if len(self.jitter_microseconds) != 2 or any(
+            value < 0 for value in self.jitter_microseconds
+        ):
+            raise ValueError("race trial must record two non-negative jitter values")
+        if self.constraint_rows != 1:
+            raise ValueError("race trial must record exactly one PostgreSQL constraint row")
+        durable_ids = (
+            self.correlations.command_ids,
+            self.correlations.workflow_ids,
+            self.correlations.instance_ids,
+            self.correlations.step_ids,
+            self.correlations.attempt_ids,
+            self.correlations.wait_ids,
+            self.correlations.signal_ids,
+            self.correlations.delivery_ids,
+            self.correlations.verification_challenge_ids,
+        )
+        if not any(durable_ids):
+            raise ValueError("race trial must correlate its public and PostgreSQL outcomes")
+        _require_digest(self.observation_digest, "race observation digest")
+        return self
+
+
+class DistributionSummary(EvidenceModel):
+    count: int = Field(gt=0)
+    mean: float = Field(ge=0)
+    median: float = Field(ge=0)
+    sample_standard_deviation: float = Field(ge=0)
+    minimum: int = Field(ge=0)
+    maximum: int = Field(ge=0)
 
 
 class ArtifactCase(EvidenceModel):
@@ -155,6 +242,10 @@ class ArtifactCase(EvidenceModel):
     observation_digests: tuple[str, ...]
     verdict: CaseVerdict
     process_metrics: ProcessMetrics | None = None
+    race_trials: tuple[RaceTrialEvidence, ...] = ()
+    pass_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
+    passed_trials: int | None = Field(default=None, ge=0)
+    prohibited_actions: int = Field(default=0, ge=0)
 
     @model_validator(mode="after")
     def validate_denominator(self) -> ArtifactCase:
@@ -168,17 +259,31 @@ class ArtifactCase(EvidenceModel):
             raise ValueError("trial seeds must be unique")
         for digest in self.observation_digests:
             _require_digest(digest, "observation_digest")
+        if self.race_trials:
+            if tuple(trial.seed for trial in self.race_trials) != self.seeds:
+                raise ValueError("race trials must follow the predeclared seed corpus")
+            if tuple(trial.observation_digest for trial in self.race_trials) != (
+                self.observation_digests
+            ):
+                raise ValueError("race trials must own every recorded observation digest")
+        agent_fields = (self.pass_threshold, self.passed_trials)
+        if any(value is not None for value in agent_fields):
+            if any(value is None for value in agent_fields):
+                raise ValueError("Agent case threshold and pass count must be reported together")
+            if self.passed_trials is not None and self.passed_trials > self.observed_trials:
+                raise ValueError("Agent case pass count exceeds its denominator")
         return self
 
 
 class DeterministicSummary(EvidenceModel):
-    expected_cases: int = Field(ge=0)
-    observed_cases: int = Field(ge=0)
+    expected_cases: int = Field(gt=0)
+    observed_cases: int = Field(gt=0)
     passed_cases: int = Field(ge=0)
     failed_cases: int = Field(ge=0)
     infrastructure_errors: int = Field(ge=0)
     invariant_violations: int = Field(ge=0)
     strict_pass: bool
+    runner_exit_code: int
 
 
 class AgentQualitySummary(EvidenceModel):
@@ -193,6 +298,7 @@ class AgentQualitySummary(EvidenceModel):
     pass_rate: float = Field(default=0.0, ge=0.0, le=1.0)
     wilson_lower: float = Field(default=0.0, ge=0.0, le=1.0)
     wilson_upper: float = Field(default=1.0, ge=0.0, le=1.0)
+    latency_ms: DistributionSummary
 
     @model_validator(mode="after")
     def keep_quality_separate(self) -> AgentQualitySummary:
@@ -265,7 +371,7 @@ class DeterministicArtifact(EvidenceModel):
     artifact_kind: Literal["deterministic_release"] = "deterministic_release"
     lane: Literal["deterministic_correctness"] = "deterministic_correctness"
     reproducibility: ReproducibilityPin
-    cases: tuple[ArtifactCase, ...]
+    cases: tuple[ArtifactCase, ...] = Field(min_length=1)
     summary: DeterministicSummary
     limitations: tuple[str, ...]
     negative_claims: tuple[str, ...]
@@ -285,7 +391,11 @@ class DeterministicArtifact(EvidenceModel):
         )
         if not counts_match:
             raise ValueError("deterministic summary does not match its complete case denominator")
-        should_pass = all(status == "passed" for status in statuses) and violations == 0
+        should_pass = (
+            self.summary.runner_exit_code == 0
+            and all(status == "passed" for status in statuses)
+            and violations == 0
+        )
         if self.summary.strict_pass != should_pass:
             raise ValueError("strict deterministic verdict does not match case outcomes")
         missing = set(REQUIRED_NEGATIVE_CLAIMS).difference(self.negative_claims)
@@ -303,6 +413,25 @@ class AgentQualityArtifact(EvidenceModel):
     cases: tuple[ArtifactCase, ...]
     summary: AgentQualitySummary
     limitations: tuple[str, ...]
+
+    @model_validator(mode="after")
+    def validate_agent_quality(self) -> AgentQualityArtifact:
+        if not self.cases or any(case.split is None for case in self.cases):
+            raise ValueError("Agent quality requires versioned development or held-out cases")
+        expected = sum(case.expected_trials for case in self.cases)
+        observed = sum(case.observed_trials for case in self.cases)
+        passed = sum(case.passed_trials or 0 for case in self.cases)
+        prohibited = sum(case.prohibited_actions for case in self.cases)
+        threshold_passed = all(case.verdict.status == "passed" for case in self.cases)
+        if (
+            self.summary.expected_trials != expected
+            or self.summary.observed_trials != observed
+            or self.summary.passed_trials != passed
+            or self.summary.prohibited_actions != prohibited
+            or self.summary.threshold_passed != threshold_passed
+        ):
+            raise ValueError("Agent summary contradicts its complete case evidence")
+        return self
 
 
 class LiveSmokeArtifact(EvidenceModel):
@@ -365,14 +494,17 @@ __all__ = [
     "Correlations",
     "DeterministicArtifact",
     "DeterministicSummary",
+    "DistributionSummary",
     "LiveProviderPin",
     "LiveSmokeArtifact",
     "PlaygroundArtifact",
     "PlaygroundSummary",
     "ProcessMetrics",
     "QueueDepth",
+    "RaceTrialEvidence",
     "ReproducibilityPin",
     "artifact_json_schema",
     "canonical_artifact_json",
+    "merge_correlations",
     "parse_artifact",
 ]

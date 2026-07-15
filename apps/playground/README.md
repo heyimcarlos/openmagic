@@ -8,6 +8,7 @@ Print the safety contract:
 
 ```bash
 PYTHONPATH=apps/playground/src uv run python -m openmagic_playground manifest
+PYTHONPATH=apps/playground/src uv run python -m openmagic_playground controls
 ```
 
 Reset only an explicitly named `openmagic_playground_*` PostgreSQL database:

@@ -43,7 +43,8 @@ def test_cold_schema_audit_accepts_only_current_owned_baselines() -> None:
         report = audit_cold_schema(database_url)
 
     assert report.passed, report.violations
-    assert report.schemas == ("example_insurance", "openmagic_runtime")
+    assert report.schemas == ("example_insurance", "openmagic_runtime", "public")
+    assert report.tables["public"] == ()
     assert report.legacy_relations == ()
     assert report.migration_heads == {
         "example_insurance": "0004_deterministic_verification",

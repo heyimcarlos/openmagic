@@ -8,7 +8,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
 
-import psycopg
 from example_insurance.migrations import apply_migrations
 from example_insurance.renewals import (
     ExampleInsurance,
@@ -18,16 +17,15 @@ from example_insurance.renewals import (
 from openmagic_runtime.commands import Cause
 from openmagic_runtime.threads import ThreadStore
 
+from openmagic_evals.evidence.artifact_io import write_artifact
 from openmagic_evals.evidence.contracts import (
     ArtifactCase,
     CaseVerdict,
     Correlations,
     PlaygroundArtifact,
     PlaygroundSummary,
-    canonical_artifact_json,
-    parse_artifact,
 )
-from openmagic_evals.evidence.redaction import audit_redaction
+from openmagic_evals.evidence.inspection import EvidenceInspection
 from openmagic_evals.evidence.release import reproducibility_pin
 from openmagic_evals.harness import (
     LocalEmailProvider,
@@ -49,11 +47,7 @@ def _ids(value: object) -> tuple[UUID, ...]:
 
 
 def _write(path: Path, artifact: PlaygroundArtifact) -> PlaygroundArtifact:
-    document = canonical_artifact_json(artifact)
-    parse_artifact(document)
-    audit_redaction(json.loads(document))
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(document, encoding="utf-8")
+    write_artifact(path, artifact)
     return artifact
 
 
@@ -115,8 +109,12 @@ def run_renewal_demo(
     command_line = (
         "openmagic-evidence",
         "demo-renewal",
+        "--repository-root",
+        str(repository_root.resolve()),
         "--working-directory",
         str(working_directory.resolve()),
+        "--output",
+        str(output.resolve()),
     )
     with (
         LocalEmailProvider(working_directory=working_directory / "provider") as provider,
@@ -138,14 +136,9 @@ def run_renewal_demo(
         evidence = json.loads(application.renewal_evidence_json(command.input.workflow_id))
         values = evidence["correlations"]
         outcomes = evidence["outcomes"]
-        with psycopg.connect(database_url) as connection:
-            trace_rows = connection.execute(
-                "SELECT trace_event_id FROM openmagic_runtime.trace_events WHERE instance_id = %s",
-                (UUID(values["instance_id"]),),
-            ).fetchall()
-            delivery_attempt_rows = connection.execute(
-                "SELECT delivery_attempt_id FROM openmagic_runtime.delivery_attempts"
-            ).fetchall()
+        trace_event_ids, delivery_attempt_ids = EvidenceInspection(database_url).renewal_demo_ids(
+            UUID(values["instance_id"])
+        )
         correlations = Correlations(
             command_ids=(UUID(values["command_id"]),),
             workflow_ids=(UUID(values["workflow_id"]),),
@@ -154,13 +147,13 @@ def run_renewal_demo(
             attempt_ids=_ids(values["attempt_ids"]),
             wait_ids=_ids(outcomes["approval_wait_ids"]),
             signal_ids=_ids(values["signal_ids"]),
-            trace_event_ids=tuple(UUID(str(row[0])) for row in trace_rows),
+            trace_event_ids=trace_event_ids,
             thread_ids=(UUID(values["thread_id"]),),
             message_ids=_ids(values["message_ids"]),
             agent_run_ids=_ids(values["agent_run_ids"]),
             domain_event_ids=_ids(values["domain_event_ids"]),
             delivery_ids=_ids(values["delivery_ids"]),
-            delivery_attempt_ids=tuple(UUID(str(row[0])) for row in delivery_attempt_rows),
+            delivery_attempt_ids=delivery_attempt_ids,
             external_effect_ids=_ids(values["logical_effect_ids"]),
             approval_grant_ids=_ids(values["approval_grant_ids"]),
             worker_ids=("synthetic-email",),
@@ -198,7 +191,14 @@ def run_renewal_demo(
 
 def run_verification_demo(*, repository_root: Path, output: Path) -> PlaygroundArtifact:
     started_at = datetime.now(UTC)
-    command_line = ("openmagic-evidence", "demo-verification")
+    command_line = (
+        "openmagic-evidence",
+        "demo-verification",
+        "--repository-root",
+        str(repository_root.resolve()),
+        "--output",
+        str(output.resolve()),
+    )
     with renewal_context(verification_code_secret=b"synthetic-demo-verification") as (
         database_url,
         application,
@@ -224,33 +224,18 @@ def run_verification_demo(*, repository_root: Path, output: Path) -> PlaygroundA
             )
         )
         application.run_delivery_worker_once(worker_id="synthetic-protected-delivery")
-        with psycopg.connect(database_url) as connection:
-            rows = connection.execute(
-                "SELECT c.delivery_instance_id, c.delivery_workflow_id, s.session_id "
-                "FROM example_insurance.verification_challenges AS c "
-                "JOIN example_insurance.verification_sessions AS s USING (challenge_id) "
-                "WHERE c.challenge_id = %s",
-                (challenge_id,),
-            ).fetchone()
-            step_rows = (
-                connection.execute(
-                    "SELECT step_id, attempt_id FROM openmagic_runtime.attempts WHERE instance_id = %s",
-                    (rows[0],),
-                ).fetchall()
-                if rows is not None
-                else ()
-            )
-        if rows is None or receipt.result.verification_outcome != "verified":
+        verification = EvidenceInspection(database_url).verification_demo(challenge_id)
+        if verification is None or receipt.result.verification_outcome != "verified":
             raise AssertionError("verification demonstration did not verify")
         correlations = Correlations(
             command_ids=(scenario.protected_command.command_id, receipt.command_id),
-            workflow_ids=(scenario.renewal.input.workflow_id, UUID(str(rows[1]))),
-            instance_ids=(UUID(str(rows[0])),),
-            step_ids=tuple(UUID(str(row[0])) for row in step_rows),
-            attempt_ids=tuple(UUID(str(row[1])) for row in step_rows),
+            workflow_ids=(scenario.renewal.input.workflow_id, verification.workflow_id),
+            instance_ids=(verification.instance_id,),
+            step_ids=tuple(step_id for step_id, _ in verification.step_attempt_ids),
+            attempt_ids=tuple(attempt_id for _, attempt_id in verification.step_attempt_ids),
             thread_ids=(scenario.renewal.input.thread_id, scenario.identifier_thread_id),
             verification_challenge_ids=(challenge_id,),
-            verification_session_ids=(UUID(str(rows[2])),),
+            verification_session_ids=(verification.session_id,),
             worker_ids=("synthetic-protected-delivery",),
         )
         observation = {

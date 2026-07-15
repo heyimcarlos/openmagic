@@ -2,16 +2,11 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
-import random
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
 from threading import Barrier
-from uuid import UUID, uuid4
+from uuid import uuid4
 
-import psycopg
 from example_insurance.renewals import (
     CancelRenewalOutreach,
     CancelRenewalOutreachInput,
@@ -25,31 +20,19 @@ from example_insurance.renewals import (
 from openmagic_runtime.commands import Cause, CommandReceipt
 from openmagic_runtime.threads import ThreadStore
 
+from openmagic_evals.evidence.contracts import Correlations
+from openmagic_evals.evidence.inspection import EvidenceInspection
+from openmagic_evals.evidence.race_claims import run_claim_races
+from openmagic_evals.evidence.race_models import (
+    RaceCorpus,
+    RaceSeedResult,
+    jitter_pair,
+    race_digest,
+)
+from openmagic_evals.evidence.race_transitions import run_transition_races
+from openmagic_evals.harness import renewal_context
 from openmagic_evals.harness.renewal_scenario import prepare_synthetic_renewal_start
 from openmagic_evals.harness.verification_scenario import issue_verification_challenge
-
-
-@dataclass(frozen=True)
-class RaceSeedResult:
-    seed: int
-    public_outcomes: tuple[str, ...]
-    constraint_rows: int
-    correlation_ids: tuple[UUID, ...]
-    observation_digest: str
-
-
-@dataclass(frozen=True)
-class RaceCorpus:
-    case_id: str
-    uses_overlap_barrier: bool
-    varied_jitter: bool
-    database_constraint: str
-    results: tuple[RaceSeedResult, ...]
-
-
-def _digest(value: object) -> str:
-    encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
-    return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
 def run_command_receipt_races(
@@ -60,44 +43,43 @@ def run_command_receipt_races(
     seeds: tuple[int, ...] = tuple(range(100)),
 ) -> RaceCorpus:
     results: list[RaceSeedResult] = []
+    inspection = EvidenceInspection(database_url)
     with ThreadPoolExecutor(max_workers=2) as executor:
         for seed in seeds:
             command = prepare_synthetic_renewal_start(application, threads, seed)
             barrier = Barrier(2)
+            jitters = jitter_pair(seed, 0)
 
             def submit(
                 index: int,
                 race_barrier: Barrier = barrier,
                 race_seed: int = seed,
                 race_command: StartRenewalOutreach = command,
+                race_jitters: tuple[int, int] = jitters,
             ) -> CommandReceipt[StartRenewalOutreachResult]:
                 race_barrier.wait()
-                time.sleep(random.Random(race_seed * 2 + index).random() / 1000)
+                time.sleep(race_jitters[index] / 1_000_000)
                 return application.start_renewal_outreach(race_command)
 
             receipts = tuple(executor.map(submit, range(2)))
             if receipts[0] != receipts[1]:
                 raise AssertionError(f"Command replay differed for seed {seed}")
             receipt = receipts[0]
-            with psycopg.connect(database_url) as connection:
-                row = connection.execute(
-                    "SELECT count(*) FROM openmagic_runtime.command_receipts WHERE command_id = %s",
-                    (command.command_id,),
-                ).fetchone()
-            count = int(row[0]) if row is not None else 0
+            count = inspection.command_receipts(command.command_id)
             if count != 1:
                 raise AssertionError(f"Command receipt constraint disagreed for seed {seed}")
             results.append(
                 RaceSeedResult(
                     seed=seed,
+                    jitter_microseconds=jitters,
                     public_outcomes=("replayed", "replayed"),
                     constraint_rows=count,
-                    correlation_ids=(
-                        command.command_id,
-                        command.input.workflow_id,
-                        receipt.result.instance_id,
+                    correlations=Correlations(
+                        command_ids=(command.command_id,),
+                        workflow_ids=(command.input.workflow_id,),
+                        instance_ids=(receipt.result.instance_id,),
                     ),
-                    observation_digest=_digest(
+                    observation_digest=race_digest(
                         {
                             "seed": seed,
                             "same_receipt": True,
@@ -124,6 +106,7 @@ def run_verification_submission_races(
     seeds: tuple[int, ...] = tuple(range(100)),
 ) -> RaceCorpus:
     results: list[RaceSeedResult] = []
+    inspection = EvidenceInspection(database_url)
     with ThreadPoolExecutor(max_workers=2) as executor:
         for seed in seeds:
             scenario = issue_verification_challenge(application, threads)
@@ -148,41 +131,43 @@ def run_verification_submission_races(
                 for _ in range(2)
             )
             barrier = Barrier(2)
+            jitters = jitter_pair(seed, 100_000)
 
             def submit(
                 index: int,
                 race_barrier: Barrier = barrier,
                 race_seed: int = seed,
                 race_commands: tuple[SubmitVerificationCode, ...] = commands,
+                race_jitters: tuple[int, int] = jitters,
             ) -> CommandReceipt[SubmitVerificationCodeResult]:
                 race_barrier.wait()
-                time.sleep(random.Random(race_seed * 2 + index + 100_000).random() / 1000)
+                time.sleep(race_jitters[index] / 1_000_000)
                 return application.submit_verification_code(race_commands[index])
 
             receipts = tuple(executor.map(submit, range(2)))
             outcomes = tuple(sorted(receipt.result.verification_outcome for receipt in receipts))
             if outcomes != ("already_used", "verified"):
                 raise AssertionError(f"Verification race public outcomes disagreed for seed {seed}")
-            with psycopg.connect(database_url) as connection:
-                row = connection.execute(
-                    "SELECT count(*) FROM example_insurance.verification_sessions "
-                    "WHERE challenge_id = %s",
-                    (challenge_id,),
-                ).fetchone()
-            count = int(row[0]) if row is not None else 0
+            count = inspection.verification_sessions(challenge_id)
             if count != 1:
                 raise AssertionError(f"Verification session constraint disagreed for seed {seed}")
             results.append(
                 RaceSeedResult(
                     seed=seed,
+                    jitter_microseconds=jitters,
                     public_outcomes=outcomes,
                     constraint_rows=count,
-                    correlation_ids=(
-                        challenge_id,
-                        scenario.protected_command.command_id,
-                        scenario.renewal.input.workflow_id,
+                    correlations=Correlations(
+                        command_ids=tuple(command.command_id for command in commands),
+                        workflow_ids=(scenario.renewal.input.workflow_id,),
+                        verification_challenge_ids=(challenge_id,),
+                        verification_session_ids=tuple(
+                            receipt.result.session_id
+                            for receipt in receipts
+                            if receipt.result.session_id is not None
+                        ),
                     ),
-                    observation_digest=_digest(
+                    observation_digest=race_digest(
                         {
                             "seed": seed,
                             "outcomes": outcomes,
@@ -216,9 +201,53 @@ def run_verification_submission_races(
     )
 
 
+def run_all_races(*, seeds: tuple[int, ...] = tuple(range(100))) -> tuple[RaceCorpus, ...]:
+    with renewal_context(verification_code_secret=b"synthetic-issue71-race-secret") as (
+        database_url,
+        application,
+        threads,
+    ):
+        command = run_command_receipt_races(
+            database_url,
+            application,
+            threads,
+            seeds=seeds,
+        )
+    with renewal_context(verification_code_secret=b"synthetic-issue71-race-secret") as (
+        database_url,
+        application,
+        threads,
+    ):
+        step, delivery = run_claim_races(
+            database_url,
+            application,
+            threads,
+            seeds=seeds,
+        )
+    with renewal_context(verification_code_secret=b"synthetic-issue71-race-secret") as (
+        database_url,
+        _application,
+        _threads,
+    ):
+        signal, attempt, route = run_transition_races(database_url, seeds=seeds)
+    with renewal_context(verification_code_secret=b"synthetic-issue71-race-secret") as (
+        database_url,
+        application,
+        threads,
+    ):
+        verification = run_verification_submission_races(
+            database_url,
+            application,
+            threads,
+            seeds=seeds,
+        )
+    return command, delivery, step, signal, attempt, route, verification
+
+
 __all__ = [
     "RaceCorpus",
     "RaceSeedResult",
+    "run_all_races",
     "run_command_receipt_races",
     "run_verification_submission_races",
 ]

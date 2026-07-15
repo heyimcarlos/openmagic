@@ -38,6 +38,8 @@ def test_every_cardinality_one_race_declares_barrier_and_100_varied_jitter_seeds
     assert {race.case_id for race in races} == {
         "race.command-receipt",
         "race.delivery-claim",
+        "race.attempt-result",
+        "race.route-activation",
         "race.step-claim",
         "race.wait-signal",
         "race.verification-submission",

@@ -66,6 +66,7 @@ def test_built_wheels_install_and_boot_in_clean_environments(tmp_path) -> None:
         environments[package] = environment
 
     clean_evals = environments["openmagic-evals"]
+    _run([str(clean_evals / "bin/openmagic-evidence"), "audit-installed"])
     work_directory = tmp_path / "deployment"
     child_environment = {
         "PATH": os.defpath,

@@ -149,7 +149,7 @@ DETERMINISTIC_RELEASE_MATRIX = (
 _RACES = (
     RaceContract(
         "race.command-receipt",
-        "evals/tests/test_issue71_race_corpus.py::test_command_receipt_race_corpus",
+        "evals/tests/test_issue71_race_corpus.py::test_all_cardinality_races_record_actual_trials",
         True,
         tuple(range(100)),
         True,
@@ -157,7 +157,7 @@ _RACES = (
     ),
     RaceContract(
         "race.delivery-claim",
-        "evals/tests/test_renewal_drafting.py::test_seeded_step_and_delivery_claim_races_hold_cardinality_one_100_times",
+        "evals/tests/test_issue71_race_corpus.py::test_all_cardinality_races_record_actual_trials",
         True,
         tuple(range(100)),
         True,
@@ -165,7 +165,7 @@ _RACES = (
     ),
     RaceContract(
         "race.step-claim",
-        "evals/tests/test_renewal_drafting.py::test_seeded_step_and_delivery_claim_races_hold_cardinality_one_100_times",
+        "evals/tests/test_issue71_race_corpus.py::test_all_cardinality_races_record_actual_trials",
         True,
         tuple(range(100)),
         True,
@@ -173,15 +173,31 @@ _RACES = (
     ),
     RaceContract(
         "race.wait-signal",
-        "evals/tests/test_kernel_signal_race.py::test_competing_signals_have_one_winner_in_100_seeded_real_transaction_races",
+        "evals/tests/test_issue71_race_corpus.py::test_all_cardinality_races_record_actual_trials",
         True,
         tuple(range(100)),
         True,
         "openmagic_runtime.signals(wait_id)",
     ),
     RaceContract(
+        "race.attempt-result",
+        "evals/tests/test_issue71_race_corpus.py::test_all_cardinality_races_record_actual_trials",
+        True,
+        tuple(range(100)),
+        True,
+        "one accepted result per Attempt",
+    ),
+    RaceContract(
+        "race.route-activation",
+        "evals/tests/test_issue71_race_corpus.py::test_all_cardinality_races_record_actual_trials",
+        True,
+        tuple(range(100)),
+        True,
+        "one materialized output per Route slot",
+    ),
+    RaceContract(
         "race.verification-submission",
-        "evals/tests/test_issue71_race_corpus.py::test_verification_submission_race_corpus",
+        "evals/tests/test_issue71_race_corpus.py::test_all_cardinality_races_record_actual_trials",
         True,
         tuple(range(100)),
         True,

@@ -30,6 +30,7 @@ class ManagedProcess:
     role: ProcessRole
     pid: int
     health_url: str
+    worker_id: str | None
 
 
 @dataclass
@@ -200,8 +201,10 @@ class TestDeployment:
         if not script.is_file():
             raise RuntimeError(f"installed process entry point is missing: {script_name}")
         worker_arguments = []
+        worker_id: str | None = None
         if role != "api":
-            worker_arguments = ["--worker-id", f"{role}-{uuid4().hex}"]
+            worker_id = f"{role}-{uuid4().hex}"
+            worker_arguments = ["--worker-id", worker_id]
         if role == "workflow-worker" and self.email_provider_url is not None:
             worker_arguments.extend(["--email-provider-url", self.email_provider_url])
         if role == "workflow-worker":
@@ -247,6 +250,7 @@ class TestDeployment:
                     role=role,
                     pid=process.pid,
                     health_url=f"http://127.0.0.1:{port}/health",
+                    worker_id=worker_id,
                 ),
                 process=process,
                 log_handle=log_handle,

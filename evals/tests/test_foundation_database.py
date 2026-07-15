@@ -10,6 +10,7 @@ from example_insurance.reset import (
     assess_reset,
     reset_synthetic_deployment,
 )
+from openmagic_evals.evidence.audit import audit_cold_schema
 from openmagic_evals.harness._postgres import postgres_container
 
 
@@ -167,3 +168,26 @@ def test_reset_preflight_rejects_a_database_without_an_explicit_synthetic_name()
         assert assessment.blocking_conditions == ("database name is not explicitly synthetic",)
         with pytest.raises(ResetPreflightBlocked, match="not explicitly synthetic"):
             reset_synthetic_deployment(database_url)
+
+
+@pytest.mark.integration
+def test_cold_schema_audit_rejects_every_extra_user_schema_or_public_table() -> None:
+    with postgres_container(database_name=f"openmagic_test_{uuid4().hex}") as postgres:
+        database_url = postgres.get_connection_url(driver=None)
+        apply_migrations(database_url)
+        assert audit_cold_schema(database_url).passed
+
+        with psycopg.connect(database_url) as connection:
+            connection.execute("CREATE SCHEMA rogue_owner")
+            connection.execute("CREATE TABLE public.rogue_table (identity uuid PRIMARY KEY)")
+
+        audit = audit_cold_schema(database_url)
+
+        assert not audit.passed
+        assert set(audit.schemas) == {
+            "example_insurance",
+            "openmagic_runtime",
+            "public",
+            "rogue_owner",
+        }
+        assert audit.tables["public"] == ("rogue_table",)

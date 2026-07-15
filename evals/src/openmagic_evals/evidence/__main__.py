@@ -10,6 +10,7 @@ from openmagic_evals.evidence.audit import audit_repository
 from openmagic_evals.evidence.claims import write_claim_report
 from openmagic_evals.evidence.contracts import artifact_json_schema
 from openmagic_evals.evidence.demos import run_renewal_demo, run_verification_demo
+from openmagic_evals.evidence.installed_audit import audit_installed_environment
 from openmagic_evals.evidence.live_smoke import run_live_smoke
 from openmagic_evals.evidence.playground import verify_playground
 from openmagic_evals.evidence.processes import run_process_release
@@ -23,6 +24,7 @@ def _parser() -> argparse.ArgumentParser:
     schema.add_argument("--output", type=Path)
     audit = subcommands.add_parser("audit-surface", help="audit repository public surfaces")
     audit.add_argument("--repository-root", type=Path, required=True)
+    subcommands.add_parser("audit-installed", help="audit the installed wheel surface")
     release_commands = {"deterministic", "races"}
     for name, help_text in (
         ("deterministic", "run the deterministic release matrix"),
@@ -95,6 +97,12 @@ def main() -> None:
         return
     if arguments.command == "audit-surface":
         report = audit_repository(arguments.repository_root)
+        print(json.dumps(asdict(report), sort_keys=True, separators=(",", ":")))
+        if not report.passed:
+            raise SystemExit(1)
+        return
+    if arguments.command == "audit-installed":
+        report = audit_installed_environment()
         print(json.dumps(asdict(report), sort_keys=True, separators=(",", ":")))
         if not report.passed:
             raise SystemExit(1)

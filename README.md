@@ -31,7 +31,7 @@ Requires Python 3.11+, uv, and Docker.
 uv sync --all-packages --locked --group dev
 uv run ruff format --check .
 uv run ruff check .
-uv run ty check packages/openmagic-runtime/src reference-apps/example-insurance/src apps/api/src evals/src
+uv run ty check packages/openmagic-runtime/src reference-apps/example-insurance/src apps/api/src evals/src apps/playground/src
 uv run ty check packages/openmagic-runtime/tests reference-apps/example-insurance/tests evals/tests
 uv run pytest
 ```
@@ -64,6 +64,7 @@ a clean checkout:
 mkdir -p .artifacts/issue71
 uv run openmagic-evidence schema --output .artifacts/issue71/schema.json
 uv run openmagic-evidence audit-surface --repository-root .
+uv run pytest evals/tests/test_foundation_wheels.py
 uv run openmagic-evidence deterministic \
   --repository-root . \
   --output .artifacts/issue71/deterministic-release.json
@@ -81,19 +82,22 @@ Generate the other evidence products and final claim report:
 ```bash
 uv run openmagic-evidence agent-quality \
   --repository-root . \
-  --output .artifacts/issue71/agent-quality.json
+  --output .artifacts/issue71/agent-quality.json \
+  --timeout-seconds 300
 uv run openmagic-evidence playground \
   --repository-root . \
   --working-directory .artifacts/issue71/playground \
-  --output .artifacts/issue71/playground.json
+  --output .artifacts/issue71/playground.json \
+  --timeout-seconds 120
 uv run openmagic-evidence live-smoke \
   --repository-root . \
-  --provider unavailable \
+  --provider openai-responses \
   --model unavailable \
-  --endpoint https://unconfigured.invalid/health \
+  --endpoint https://api.openai.com/v1/responses \
   --configuration-digest sha256:0000000000000000000000000000000000000000000000000000000000000000 \
   --synthetic-case-id live.synthetic.unavailable \
-  --output .artifacts/issue71/live-smoke.json
+  --output .artifacts/issue71/live-smoke.json \
+  --timeout-seconds 10
 uv run openmagic-evidence claim-report \
   --deterministic .artifacts/issue71/deterministic-release.json \
   --agent-quality .artifacts/issue71/agent-quality.json \

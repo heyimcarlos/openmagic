@@ -9,6 +9,7 @@ from pathlib import Path
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
+from openmagic_evals.evidence.artifact_io import write_artifact
 from openmagic_evals.evidence.contracts import (
     ArtifactCase,
     AvailabilitySummary,
@@ -16,15 +17,20 @@ from openmagic_evals.evidence.contracts import (
     Correlations,
     LiveProviderPin,
     LiveSmokeArtifact,
-    canonical_artifact_json,
-    parse_artifact,
 )
-from openmagic_evals.evidence.redaction import audit_redaction
 from openmagic_evals.evidence.release import reproducibility_pin
 
 
 def _digest(value: str) -> str:
     return "sha256:" + hashlib.sha256(value.encode()).hexdigest()
+
+
+def _contains_marker(value: object, marker: str) -> bool:
+    if isinstance(value, dict):
+        return any(_contains_marker(item, marker) for item in value.values())
+    if isinstance(value, list):
+        return any(_contains_marker(item, marker) for item in value)
+    return isinstance(value, str) and marker in value
 
 
 def run_live_smoke(
@@ -40,34 +46,83 @@ def run_live_smoke(
     allow_live: bool,
     timeout_seconds: int = 10,
 ) -> LiveSmokeArtifact:
-    command = (
+    command_parts = [
         "openmagic-evidence",
         "live-smoke",
+        "--repository-root",
+        str(repository_root.resolve()),
+        "--output",
+        str(output.resolve()),
         "--provider",
         provider,
         "--model",
         model,
+        "--endpoint",
+        endpoint,
+        "--configuration-digest",
+        configuration_digest,
         "--synthetic-case-id",
         synthetic_case_id,
-    )
+        "--timeout-seconds",
+        str(timeout_seconds),
+    ]
+    if credential_file is not None:
+        command_parts.extend(("--credential-file", str(credential_file.resolve())))
+    if allow_live:
+        command_parts.append("--allow-live")
+    command = tuple(command_parts)
     started_at = datetime.now(UTC)
+    if allow_live and credential_file is None:
+        raise ValueError("live smoke requires an explicit credential file")
     attempted = allow_live and credential_file is not None
     available = False
-    observation = {"attempted": attempted, "available": False}
+    provider_request_ids: tuple[str, ...] = ()
+    observation: dict[str, object] = {"attempted": attempted, "available": False}
     if attempted:
+        if provider != "openai-responses":
+            raise ValueError("live smoke supports only the pinned openai-responses contract")
         mode = credential_file.stat().st_mode & 0o777
         if mode & 0o077:
             raise ValueError("live credential file must not be accessible by group or other")
         credential = credential_file.read_text(encoding="utf-8").strip()
         if not credential:
             raise ValueError("live credential file is empty")
-        request = Request(endpoint, headers={"Authorization": f"Bearer {credential}"})
+        marker = "OPENMAGIC_SYNTHETIC_SMOKE_OK"
+        payload = {
+            "model": model,
+            "input": f"Return exactly {marker}",
+            "metadata": {"openmagic_case_id": synthetic_case_id},
+            "store": False,
+        }
+        request = Request(
+            endpoint,
+            data=json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(),
+            headers={
+                "Authorization": f"Bearer {credential}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
         try:
             with urlopen(request, timeout=timeout_seconds) as response:
-                available = 200 <= response.status < 300
-        except (OSError, URLError):
+                response_document = json.load(response)
+                marker_verified = _contains_marker(response_document, marker)
+                available = 200 <= response.status < 300 and marker_verified
+                request_id = response.headers.get("x-request-id")
+                provider_request_ids = (request_id,) if request_id else ()
+                observation = {
+                    "attempted": True,
+                    "available": available,
+                    "marker_verified": marker_verified,
+                    "status_code": response.status,
+                }
+        except (OSError, URLError, ValueError, json.JSONDecodeError):
             available = False
-        observation = {"attempted": True, "available": available}
+            observation = {
+                "attempted": True,
+                "available": False,
+                "marker_verified": False,
+            }
     finished_at = datetime.now(UTC)
     status = "passed" if available else "unavailable" if not attempted else "infrastructure_error"
     artifact = LiveSmokeArtifact(
@@ -94,7 +149,7 @@ def run_live_smoke(
                 expected_trials=1,
                 observed_trials=1,
                 seeds=(0,),
-                correlations=Correlations(),
+                correlations=Correlations(provider_request_ids=provider_request_ids),
                 observation_digests=(_digest(json.dumps(observation, sort_keys=True)),),
                 verdict=CaseVerdict(status=status, invariant_violations=()),
             ),
@@ -109,11 +164,7 @@ def run_live_smoke(
             "Provider availability cannot determine deterministic correctness.",
         ),
     )
-    document = canonical_artifact_json(artifact)
-    parse_artifact(document)
-    audit_redaction(json.loads(document))
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(document, encoding="utf-8")
+    write_artifact(output, artifact)
     return artifact
 
 

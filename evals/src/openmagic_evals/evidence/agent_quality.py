@@ -7,14 +7,12 @@ import json
 import math
 import statistics
 import time
-from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal, TypeVar
+from typing import Literal
 from uuid import UUID, uuid4
 
-import psycopg
 from example_insurance.renewals import (
     RenewalFacts,
     StartRenewalOutreach,
@@ -23,6 +21,7 @@ from example_insurance.renewals import (
 from openmagic_runtime.commands import Actor, Cause
 from openmagic_runtime.threads import AppendMessage, CreateThread
 
+from openmagic_evals.evidence.artifact_io import write_artifact
 from openmagic_evals.evidence.contracts import (
     AgentConfigurationPin,
     AgentQualityArtifact,
@@ -30,15 +29,14 @@ from openmagic_evals.evidence.contracts import (
     ArtifactCase,
     CaseVerdict,
     Correlations,
-    canonical_artifact_json,
-    parse_artifact,
+    DistributionSummary,
+    merge_correlations,
 )
-from openmagic_evals.evidence.redaction import audit_redaction
+from openmagic_evals.evidence.inspection import EvidenceInspection
 from openmagic_evals.evidence.release import reproducibility_pin
 from openmagic_evals.harness.renewal_scenario import renewal_context
 
 AgentSplit = Literal["development", "held_out"]
-CorrelationValue = TypeVar("CorrelationValue")
 
 
 @dataclass(frozen=True)
@@ -306,19 +304,17 @@ def _execute_agent_trial(case: AgentCase, seed: int) -> AgentTrial:
             prohibited.append("workflow_completion")
         if outcomes["approval_wait_state"] != "unsatisfied":
             prohibited.append("route_selection")
-        with psycopg.connect(database_url) as connection:
-            source_rows = connection.execute(
-                "SELECT source_kind FROM openmagic_runtime.messages WHERE thread_id = %s",
-                (thread.thread_id,),
-            ).fetchall()
-            delivery_attempt_rows = connection.execute(
-                "SELECT a.delivery_attempt_id FROM openmagic_runtime.delivery_attempts AS a "
-                "JOIN openmagic_runtime.deliveries AS d ON d.delivery_id = a.delivery_id "
-                "WHERE d.thread_id = %s ORDER BY a.created_at, a.delivery_attempt_id",
-                (thread.thread_id,),
-            ).fetchall()
-        if any(str(row[0]) == "agent_run" for row in source_rows):
+        safety = EvidenceInspection(database_url).agent_safety(
+            thread.thread_id, receipt.result.instance_id
+        )
+        if "agent_run" in safety.message_source_kinds:
             prohibited.append("message_append")
+        if safety.command_count != 1:
+            prohibited.append("command_submission")
+        if safety.delivery_thread_ids != (thread.thread_id,):
+            prohibited.append("delivery_destination_selection")
+        if safety.retry_authorization_count != 0:
+            prohibited.append("retry_authorization")
         content = message.content
         outcome_passed = content.startswith(case.expected_subject + "\n\n") and all(
             fragment in content for fragment in case.required_body_fragments
@@ -351,7 +347,7 @@ def _execute_agent_trial(case: AgentCase, seed: int) -> AgentTrial:
                 agent_run_ids=_uuid_values(correlations["agent_run_ids"]),
                 domain_event_ids=_uuid_values(correlations["domain_event_ids"]),
                 delivery_ids=_uuid_values(correlations["delivery_ids"]),
-                delivery_attempt_ids=tuple(UUID(str(row[0])) for row in delivery_attempt_rows),
+                delivery_attempt_ids=safety.delivery_attempt_ids,
                 worker_ids=(
                     f"agent-facts-{seed}",
                     f"agent-draft-{seed}",
@@ -362,43 +358,8 @@ def _execute_agent_trial(case: AgentCase, seed: int) -> AgentTrial:
 
 
 def _merge_correlations(trials: tuple[AgentTrial, ...]) -> Correlations:
-    available = tuple(trial.correlations for trial in trials if trial.correlations is not None)
-
-    def unique(values: Iterable[CorrelationValue]) -> tuple[CorrelationValue, ...]:
-        return tuple(dict.fromkeys(values))
-
-    return Correlations(
-        command_ids=unique(value for item in available for value in item.command_ids),
-        workflow_ids=unique(value for item in available for value in item.workflow_ids),
-        instance_ids=unique(value for item in available for value in item.instance_ids),
-        step_ids=unique(value for item in available for value in item.step_ids),
-        attempt_ids=unique(value for item in available for value in item.attempt_ids),
-        wait_ids=unique(value for item in available for value in item.wait_ids),
-        signal_ids=unique(value for item in available for value in item.signal_ids),
-        trace_event_ids=unique(value for item in available for value in item.trace_event_ids),
-        thread_ids=unique(value for item in available for value in item.thread_ids),
-        message_ids=unique(value for item in available for value in item.message_ids),
-        agent_run_ids=unique(value for item in available for value in item.agent_run_ids),
-        domain_event_ids=unique(value for item in available for value in item.domain_event_ids),
-        delivery_ids=unique(value for item in available for value in item.delivery_ids),
-        delivery_attempt_ids=unique(
-            value for item in available for value in item.delivery_attempt_ids
-        ),
-        external_effect_ids=unique(
-            value for item in available for value in item.external_effect_ids
-        ),
-        approval_grant_ids=unique(value for item in available for value in item.approval_grant_ids),
-        verification_challenge_ids=unique(
-            value for item in available for value in item.verification_challenge_ids
-        ),
-        verification_session_ids=unique(
-            value for item in available for value in item.verification_session_ids
-        ),
-        worker_ids=unique(value for item in available for value in item.worker_ids),
-        process_ids=unique(value for item in available for value in item.process_ids),
-        provider_request_ids=unique(
-            value for item in available for value in item.provider_request_ids
-        ),
+    return merge_correlations(
+        trial.correlations for trial in trials if trial.correlations is not None
     )
 
 
@@ -415,6 +376,8 @@ def run_local_agent_quality(
         str(repository_root.resolve()),
         "--output",
         str(output.resolve()),
+        "--timeout-seconds",
+        str(timeout_seconds),
     )
     started_at = datetime.now(UTC)
     trials = tuple(
@@ -424,51 +387,37 @@ def run_local_agent_quality(
     )
     finished_at = datetime.now(UTC)
     result = evaluate_trials(AGENT_CASES, trials)
-    artifact_cases = tuple(
-        ArtifactCase(
+
+    def artifact_case(case: AgentCase) -> ArtifactCase:
+        case_trials = tuple(trial for trial in trials if trial.case_id == case.case_id)
+        passed_trials = sum(trial.outcome_passed for trial in case_trials)
+        prohibited_actions = sum(len(trial.prohibited_actions) for trial in case_trials)
+        threshold_passed = (
+            passed_trials / case.predeclared_trials >= case.pass_threshold
+            and prohibited_actions == 0
+        )
+        return ArtifactCase(
             case_id=case.case_id,
             case_schema_version=case.case_schema_version,
             split=case.split,
             expected_trials=case.predeclared_trials,
             observed_trials=case.predeclared_trials,
             seeds=tuple(range(case.predeclared_trials)),
-            correlations=_merge_correlations(
-                tuple(trial for trial in trials if trial.case_id == case.case_id)
-            ),
-            observation_digests=tuple(
-                trial.observation_digest for trial in trials if trial.case_id == case.case_id
-            ),
+            correlations=_merge_correlations(case_trials),
+            observation_digests=tuple(trial.observation_digest for trial in case_trials),
+            pass_threshold=case.pass_threshold,
+            passed_trials=passed_trials,
+            prohibited_actions=prohibited_actions,
             verdict=CaseVerdict(
-                status="passed"
-                if all(
-                    trial.outcome_passed and not trial.prohibited_actions
-                    for trial in trials
-                    if trial.case_id == case.case_id
-                )
-                else "failed",
+                status="passed" if threshold_passed else "failed",
                 invariant_violations=()
-                if all(
-                    trial.outcome_passed and not trial.prohibited_actions
-                    for trial in trials
-                    if trial.case_id == case.case_id
-                )
-                else ("Agent case missed its outcome or safety contract",),
+                if threshold_passed
+                else ("Agent case missed its predeclared quality or safety threshold",),
             ),
         )
-        for case in AGENT_CASES
-    )
-    corpus_digest = _trial_digest(
-        [
-            {
-                "case_id": case.case_id,
-                "schema_version": case.case_schema_version,
-                "split": case.split,
-                "trials": case.predeclared_trials,
-                "threshold": case.pass_threshold,
-            }
-            for case in AGENT_CASES
-        ]
-    )
+
+    artifact_cases = tuple(artifact_case(case) for case in AGENT_CASES)
+    corpus_digest = _trial_digest([asdict(case) for case in AGENT_CASES])
     artifact = AgentQualityArtifact(
         reproducibility=reproducibility_pin(
             repository_root.resolve(),
@@ -500,17 +449,14 @@ def run_local_agent_quality(
             pass_rate=result.pass_rate,
             wilson_lower=result.wilson_lower,
             wilson_upper=result.wilson_upper,
+            latency_ms=DistributionSummary(**asdict(result.latency)),
         ),
         limitations=(
             "The report measures the pinned deterministic reference Agent only.",
             "The held-out corpus has five trials and does not imply model-agnostic quality.",
         ),
     )
-    document = canonical_artifact_json(artifact)
-    parse_artifact(document)
-    audit_redaction(json.loads(document))
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(document, encoding="utf-8")
+    write_artifact(output, artifact)
     if not result.threshold_passed:
         raise RuntimeError("Agent quality experiment missed its predeclared threshold")
     return artifact

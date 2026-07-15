@@ -229,3 +229,16 @@ def test_playground_safety_is_verified_through_its_process_interface() -> None:
         "reset_requires_confirmation": True,
         "synthetic_data_only": True,
     }
+
+    controls = subprocess.run(
+        [sys.executable, "-m", "openmagic_playground", "controls"],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    assert json.loads(controls.stdout) == {
+        "actions": ["start", "drain", "restart", "stop"],
+        "ownership": "explicit-local-processes",
+        "roles": ["api", "workflow-worker", "delivery-worker"],
+    }

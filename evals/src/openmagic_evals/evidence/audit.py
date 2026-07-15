@@ -10,35 +10,19 @@ from pathlib import Path
 import psycopg
 from psycopg import sql
 
-_RUNTIME_PUBLIC_MODULES = (
-    "agents.py",
-    "commands.py",
-    "delivery.py",
-    "evidence.py",
-    "execution.py",
-    "kernel/control.py",
-    "kernel/definitions.py",
-    "kernel/inspection.py",
-    "kernel/records.py",
-    "kernel/work.py",
-    "threads.py",
-    "workers.py",
+from openmagic_evals.evidence.surface_contracts import (
+    DELETED_IDENTIFIERS,
+    EXPECTED_PRODUCTION_EDGES,
+    FORBIDDEN_EXPORTS,
+    RUNTIME_PUBLIC_MODULES,
 )
-_FORBIDDEN_EXPORTS = {"Connection", "MigrationBundle", "Model", "Repository", "Row", "Session"}
+
 _FORBIDDEN_PRODUCT_IMPORTS = {
     "openmagic_evals",
     "openmagic_playground",
 }
-_DELETED_IDENTIFIERS = (
-    "server" + ".workflows",
-    "workflow" + "_jobs",
-    "workflow" + "_job_runs",
-    "workflow" + "_events",
-    "notifi" + "cations",
-    "Workflow" + "Job",
-    "Interaction" + "Agent",
-)
 _EXPECTED_TABLES = {
+    "public": set(),
     "example_insurance": {
         "approval_grants",
         "deployment_metadata",
@@ -174,22 +158,17 @@ def audit_repository(root: Path) -> RepositoryAudit:
             for dependency in _dependencies(projects[owner]) & internal_names
         )
     )
-    expected_edges = (
-        "example-insurance -> openmagic-runtime",
-        "openmagic-api -> example-insurance",
-        "openmagic-api -> openmagic-runtime",
-    )
-    if production_edges != expected_edges:
+    if production_edges != EXPECTED_PRODUCTION_EDGES:
         violations.append("production dependency graph differs from the accepted one-way graph")
 
     root_exports = _declared_exports(runtime_root / "__init__.py")
     if root_exports != {"__version__"}:
         violations.append("runtime root exports more than package metadata")
-    for relative in _RUNTIME_PUBLIC_MODULES:
+    for relative in RUNTIME_PUBLIC_MODULES:
         exports = _declared_exports(runtime_root / relative)
         if exports is None:
             violations.append(f"runtime public module has no explicit exports: {relative}")
-        elif exports & _FORBIDDEN_EXPORTS:
+        elif exports & FORBIDDEN_EXPORTS:
             violations.append(f"runtime public module exports persistence details: {relative}")
 
     scan_roots = (*production_roots, root / "evals")
@@ -198,7 +177,7 @@ def audit_repository(root: Path) -> RepositoryAudit:
             if path.suffix not in {".py", ".sql"} or "__pycache__" in path.parts:
                 continue
             source = path.read_text(encoding="utf-8")
-            for identifier in _DELETED_IDENTIFIERS:
+            for identifier in DELETED_IDENTIFIERS:
                 if identifier in source:
                     violations.append(
                         f"deleted compatibility identifier remains: {path.relative_to(root)}"
@@ -236,21 +215,22 @@ def audit_cold_schema(database_url: str) -> ColdSchemaAudit:
     with psycopg.connect(database_url) as connection, connection.transaction():
         connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
         schema_rows = connection.execute(
-            "SELECT nspname FROM pg_namespace WHERE nspname = ANY(%s) ORDER BY nspname",
-            (list(_EXPECTED_TABLES),),
+            "SELECT nspname FROM pg_namespace "
+            "WHERE nspname <> 'information_schema' AND nspname NOT LIKE 'pg_%' "
+            "ORDER BY nspname"
         ).fetchall()
         schemas = tuple(str(row[0]) for row in schema_rows)
         table_rows = connection.execute(
             "SELECT schemaname, tablename FROM pg_catalog.pg_tables "
-            "WHERE schemaname = ANY(%s) ORDER BY schemaname, tablename",
-            (list(_EXPECTED_TABLES),),
+            "WHERE schemaname <> 'information_schema' AND schemaname NOT LIKE 'pg_%' "
+            "ORDER BY schemaname, tablename"
         ).fetchall()
         tables = {
             schema: tuple(str(row[1]) for row in table_rows if row[0] == schema)
             for schema in schemas
         }
         heads: dict[str, str] = {}
-        for schema in schemas:
+        for schema in ("example_insurance", "openmagic_runtime"):
             row = connection.execute(
                 sql.SQL(
                     "SELECT version FROM {}.migration_history ORDER BY version DESC LIMIT 1"
@@ -270,7 +250,7 @@ def audit_cold_schema(database_url: str) -> ColdSchemaAudit:
             f"{schema}.{table}"
             for schema, names in tables.items()
             for table in names
-            if table in _DELETED_IDENTIFIERS
+            if table in DELETED_IDENTIFIERS
         )
     )
     if legacy:

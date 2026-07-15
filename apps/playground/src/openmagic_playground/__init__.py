@@ -17,8 +17,27 @@ class PlaygroundSafety:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class PlaygroundProcessControls:
+    roles: tuple[str, ...] = ("api", "workflow-worker", "delivery-worker")
+    actions: tuple[str, ...] = ("start", "drain", "restart", "stop")
+    ownership: str = "explicit-local-processes"
+
+    def as_dict(self) -> dict[str, tuple[str, ...] | str]:
+        return asdict(self)
+
+
 def safety_manifest() -> PlaygroundSafety:
     return PlaygroundSafety()
 
 
-__all__ = ["PlaygroundSafety", "safety_manifest"]
+def process_controls() -> PlaygroundProcessControls:
+    return PlaygroundProcessControls()
+
+
+__all__ = [
+    "PlaygroundProcessControls",
+    "PlaygroundSafety",
+    "process_controls",
+    "safety_manifest",
+]

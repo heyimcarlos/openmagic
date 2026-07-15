@@ -13,10 +13,12 @@ from importlib.metadata import version
 from pathlib import Path
 from typing import Any
 
+import psycopg
 from example_insurance.renewal_definition import RENEWAL_DEFINITION
 from example_insurance.verification_definition import VERIFICATION_DEFINITION
 from openmagic_runtime.evidence import content_fingerprint
 
+from openmagic_evals.evidence.artifact_io import write_artifact
 from openmagic_evals.evidence.contracts import (
     REQUIRED_NEGATIVE_CLAIMS,
     ArtifactCase,
@@ -25,9 +27,9 @@ from openmagic_evals.evidence.contracts import (
     Correlations,
     DeterministicArtifact,
     DeterministicSummary,
+    RaceTrialEvidence,
     ReproducibilityPin,
-    canonical_artifact_json,
-    parse_artifact,
+    merge_correlations,
 )
 from openmagic_evals.evidence.matrix import (
     DETERMINISTIC_RELEASE_MATRIX,
@@ -35,7 +37,9 @@ from openmagic_evals.evidence.matrix import (
     ReleaseCase,
     cardinality_one_races,
 )
-from openmagic_evals.evidence.redaction import audit_redaction
+from openmagic_evals.evidence.race_models import RaceCorpus
+from openmagic_evals.evidence.races import run_all_races
+from openmagic_evals.harness._postgres import POSTGRES_IMAGE, postgres_container
 
 _DISTRIBUTIONS = (
     "example-insurance",
@@ -88,7 +92,27 @@ def reproducibility_pin(
         "example_insurance.verification_delivery:1": "sha256:"
         + content_fingerprint(VERIFICATION_DEFINITION),
     }
-    container_contract = b"postgres:17-alpine;single-database;real-transactions"
+    with postgres_container(database_name="openmagic_test_evidence_pin") as postgres:
+        database_url = postgres.get_connection_url(driver=None)
+        with psycopg.connect(database_url) as connection:
+            row = connection.execute(
+                "SELECT current_setting('server_version'), "
+                "current_setting('transaction_isolation'), "
+                "current_setting('synchronous_commit'), "
+                "current_setting('TimeZone'), "
+                "current_setting('max_connections')"
+            ).fetchone()
+    if row is None:
+        raise RuntimeError("PostgreSQL did not return its observed configuration")
+    postgres_configuration = {
+        "max_connections": str(row[4]),
+        "synchronous_commit": str(row[2]),
+        "timezone": str(row[3]),
+        "transaction_isolation": str(row[1]),
+    }
+    configuration_document = json.dumps(
+        postgres_configuration, sort_keys=True, separators=(",", ":")
+    ).encode()
     return ReproducibilityPin(
         build=_build_pin(root),
         suite_version="issue-71.v1",
@@ -97,12 +121,14 @@ def reproducibility_pin(
         started_at=started_at,
         finished_at=finished_at,
         timeout_seconds=timeout_seconds,
-        postgres_version="PostgreSQL 17, postgres:17-alpine",
-        postgres_configuration_digest=_sha256(container_contract),
+        postgres_version=str(row[0]),
+        postgres_image=POSTGRES_IMAGE,
+        postgres_configuration=postgres_configuration,
+        postgres_configuration_digest=_sha256(configuration_document),
         migration_heads=_MIGRATION_HEADS,
         definition_digests=definitions,
         case_corpus_digest=case_corpus_digest,
-        sandbox_digest=_sha256(b"testcontainers:postgres:17-alpine"),
+        sandbox_digest=_sha256(POSTGRES_IMAGE.encode()),
     )
 
 
@@ -162,37 +188,43 @@ def _release_case(case: ReleaseCase, tests: dict[str, dict[str, Any]]) -> Artifa
     )
 
 
-def _race_case(case: RaceContract, tests: dict[str, dict[str, Any]]) -> ArtifactCase:
-    matched = _matching_results(tests, (case.pytest_node,))
-    passed = bool(matched) and all(result["status"] == "passed" for result in matched.values())
-    status = "passed" if passed else "failed" if matched else "infrastructure_error"
-    violations = () if passed else ("cardinality-one race corpus did not complete cleanly",)
-    digest_input = {
-        "database_constraint": case.database_constraint,
-        "overlap_barrier": case.uses_overlap_barrier,
-        "varied_jitter": case.varied_jitter,
-        "tests": matched,
-    }
+def _race_case(case: RaceContract, corpus: RaceCorpus) -> ArtifactCase:
+    if (
+        corpus.case_id != case.case_id
+        or corpus.database_constraint != case.database_constraint
+        or corpus.uses_overlap_barrier != case.uses_overlap_barrier
+        or corpus.varied_jitter != case.varied_jitter
+    ):
+        raise ValueError(f"race corpus metadata differs from its contract: {case.case_id}")
+    if tuple(result.seed for result in corpus.results) != case.seeds:
+        raise ValueError(f"race corpus is missing its predeclared seeds: {case.case_id}")
+    passed = all(result.constraint_rows == 1 for result in corpus.results)
+    violations = () if passed else ("cardinality-one constraint disagreed with public outcomes",)
+    trials = tuple(
+        RaceTrialEvidence(
+            seed=result.seed,
+            jitter_microseconds=result.jitter_microseconds,
+            public_outcomes=result.public_outcomes,
+            constraint_rows=result.constraint_rows,
+            correlations=result.correlations,
+            observation_digest=result.observation_digest,
+        )
+        for result in corpus.results
+    )
     return ArtifactCase(
         case_id=case.case_id,
         case_schema_version=1,
         expected_trials=100,
-        observed_trials=100,
+        observed_trials=len(trials),
         seeds=case.seeds,
-        correlations=Correlations(),
-        observation_digests=_case_digest(case.case_id, digest_input, case.seeds),
-        verdict=CaseVerdict(status=status, invariant_violations=violations),
+        correlations=merge_correlations(result.correlations for result in corpus.results),
+        observation_digests=tuple(result.observation_digest for result in corpus.results),
+        race_trials=trials,
+        verdict=CaseVerdict(
+            status="passed" if passed else "failed",
+            invariant_violations=violations,
+        ),
     )
-
-
-def _write_artifact(path: Path, artifact: DeterministicArtifact) -> None:
-    document = canonical_artifact_json(artifact)
-    parse_artifact(document)
-    audit_redaction(json.loads(document))
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(document, encoding="utf-8")
-    temporary.replace(path)
 
 
 def run_deterministic_release(
@@ -214,13 +246,23 @@ def run_deterministic_release(
         "reference-apps/example-insurance/tests",
         "evals/tests",
     )
-    command = (
+    process_command_base = (
         sys.executable,
         "-m",
         "pytest",
         *selected_nodes,
         "-p",
         "openmagic_evals.evidence.pytest_plugin",
+    )
+    public_command = (
+        "openmagic-evidence",
+        "deterministic",
+        "--repository-root",
+        str(root),
+        "--output",
+        str(output.resolve()),
+        "--timeout-seconds",
+        str(timeout_seconds),
     )
     corpus_digest = _sha256(
         json.dumps(
@@ -236,7 +278,11 @@ def run_deterministic_release(
     started_at = datetime.now(UTC)
     with tempfile.TemporaryDirectory(prefix="openmagic-evidence-") as directory:
         result_path = Path(directory) / "pytest-results.json"
-        process_command = [*command, "--openmagic-evidence-results", str(result_path)]
+        process_command = [
+            *process_command_base,
+            "--openmagic-evidence-results",
+            str(result_path),
+        ]
         environment = {
             "PATH": os.environ.get("PATH", os.defpath),
             "PYTHONNOUSERSITE": "1",
@@ -251,10 +297,11 @@ def run_deterministic_release(
         if not result_path.is_file():
             raise RuntimeError("pytest did not produce its explicit evidence result file")
         test_document = json.loads(result_path.read_text(encoding="utf-8"))
-    finished_at = datetime.now(UTC)
     tests = dict(test_document["tests"])
     cases = tuple(_release_case(case, tests) for case in selected_release_cases)
-    race_cases = tuple(_race_case(case, tests) for case in selected_race_contracts)
+    corpora = {corpus.case_id: corpus for corpus in run_all_races()}
+    race_cases = tuple(_race_case(case, corpora[case.case_id]) for case in selected_race_contracts)
+    finished_at = datetime.now(UTC)
     all_cases = cases + race_cases
     statuses = tuple(case.verdict.status for case in all_cases)
     violations = sum(len(case.verdict.invariant_violations) for case in all_cases)
@@ -262,7 +309,7 @@ def run_deterministic_release(
     artifact = DeterministicArtifact(
         reproducibility=reproducibility_pin(
             root,
-            command=tuple(process_command),
+            command=public_command,
             started_at=started_at,
             finished_at=finished_at,
             timeout_seconds=timeout_seconds,
@@ -277,6 +324,7 @@ def run_deterministic_release(
             infrastructure_errors=statuses.count("infrastructure_error"),
             invariant_violations=violations,
             strict_pass=strict_pass,
+            runner_exit_code=completed.returncode,
         ),
         limitations=(
             "Tested one PostgreSQL 17 single-database deployment shape.",
@@ -284,7 +332,7 @@ def run_deterministic_release(
         ),
         negative_claims=REQUIRED_NEGATIVE_CLAIMS,
     )
-    _write_artifact(output.resolve(), artifact)
+    write_artifact(output.resolve(), artifact)
     if not strict_pass:
         raise RuntimeError("deterministic release gate failed")
     return artifact
@@ -296,17 +344,63 @@ def run_race_release(
     output: Path,
     timeout_seconds: int = 900,
 ) -> DeterministicArtifact:
-    """Run only the predeclared 500-trial cardinality-one corpus."""
+    """Run only the predeclared 700-trial cardinality-one corpus."""
+    root = repository_root.resolve()
     contracts = cardinality_one_races()
-    nodes = tuple(dict.fromkeys(contract.pytest_node for contract in contracts))
-    return run_deterministic_release(
-        repository_root=repository_root,
-        output=output,
-        timeout_seconds=timeout_seconds,
-        pytest_nodes=nodes,
-        release_cases=(),
-        race_contracts=contracts,
+    command = (
+        "openmagic-evidence",
+        "races",
+        "--repository-root",
+        str(root),
+        "--output",
+        str(output.resolve()),
+        "--timeout-seconds",
+        str(timeout_seconds),
     )
+    corpus_digest = _sha256(
+        json.dumps(
+            {"races": [case.case_id for case in contracts], "seeds": list(range(100))},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    )
+    started_at = datetime.now(UTC)
+    corpora = {corpus.case_id: corpus for corpus in run_all_races()}
+    cases = tuple(_race_case(contract, corpora[contract.case_id]) for contract in contracts)
+    finished_at = datetime.now(UTC)
+    statuses = tuple(case.verdict.status for case in cases)
+    violations = sum(len(case.verdict.invariant_violations) for case in cases)
+    strict_pass = all(status == "passed" for status in statuses) and violations == 0
+    artifact = DeterministicArtifact(
+        reproducibility=reproducibility_pin(
+            root,
+            command=command,
+            started_at=started_at,
+            finished_at=finished_at,
+            timeout_seconds=timeout_seconds,
+            case_corpus_digest=corpus_digest,
+        ),
+        cases=cases,
+        summary=DeterministicSummary(
+            expected_cases=len(cases),
+            observed_cases=len(cases),
+            passed_cases=statuses.count("passed"),
+            failed_cases=statuses.count("failed"),
+            infrastructure_errors=0,
+            invariant_violations=violations,
+            strict_pass=strict_pass,
+            runner_exit_code=0 if strict_pass else 1,
+        ),
+        limitations=(
+            "Race results apply to the pinned single-PostgreSQL deployment shape.",
+            "The corpus proves only the seven accepted cardinality-one invariants.",
+        ),
+        negative_claims=REQUIRED_NEGATIVE_CLAIMS,
+    )
+    write_artifact(output.resolve(), artifact)
+    if not strict_pass:
+        raise RuntimeError("cardinality-one race gate failed")
+    return artifact
 
 
 __all__ = ["reproducibility_pin", "run_deterministic_release", "run_race_release"]

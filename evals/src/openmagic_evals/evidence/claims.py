@@ -8,6 +8,7 @@ from pathlib import Path
 from openmagic_evals.evidence.contracts import (
     REQUIRED_NEGATIVE_CLAIMS,
     AgentQualityArtifact,
+    Artifact,
     DeterministicArtifact,
     LiveSmokeArtifact,
     PlaygroundArtifact,
@@ -26,6 +27,21 @@ def _digest(path: Path) -> str:
     return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _common_reproducibility_pin(artifact: Artifact) -> tuple[object, ...]:
+    pin = artifact.reproducibility
+    return (
+        pin.build,
+        pin.suite_version,
+        pin.postgres_version,
+        pin.postgres_image,
+        pin.postgres_configuration,
+        pin.postgres_configuration_digest,
+        pin.migration_heads,
+        pin.definition_digests,
+        pin.sandbox_digest,
+    )
+
+
 def write_claim_report(
     *,
     deterministic_path: Path,
@@ -39,7 +55,9 @@ def write_claim_report(
         raise TypeError("claim report requires a deterministic release artifact")
     if not deterministic.summary.strict_pass:
         raise ValueError("claim report cannot publish supported claims from a failed release gate")
-    related: list[tuple[str, Path, object]] = [("deterministic", deterministic_path, deterministic)]
+    related: list[tuple[str, Path, Artifact]] = [
+        ("deterministic", deterministic_path, deterministic)
+    ]
     if agent_path is not None:
         agent = parse_artifact(agent_path.read_bytes())
         if not isinstance(agent, AgentQualityArtifact):
@@ -55,6 +73,10 @@ def write_claim_report(
         if not isinstance(playground, PlaygroundArtifact):
             raise TypeError("playground artifact has the wrong lane")
         related.append(("playground", playground_path, playground))
+
+    expected_pin = _common_reproducibility_pin(deterministic)
+    if any(_common_reproducibility_pin(artifact) != expected_pin for _, _, artifact in related):
+        raise ValueError("claim report artifacts do not share one reproducibility pin")
 
     lines = [
         "# OpenMagic tested claim report",
