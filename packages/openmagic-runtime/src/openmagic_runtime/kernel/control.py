@@ -137,15 +137,23 @@ def _deferred_action(value: object) -> Literal["retry", "succeed", "fail"]:
     raise RuntimeError("Deferred resolution receipt has an invalid action")
 
 
-def _lock_open_instance(connection: Connection[tuple[Any, ...]], instance_id: UUID) -> None:
+def _lock_instance(connection: Connection[tuple[Any, ...]], instance_id: UUID) -> str:
     row = connection.execute(
         "SELECT state FROM openmagic_runtime.instances WHERE instance_id = %s FOR UPDATE",
         (instance_id,),
     ).fetchone()
     if row is None:
         raise RuntimeError("Instance not found")
-    if row[0] != "open":
+    return str(row[0])
+
+
+def _require_open_instance(state: str) -> None:
+    if state != "open":
         raise RuntimeError("Instance is closed")
+
+
+def _lock_open_instance(connection: Connection[tuple[Any, ...]], instance_id: UUID) -> None:
+    _require_open_instance(_lock_instance(connection, instance_id))
 
 
 def _lock_source_identity(
@@ -540,6 +548,7 @@ class KernelControl:
             "route_key": request.route_key,
         }
         input_digest = canonical_digest(transition_input)
+        instance_state = _lock_instance(self._connection, request.instance_id)
         _lock_source_identity(
             self._connection,
             source_kind="signal_acceptance",
@@ -565,7 +574,7 @@ class KernelControl:
             )
         if request.schema_version != 1:
             raise ValueError("Signal schema version is unsupported")
-        _lock_open_instance(self._connection, request.instance_id)
+        _require_open_instance(instance_state)
         wait = self._connection.execute(
             "SELECT template_key, state FROM openmagic_runtime.waits "
             "WHERE wait_id = %s AND instance_id = %s FOR UPDATE",
@@ -755,6 +764,7 @@ class KernelControl:
 
     def resolve_deferred(self, request: ResolveDeferredStep) -> ResolveDeferredStepReceipt:
         input_digest = canonical_digest(request)
+        instance_state = _lock_instance(self._connection, request.instance_id)
         _lock_source_identity(
             self._connection,
             source_kind="deferred_resolution",
@@ -774,7 +784,7 @@ class KernelControl:
                 step_id=UUID(str(receipt["step_id"])),
                 action=action,
             )
-        _lock_open_instance(self._connection, request.instance_id)
+        _require_open_instance(instance_state)
         row = self._connection.execute(
             "SELECT template_key, state, deferred_attempt_id FROM openmagic_runtime.steps "
             "WHERE step_id = %s AND instance_id = %s FOR UPDATE",
@@ -852,6 +862,7 @@ class KernelControl:
             "instance_id": str(request.instance_id),
         }
         digest = canonical_digest(transition_input)
+        instance_state = _lock_instance(self._connection, request.instance_id)
         _lock_source_identity(
             self._connection,
             source_kind="instance_closure",
@@ -876,7 +887,7 @@ class KernelControl:
                 trace_event_id=UUID(receipt["trace_event_id"]),
                 trace_sequence=int(receipt["trace_sequence"]),
             )
-        _lock_open_instance(self._connection, request.instance_id)
+        _require_open_instance(instance_state)
         cancelled_attempts = self._connection.execute(
             "UPDATE openmagic_runtime.attempts SET state = 'cancelled', "
             "completed_at = clock_timestamp() WHERE instance_id = %s AND state = 'leased' "
