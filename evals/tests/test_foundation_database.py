@@ -23,8 +23,14 @@ def test_cold_migrations_create_independently_owned_schemas_without_reverse_fore
         second = apply_migrations(database_url)
 
         assert [(bundle.schema, bundle.versions) for bundle in first] == [
-            ("openmagic_runtime", ("0001_runtime_baseline",)),
-            ("example_insurance", ("0001_example_insurance_baseline",)),
+            (
+                "openmagic_runtime",
+                ("0001_runtime_baseline", "0002_renewal_drafting_runtime"),
+            ),
+            (
+                "example_insurance",
+                ("0001_example_insurance_baseline", "0002_renewal_drafting_application"),
+            ),
         ]
         assert all(not bundle.versions for bundle in second)
 
@@ -36,19 +42,41 @@ def test_cold_migrations_create_independently_owned_schemas_without_reverse_fore
                 "ORDER BY 1"
             ).fetchall()
             reverse_foreign_keys = connection.execute(
-                "SELECT tc.constraint_name FROM information_schema.referential_constraints AS rc "
-                "JOIN information_schema.table_constraints AS tc "
-                "ON tc.constraint_catalog = rc.constraint_catalog "
-                "AND tc.constraint_schema = rc.constraint_schema "
-                "AND tc.constraint_name = rc.constraint_name "
-                "WHERE tc.constraint_schema = 'openmagic_runtime'"
+                "SELECT constraint_name FROM information_schema.referential_constraints "
+                "WHERE constraint_schema = 'openmagic_runtime' "
+                "AND unique_constraint_schema = 'example_insurance'"
             ).fetchall()
+            invalid_singleton_constraints = connection.execute(
+                "SELECT tc.table_schema, tc.table_name, kcu.column_name "
+                "FROM information_schema.table_constraints AS tc "
+                "JOIN information_schema.key_column_usage AS kcu "
+                "ON kcu.constraint_schema = tc.constraint_schema "
+                "AND kcu.constraint_name = tc.constraint_name "
+                "WHERE tc.constraint_type = 'UNIQUE' AND (("
+                "tc.table_schema = 'openmagic_runtime' AND tc.table_name = 'deliveries' "
+                "AND kcu.column_name = 'domain_event_id') OR ("
+                "tc.table_schema = 'example_insurance' AND tc.table_name = 'renewal_drafts' "
+                "AND kcu.column_name = 'workflow_id'))"
+            ).fetchall()
+            draft_step_uniqueness = connection.execute(
+                "SELECT count(*) FROM information_schema.table_constraints AS tc "
+                "JOIN information_schema.key_column_usage AS kcu "
+                "ON kcu.constraint_schema = tc.constraint_schema "
+                "AND kcu.constraint_name = tc.constraint_name "
+                "WHERE tc.constraint_type = 'UNIQUE' "
+                "AND tc.table_schema = 'example_insurance' "
+                "AND tc.table_name = 'renewal_drafts' AND kcu.column_name = 'step_id'"
+            ).fetchone()
 
         assert histories == [
             ("example_insurance", "0001_example_insurance_baseline"),
+            ("example_insurance", "0002_renewal_drafting_application"),
             ("openmagic_runtime", "0001_runtime_baseline"),
+            ("openmagic_runtime", "0002_renewal_drafting_runtime"),
         ]
         assert reverse_foreign_keys == []
+        assert invalid_singleton_constraints == []
+        assert draft_step_uniqueness == (1,)
 
 
 @pytest.mark.integration

@@ -1,20 +1,45 @@
-"""Explicit Workflow Worker and Delivery Worker process entry points."""
+"""Generic installed Worker process lifecycle."""
 
 from __future__ import annotations
 
-import argparse
 import json
+import signal
+import threading
+from collections.abc import Callable
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Literal
+from typing import Any, Literal
 
 from openmagic_runtime.evidence import inspect_runtime_database
 
 WorkerRole = Literal["workflow-worker", "delivery-worker"]
 
 
-def _serve(*, role: WorkerRole, database_url: str, host: str, port: int, worker_id: str) -> None:
+def serve_worker(
+    *,
+    role: WorkerRole,
+    database_url: str,
+    host: str,
+    port: int,
+    worker_id: str,
+    tick: Callable[[threading.Event], object],
+    polling_seconds: float = 0.05,
+) -> None:
     inspect_runtime_database(database_url)
+    stop = threading.Event()
+    failures: list[str] = []
+
+    def work_loop() -> None:
+        while not stop.is_set():
+            try:
+                tick(stop)
+                stop.wait(polling_seconds)
+            except Exception as error:
+                failures[:] = [type(error).__name__]
+                stop.wait(polling_seconds)
+
+    worker_thread = threading.Thread(target=work_loop, name=f"{role}-loop", daemon=True)
+    worker_thread.start()
 
     class HealthHandler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
@@ -22,7 +47,13 @@ def _serve(*, role: WorkerRole, database_url: str, host: str, port: int, worker_
                 self.send_error(HTTPStatus.NOT_FOUND)
                 return
             health = inspect_runtime_database(database_url).as_dict()
-            health.update({"role": role, "worker_id": worker_id})
+            health.update(
+                {
+                    "role": role,
+                    "worker_id": worker_id,
+                    "worker_failures": tuple(failures),
+                }
+            )
             payload = json.dumps(health).encode("utf-8")
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "application/json")
@@ -33,31 +64,25 @@ def _serve(*, role: WorkerRole, database_url: str, host: str, port: int, worker_
         def log_message(self, format: str, *args: object) -> None:
             return
 
-    ThreadingHTTPServer((host, port), HealthHandler).serve_forever()
+    server = ThreadingHTTPServer((host, port), HealthHandler)
+    previous_handlers: dict[int, Any] = {}
+
+    def request_shutdown(signum: int, frame: object) -> None:
+        del signum, frame
+        stop.set()
+        threading.Thread(target=server.shutdown, daemon=True).start()
+
+    for signum in (signal.SIGTERM, signal.SIGINT):
+        previous_handlers[signum] = signal.getsignal(signum)
+        signal.signal(signum, request_shutdown)
+    try:
+        server.serve_forever()
+    finally:
+        stop.set()
+        server.server_close()
+        worker_thread.join(timeout=max(1.0, polling_seconds * 4))
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
 
 
-def _main(role: WorkerRole) -> None:
-    parser = argparse.ArgumentParser(prog=f"openmagic-{role}")
-    parser.add_argument("--database-url", required=True)
-    parser.add_argument("--host", required=True)
-    parser.add_argument("--port", required=True, type=int)
-    parser.add_argument("--worker-id", required=True)
-    arguments = parser.parse_args()
-    _serve(
-        role=role,
-        database_url=arguments.database_url,
-        host=arguments.host,
-        port=arguments.port,
-        worker_id=arguments.worker_id,
-    )
-
-
-def workflow_worker_main() -> None:
-    _main("workflow-worker")
-
-
-def delivery_worker_main() -> None:
-    _main("delivery-worker")
-
-
-__all__ = ["WorkerRole", "delivery_worker_main", "workflow_worker_main"]
+__all__ = ["WorkerRole", "serve_worker"]
