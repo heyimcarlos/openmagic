@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from contextlib import suppress
 from typing import Any
 from uuid import UUID
 
@@ -243,9 +242,6 @@ class VerificationSubmissionControl:
         verification_outcome: VerificationCodeOutcome,
         protected_outcome: ProtectedOutcome | None = None,
     ) -> SubmitVerificationCodeResult:
-        if protected_outcome is None:
-            with suppress(ValueError):
-                protected_outcome = protected_policy_rejection(verification_outcome)
         return SubmitVerificationCodeResult(
             verification_outcome=verification_outcome,
             protected_outcome=protected_outcome,

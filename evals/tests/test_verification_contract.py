@@ -204,6 +204,24 @@ def test_verification_receipts_and_code_capability_reject_invalid_public_states(
             session_id=None,
             authorized_delivery_id=None,
         )
+    with pytest.raises(ValueError, match="terminal verification receipt"):
+        SubmitVerificationCodeResult(
+            verification_outcome="approval_required",
+            protected_outcome=None,
+            challenge_id=uuid4(),
+            protected_command_id=uuid4(),
+            session_id=None,
+            authorized_delivery_id=None,
+        )
+    with pytest.raises(ValueError, match="inconsistent outcomes"):
+        SubmitVerificationCodeResult(
+            verification_outcome="wrong_party",
+            protected_outcome="wrong_thread",
+            challenge_id=uuid4(),
+            protected_command_id=uuid4(),
+            session_id=None,
+            authorized_delivery_id=None,
+        )
 
 
 @pytest.mark.parametrize(
@@ -460,7 +478,7 @@ def test_challenge_rejects_every_wrong_binding_without_consuming_code() -> None:
             (actor, replace(exact, purpose="renewal.other_purpose"), "wrong_purpose"),
         )
 
-        outcomes = tuple(
+        receipts = tuple(
             application.submit_verification_code(
                 SubmitVerificationCode(
                     command_id=uuid4(),
@@ -468,10 +486,10 @@ def test_challenge_rejects_every_wrong_binding_without_consuming_code() -> None:
                     cause=Cause("message", str(uuid4())),
                     input=input_value,
                 )
-            ).result.verification_outcome
+            ).result
             for submission_actor, input_value, _ in submissions
         )
-        replay_outcomes = tuple(
+        replay_receipts = tuple(
             application.submit_verification_code(
                 SubmitVerificationCode(
                     command_id=uuid4(),
@@ -479,12 +497,16 @@ def test_challenge_rejects_every_wrong_binding_without_consuming_code() -> None:
                     cause=Cause("message", str(uuid4())),
                     input=input_value,
                 )
-            ).result.verification_outcome
+            ).result
             for submission_actor, input_value, _ in submissions
         )
 
+        outcomes = tuple(receipt.verification_outcome for receipt in receipts)
+        replay_outcomes = tuple(receipt.verification_outcome for receipt in replay_receipts)
         assert outcomes == tuple(expected for _, _, expected in submissions)
+        assert all(receipt.protected_outcome is None for receipt in receipts)
         assert replay_outcomes == outcomes
+        assert all(receipt.protected_outcome is None for receipt in replay_receipts)
         request_outcomes = tuple(
             application.request_protected_renewal_details(
                 RequestProtectedRenewalDetails(

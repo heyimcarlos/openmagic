@@ -56,6 +56,12 @@ _PROTECTED_POLICY_REJECTIONS = {
     "wrong_purpose",
     "wrong_thread",
 }
+_TERMINAL_ONLY_VERIFICATION_REJECTIONS = {
+    "approval_required",
+    "authority_revoked",
+    "identifier_revoked",
+    "workflow_closed",
+}
 
 
 def protected_policy_rejection(value: object) -> ProtectedPolicyRejection:
@@ -271,12 +277,16 @@ class SubmitVerificationCodeResult:
             return
         if self.session_id is not None or self.authorized_delivery_id is not None:
             raise ValueError("A rejected verification receipt cannot contain assurance IDs")
-        required_protected_outcome = (
-            self.verification_outcome
-            if self.verification_outcome in _PROTECTED_POLICY_REJECTIONS
-            else None
-        )
-        if self.protected_outcome != required_protected_outcome:
+        if self.verification_outcome in _TERMINAL_ONLY_VERIFICATION_REJECTIONS:
+            if self.protected_outcome != self.verification_outcome:
+                raise ValueError("A terminal verification receipt needs its protected outcome")
+            return
+        if self.protected_outcome is None:
+            return
+        if (
+            self.verification_outcome not in _PROTECTED_POLICY_REJECTIONS
+            or self.protected_outcome != self.verification_outcome
+        ):
             raise ValueError("A rejected verification receipt has inconsistent outcomes")
 
 
