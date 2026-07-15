@@ -1,4 +1,4 @@
-"""Renewal Workflow execution and durable Attempt observation control."""
+"""Example Insurance Workflow execution and durable Attempt observation control."""
 
 from __future__ import annotations
 
@@ -32,9 +32,10 @@ from example_insurance.renewal_commands import (
 )
 from example_insurance.renewal_effect_types import ExternalEffectPermit
 from example_insurance.renewal_effects import committed_permit_execution_input
+from example_insurance.verification_attempt_control import VerificationAttemptControl
 
 
-class RenewalWorkerControl:
+class WorkflowWorkerControl:
     def __init__(
         self,
         *,
@@ -42,11 +43,13 @@ class RenewalWorkerControl:
         dispatcher: CommandDispatcher,
         executors: dict[str, Executor],
         attempts: RenewalAttemptControl,
+        verification_attempts: VerificationAttemptControl | None = None,
     ) -> None:
         self._database_url = database_url
         self._dispatcher = dispatcher
         self._executors = executors
         self._attempts = attempts
+        self._verification_attempts = verification_attempts
 
     def authorize_dispatch(
         self, *, attempt: ClaimedAttempt, worker_id: str
@@ -86,6 +89,11 @@ class RenewalWorkerControl:
 
     def recover_expired(self) -> bool:
         with psycopg.connect(self._database_url) as connection, connection.transaction():
+            if (
+                self._verification_attempts is not None
+                and self._verification_attempts.recover_expired(connection)
+            ):
+                return True
             return self._attempts.recover_expired(connection)
 
     def claim(self, *, worker_id: str, claim_request_id: UUID) -> ClaimedAttempt | None:
@@ -173,6 +181,16 @@ class RenewalWorkerControl:
         worker_id: str,
         observation: dict[str, Any],
     ) -> WorkflowAttemptResult:
+        if attempt.template_key == VerificationAttemptControl.template_key:
+            if self._verification_attempts is None:
+                raise RuntimeError("Verification delivery support is not configured")
+            with psycopg.connect(self._database_url) as connection, connection.transaction():
+                return self._verification_attempts.accept_observation(
+                    connection,
+                    attempt=attempt,
+                    worker_id=worker_id,
+                    observation=observation,
+                )
         if attempt.template_key in {"send_renewal_email", "reconcile_renewal_email"}:
             return self._commit_effect_observation(attempt, worker_id, observation)
         return self.submit_observation(
@@ -215,4 +233,4 @@ class RenewalWorkerControl:
             )
 
 
-__all__ = ["RenewalWorkerControl"]
+__all__ = ["WorkflowWorkerControl"]

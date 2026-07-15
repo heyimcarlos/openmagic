@@ -18,10 +18,16 @@ def _main(role: WorkerRole) -> None:
     parser.add_argument("--port", required=True, type=int)
     parser.add_argument("--worker-id", required=True)
     parser.add_argument("--email-provider-url")
+    parser.add_argument("--verification-code-secret")
     arguments = parser.parse_args()
     application = ExampleInsurance(
         database_url=arguments.database_url,
         email_provider_url=arguments.email_provider_url,
+        verification_code_secret=(
+            arguments.verification_code_secret.encode()
+            if arguments.verification_code_secret is not None
+            else None
+        ),
     )
     application.prepare()
     if role == "workflow-worker":

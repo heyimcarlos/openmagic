@@ -117,9 +117,15 @@ def _decode_attempt_result(payload: dict[str, Any]) -> WorkflowAttemptResult:
 def renewal_command_dispatcher(
     *, database_url: str, handlers: RenewalCommandHandlers
 ) -> CommandDispatcher:
-    registrations = (
-        CommandRegistryBuilder()
-        .register(
+    registrations = register_renewal_commands(CommandRegistryBuilder(), handlers).build()
+    return CommandDispatcher(database_url=database_url, registrations=registrations)
+
+
+def register_renewal_commands(
+    builder: CommandRegistryBuilder, handlers: RenewalCommandHandlers
+) -> CommandRegistryBuilder:
+    return (
+        builder.register(
             command_type="renewal.start_outreach",
             schema_version=1,
             command_class=StartRenewalOutreach,
@@ -182,9 +188,11 @@ def renewal_command_dispatcher(
             result_decoder=_decode_attempt_result,
             validator=validate_effect_observation,
         )
-        .build()
     )
-    return CommandDispatcher(database_url=database_url, registrations=registrations)
 
 
-__all__ = ["RenewalCommandHandlers", "renewal_command_dispatcher"]
+__all__ = [
+    "RenewalCommandHandlers",
+    "register_renewal_commands",
+    "renewal_command_dispatcher",
+]
