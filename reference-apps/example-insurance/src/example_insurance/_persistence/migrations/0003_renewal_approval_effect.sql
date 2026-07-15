@@ -8,7 +8,9 @@ ALTER TABLE example_insurance.renewal_workflows
 
 ALTER TABLE example_insurance.renewal_drafts
     ADD COLUMN policyholder_email text NOT NULL,
-    ADD COLUMN presentation_fingerprint text NOT NULL;
+    ADD COLUMN presentation_fingerprint text NOT NULL,
+    ADD COLUMN ready_event_id uuid UNIQUE
+        REFERENCES example_insurance.domain_events(event_id);
 
 CREATE TABLE example_insurance.renewal_decisions (
     decision_id uuid PRIMARY KEY,

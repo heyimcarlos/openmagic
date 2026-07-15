@@ -12,22 +12,26 @@ from psycopg.types.json import Jsonb
 
 from openmagic_runtime._canonical import canonical_digest
 from openmagic_runtime.kernel._control_support import (
+    instance_definition,
     lock_open_instance,
     materialize_route,
+    materialize_step_route,
     validate_disposition,
 )
-from openmagic_runtime.kernel._trace import append_trace
+from openmagic_runtime.kernel._step_mutations import (
+    CurrentStep,
+    fail_step,
+    retry_step,
+    succeed_step,
+)
+from openmagic_runtime.kernel._trace import append_trace, read_trace_replay
 from openmagic_runtime.kernel.attempt_guard import (
     CurrentAttemptGuard,
     guard_current_attempt,
 )
 from openmagic_runtime.kernel.closure import close_instance
 from openmagic_runtime.kernel.deferred import defer_step, resolve_deferred_step
-from openmagic_runtime.kernel.definitions import (
-    WorkflowDefinition,
-    validate_payload,
-    verified_definition,
-)
+from openmagic_runtime.kernel.definitions import validate_payload, verified_definition
 from openmagic_runtime.kernel.signals import accept_signal
 from openmagic_runtime.kernel.transitions import (
     AcceptSignal,
@@ -61,34 +65,6 @@ class StartInstanceReceipt:
     trace_sequence: int
 
 
-def _materialize_optional_step_route(
-    connection: Connection[tuple[Any, ...]],
-    *,
-    definition: WorkflowDefinition,
-    required: DispositionRequired,
-    outcome_route: str | None,
-    route_input: dict[str, Any] | None,
-) -> tuple[dict[str, UUID], dict[str, UUID]]:
-    if outcome_route is None:
-        if route_input is not None:
-            raise ValueError("Route input cannot be supplied without an Outcome Route")
-        return {}, {}
-    if route_input is None:
-        raise ValueError("Outcome Route requires typed Route input")
-    route = next(item for item in definition.routes if item.key == outcome_route)
-    if route.activation != "step" or route.source_template_key != required.template_key:
-        raise ValueError("Outcome Route does not accept this Step Template")
-    validate_payload(route_input, route.activation_contract)
-    return materialize_route(
-        connection,
-        instance_id=required.instance_id,
-        route=route,
-        source_kind="step",
-        source_id=required.attempt_id,
-        route_input=route_input,
-    )
-
-
 class KernelControl:
     def __init__(self, connection: Connection[tuple[Any, ...]]) -> None:
         self._connection = connection
@@ -99,15 +75,15 @@ class KernelControl:
             "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
             (str(request.command_id),),
         )
-        replay = self._connection.execute(
-            "SELECT receipt, input_digest FROM openmagic_runtime.trace_events "
-            "WHERE source_kind = 'command_start' AND source_id = %s",
-            (request.command_id,),
-        ).fetchone()
+        replay = read_trace_replay(
+            self._connection,
+            source_kind="command_start",
+            source_id=request.command_id,
+        )
         if replay is not None:
-            if replay[1] != source_digest:
+            if replay.input_digest != source_digest:
                 raise ValueError("start source identity was reused with conflicting input")
-            receipt = dict(replay[0])
+            receipt = replay.receipt
             return StartInstanceReceipt(
                 instance_id=UUID(receipt["instance_id"]),
                 definition_key=receipt["definition_key"],
@@ -195,15 +171,15 @@ class KernelControl:
             "route": outcome_route,
             "route_input": route_input,
         }
-        replay = self._connection.execute(
-            "SELECT input_digest, receipt FROM openmagic_runtime.trace_events "
-            "WHERE source_kind = 'step_outcome' AND source_id = %s",
-            (required.attempt_id,),
-        ).fetchone()
+        replay = read_trace_replay(
+            self._connection,
+            source_kind="step_outcome",
+            source_id=required.attempt_id,
+        )
         if replay is not None:
-            if str(replay[0]) != canonical_digest(transition_input):
+            if replay.input_digest != canonical_digest(transition_input):
                 raise ValueError("Step outcome source was reused with conflicting input")
-            receipt = dict(replay[1])
+            receipt = replay.receipt
             required.consumed = True
             required.replayed = True
             return (
@@ -212,35 +188,19 @@ class KernelControl:
             )
         if required.consumed:
             raise RuntimeError("Attempt disposition was already consumed")
-        output_digest = canonical_digest(output)
-        updated = self._connection.execute(
-            "UPDATE openmagic_runtime.steps SET state = 'succeeded', output = %s, "
-            "output_digest = %s, "
-            "terminal_at = clock_timestamp(), claimable_at = NULL "
-            "WHERE step_id = %s AND instance_id = %s AND state = 'pending' RETURNING step_id",
-            (Jsonb(output), output_digest, required.step_id, required.instance_id),
-        ).fetchone()
-        if updated is None:
-            raise RuntimeError("Step outcome cannot target a terminal or missing Step")
-        definition_row = self._connection.execute(
-            "SELECT d.manifest, d.manifest_digest FROM openmagic_runtime.instances AS i "
-            "JOIN openmagic_runtime.workflow_definitions AS d "
-            "ON d.definition_key = i.definition_key AND d.definition_version = i.definition_version "
-            "WHERE i.instance_id = %s",
-            (required.instance_id,),
-        ).fetchone()
-        if definition_row is None:
-            raise RuntimeError("Pinned Workflow Definition is unavailable")
-        definition = verified_definition(dict(definition_row[0]), str(definition_row[1]))
+        definition = instance_definition(self._connection, required.instance_id)
         template = next(
             item for item in definition.step_templates if item.key == required.template_key
         )
         validate_payload(output, template.output_contract)
-        steps, waits = _materialize_optional_step_route(
+        target = CurrentStep(required.instance_id, required.step_id)
+        if not succeed_step(self._connection, target, output=output):
+            raise RuntimeError("Step outcome cannot target a terminal or missing Step")
+        steps, waits = materialize_step_route(
             self._connection,
             definition=definition,
             required=required,
-            outcome_route=outcome_route,
+            route_key=outcome_route,
             route_input=route_input,
         )
         receipt = {
@@ -269,16 +229,7 @@ class KernelControl:
             required,
             expected_attempt_state=required.basis_state,
         )
-        definition_row = self._connection.execute(
-            "SELECT d.manifest, d.manifest_digest FROM openmagic_runtime.instances AS i "
-            "JOIN openmagic_runtime.workflow_definitions AS d "
-            "ON d.definition_key = i.definition_key AND d.definition_version = i.definition_version "
-            "WHERE i.instance_id = %s",
-            (required.instance_id,),
-        ).fetchone()
-        if definition_row is None:
-            raise RuntimeError("Pinned Workflow Definition is unavailable")
-        definition = verified_definition(dict(definition_row[0]), str(definition_row[1]))
+        definition = instance_definition(self._connection, required.instance_id)
         template = next(
             item for item in definition.step_templates if item.key == required.template_key
         )
@@ -286,13 +237,11 @@ class KernelControl:
         if delay_index >= len(template.retry_policy.delays_seconds):
             raise RuntimeError("Attempt retry budget is exhausted")
         delay = template.retry_policy.delays_seconds[delay_index]
-        updated = self._connection.execute(
-            "UPDATE openmagic_runtime.steps SET claimable_at = "
-            "clock_timestamp() + (%s * interval '1 second') "
-            "WHERE step_id = %s AND instance_id = %s AND state = 'pending' RETURNING step_id",
-            (delay, required.step_id, required.instance_id),
-        ).fetchone()
-        if updated is None:
+        if not retry_step(
+            self._connection,
+            CurrentStep(required.instance_id, required.step_id),
+            delay_seconds=delay,
+        ):
             raise RuntimeError("Retry cannot target a terminal Step")
         append_trace(
             self._connection,
@@ -314,18 +263,11 @@ class KernelControl:
             required,
             expected_attempt_state=required.basis_state,
         )
-        updated = self._connection.execute(
-            "UPDATE openmagic_runtime.steps SET state = 'failed', failure = %s, "
-            "failure_digest = %s, terminal_at = clock_timestamp(), claimable_at = NULL "
-            "WHERE step_id = %s AND instance_id = %s AND state = 'pending' RETURNING step_id",
-            (
-                Jsonb(failure),
-                canonical_digest(failure),
-                required.step_id,
-                required.instance_id,
-            ),
-        ).fetchone()
-        if updated is None:
+        if not fail_step(
+            self._connection,
+            CurrentStep(required.instance_id, required.step_id),
+            failure=failure,
+        ):
             raise RuntimeError("Failure cannot target a terminal or missing Step")
         append_trace(
             self._connection,

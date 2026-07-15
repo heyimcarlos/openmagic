@@ -10,13 +10,14 @@ from psycopg.types.json import Jsonb
 
 from openmagic_runtime._canonical import canonical_digest
 from openmagic_runtime.kernel._control_support import (
-    lock_instance,
+    instance_definition,
     lock_source_identity,
     materialize_route,
     require_open_instance,
 )
-from openmagic_runtime.kernel._trace import append_trace
-from openmagic_runtime.kernel.definitions import Route, validate_payload, verified_definition
+from openmagic_runtime.kernel._trace import append_trace, read_trace_replay
+from openmagic_runtime.kernel.definitions import Route, validate_payload
+from openmagic_runtime.kernel.records import lock_instance, lock_wait
 from openmagic_runtime.kernel.transitions import AcceptSignal, SignalReceipt
 
 
@@ -35,26 +36,19 @@ def _receipt(payload: dict[str, Any]) -> SignalReceipt:
 def _validated_route(connection: Connection[tuple[Any, ...]], request: AcceptSignal) -> Route:
     if request.schema_version != 1:
         raise ValueError("Signal schema version is unsupported")
-    wait = connection.execute(
-        "SELECT template_key, state FROM openmagic_runtime.waits "
-        "WHERE wait_id = %s AND instance_id = %s FOR UPDATE",
-        (request.wait_id, request.instance_id),
-    ).fetchone()
+    wait = lock_wait(
+        connection,
+        wait_id=request.wait_id,
+        instance_id=request.instance_id,
+    )
     if wait is None:
         raise RuntimeError("Signal target Wait does not exist")
-    if str(wait[1]) != "unsatisfied":
+    if wait.state != "unsatisfied":
         raise RuntimeError("Signal target Wait is no longer unsatisfied")
-    definition_row = connection.execute(
-        "SELECT d.manifest, d.manifest_digest FROM openmagic_runtime.instances AS i "
-        "JOIN openmagic_runtime.workflow_definitions AS d "
-        "ON d.definition_key = i.definition_key AND d.definition_version = i.definition_version "
-        "WHERE i.instance_id = %s",
-        (request.instance_id,),
-    ).fetchone()
-    if definition_row is None:
-        raise RuntimeError("Pinned Workflow Definition is unavailable")
-    definition = verified_definition(dict(definition_row[0]), str(definition_row[1]))
-    wait_template = next(item for item in definition.wait_templates if item.key == str(wait[0]))
+    definition = instance_definition(connection, request.instance_id)
+    wait_template = next(
+        item for item in definition.wait_templates if item.key == wait.template_key
+    )
     if wait_template.signal_type != request.signal_type:
         raise ValueError("Signal Type does not match the target Wait")
     route = next(item for item in definition.routes if item.key == request.route_key)
@@ -74,22 +68,24 @@ def accept_signal(connection: Connection[tuple[Any, ...]], request: AcceptSignal
         "route_key": request.route_key,
     }
     input_digest = canonical_digest(transition_input)
-    instance_state = lock_instance(connection, request.instance_id)
+    instance = lock_instance(connection, request.instance_id)
+    if instance is None:
+        raise RuntimeError("Instance not found")
     lock_source_identity(
         connection,
         source_kind="signal_acceptance",
         source_id=request.signal_id,
     )
-    replay = connection.execute(
-        "SELECT input_digest, receipt FROM openmagic_runtime.trace_events "
-        "WHERE source_kind = 'signal_acceptance' AND source_id = %s",
-        (request.signal_id,),
-    ).fetchone()
+    replay = read_trace_replay(
+        connection,
+        source_kind="signal_acceptance",
+        source_id=request.signal_id,
+    )
     if replay is not None:
-        if str(replay[0]) != input_digest:
+        if replay.input_digest != input_digest:
             raise ValueError("Signal identity was reused with conflicting input")
-        return _receipt(dict(replay[1]))
-    require_open_instance(instance_state)
+        return _receipt(replay.receipt)
+    require_open_instance(instance.state)
     route = _validated_route(connection, request)
     inserted = connection.execute(
         "INSERT INTO openmagic_runtime.signals "

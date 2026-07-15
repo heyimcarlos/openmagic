@@ -7,7 +7,7 @@ from uuid import UUID
 
 from openmagic_runtime.commands import StateConflict
 from openmagic_runtime.kernel.control import KernelControl
-from openmagic_runtime.kernel.transitions import GuardCurrentAttempt, ResolveDeferredStep
+from openmagic_runtime.kernel.transitions import ResolveDeferredStep
 from openmagic_runtime.kernel.work import ClaimedAttempt, DispositionRequired
 from psycopg import Connection
 
@@ -19,24 +19,19 @@ from example_insurance.renewal_effect_policy import (
     effect_observation,
 )
 from example_insurance.renewal_effect_records import (
+    EffectEvidenceSource,
     commit_dispatch_fence,
-    load_durable_dispatch_claim,
-    lock_approval_grant,
+    lock_dispatch_authority,
     lock_external_effect,
     lock_reconciliation_target,
-    lock_workflow_authority,
     record_effect_observation,
     requested_dispatch_claim,
 )
-from example_insurance.renewal_effects import (
+from example_insurance.renewal_effect_types import (
     ExternalEffectPermit,
     logical_effect_id,
 )
-from example_insurance.renewal_records import (
-    CommandEventLineage,
-    EffectEvidenceSource,
-    record_event,
-)
+from example_insurance.renewal_records import CommandEventLineage, record_event
 
 
 class RenewalEffectControl:
@@ -53,41 +48,31 @@ class RenewalEffectControl:
         lineage: CommandEventLineage,
     ) -> ExternalEffectPermit:
         requested = requested_dispatch_claim(attempt, worker_id)
-        workflow = lock_workflow_authority(connection, attempt.instance_id)
-        guard = KernelControl(connection).guard_current_attempt(
-            GuardCurrentAttempt(
-                instance_id=attempt.instance_id,
-                step_id=attempt.step_id,
-                attempt_id=attempt.attempt_id,
-                attempt_number=attempt.attempt_number,
-            )
-        )
-        grant = lock_approval_grant(connection, workflow.workflow_id, attempt.step_id)
-        effect = lock_external_effect(connection, attempt.step_id)
+        locked = lock_dispatch_authority(connection, requested)
         self._policy.authorize_dispatch(
             authority=DispatchAuthority(
-                workflow=workflow,
-                grant=grant,
+                workflow=locked.workflow,
+                grant=locked.grant,
                 requested_claim=requested,
-                durable_claim=load_durable_dispatch_claim(connection, attempt.attempt_id),
+                durable_claim=locked.durable_claim,
                 expected_logical_effect_id=logical_effect_id(attempt.step_id),
-                effect=effect,
+                effect=locked.effect,
             )
         )
-        guard.require_usable()
+        locked.guard.require_usable()
         effect_id = logical_effect_id(attempt.step_id)
         provider_key = commit_dispatch_fence(
             connection,
-            workflow=workflow,
-            grant=grant,
+            workflow=locked.workflow,
+            grant=locked.grant,
             claim=requested,
-            effect=effect,
+            effect=locked.effect,
             effect_id=effect_id,
         )
         record_event(
             connection,
             event_type="external_effect.dispatch_started",
-            workflow_id=workflow.workflow_id,
+            workflow_id=locked.workflow.workflow_id,
             actor=lineage.actor,
             cause=lineage.cause,
             payload={
@@ -102,7 +87,7 @@ class RenewalEffectControl:
             step_id=attempt.step_id,
             attempt_id=attempt.attempt_id,
             provider_idempotency_key=provider_key,
-            effect_fingerprint=grant.effect_fingerprint,
+            effect_fingerprint=locked.grant.effect_fingerprint,
             effect=requested.effect,
         )
 

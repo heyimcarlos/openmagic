@@ -9,7 +9,23 @@ from psycopg import Connection
 from psycopg.types.json import Jsonb
 
 from openmagic_runtime._canonical import canonical_digest
-from openmagic_runtime.kernel.definitions import Route
+from openmagic_runtime.kernel._transition_records import (
+    lock_disposition_source,
+    read_instance_definition,
+)
+from openmagic_runtime.kernel.definitions import (
+    Route,
+    WorkflowDefinition,
+    validate_payload,
+    verified_definition,
+)
+from openmagic_runtime.kernel.records import (
+    AttemptState,
+    InstanceState,
+)
+from openmagic_runtime.kernel.records import (
+    lock_instance as lock_instance_record,
+)
 from openmagic_runtime.kernel.work import DispositionRequired
 
 
@@ -17,44 +33,35 @@ def validate_disposition(
     connection: Connection[tuple[Any, ...]],
     required: DispositionRequired,
     *,
-    expected_attempt_state: str,
+    expected_attempt_state: AttemptState,
 ) -> None:
-    row = connection.execute(
-        "SELECT a.instance_id, a.step_id, a.attempt_number, a.state, a.observation_digest, "
-        "s.template_key FROM openmagic_runtime.attempts AS a "
-        "JOIN openmagic_runtime.steps AS s ON s.step_id = a.step_id "
-        "WHERE a.attempt_id = %s FOR UPDATE OF a, s",
-        (required.attempt_id,),
-    ).fetchone()
-    if row is None:
+    source = lock_disposition_source(connection, required.attempt_id)
+    if source is None:
         raise RuntimeError("Attempt disposition source does not exist")
     if (
-        UUID(str(row[0])) != required.instance_id
-        or UUID(str(row[1])) != required.step_id
-        or int(row[2]) != required.attempt_number
-        or str(row[3]) != expected_attempt_state
-        or str(row[5]) != required.template_key
+        source.instance_id != required.instance_id
+        or source.step_id != required.step_id
+        or source.attempt_number != required.attempt_number
+        or source.state != expected_attempt_state
+        or source.template_key != required.template_key
     ):
         raise RuntimeError("Attempt disposition does not match its durable source")
-    if expected_attempt_state == "completed" and str(row[4]) != canonical_digest(
+    if expected_attempt_state == "completed" and source.observation_digest != canonical_digest(
         required.observation
     ):
         raise RuntimeError("Attempt disposition observation conflicts with durable source")
 
 
-def lock_instance(connection: Connection[tuple[Any, ...]], instance_id: UUID) -> str:
-    row = connection.execute(
-        "SELECT state FROM openmagic_runtime.instances WHERE instance_id = %s FOR UPDATE",
-        (instance_id,),
-    ).fetchone()
-    if row is None:
-        raise RuntimeError("Instance not found")
-    return str(row[0])
-
-
-def require_open_instance(state: str) -> None:
+def require_open_instance(state: InstanceState) -> None:
     if state != "open":
         raise RuntimeError("Instance is closed")
+
+
+def lock_instance(connection: Connection[tuple[Any, ...]], instance_id: UUID) -> InstanceState:
+    instance = lock_instance_record(connection, instance_id)
+    if instance is None:
+        raise RuntimeError("Instance not found")
+    return instance.state
 
 
 def lock_open_instance(connection: Connection[tuple[Any, ...]], instance_id: UUID) -> None:
@@ -139,3 +146,40 @@ def materialize_route(
                 (instance_id, steps[output.slot], prerequisite_id),
             )
     return steps, waits
+
+
+def instance_definition(
+    connection: Connection[tuple[Any, ...]], instance_id: UUID
+) -> WorkflowDefinition:
+    record = read_instance_definition(connection, instance_id)
+    if record is None:
+        raise RuntimeError("Pinned Workflow Definition is unavailable")
+    return verified_definition(record.manifest, record.manifest_digest)
+
+
+def materialize_step_route(
+    connection: Connection[tuple[Any, ...]],
+    *,
+    definition: WorkflowDefinition,
+    required: DispositionRequired,
+    route_key: str | None,
+    route_input: dict[str, Any] | None,
+) -> tuple[dict[str, UUID], dict[str, UUID]]:
+    if route_key is None:
+        if route_input is not None:
+            raise ValueError("Route input cannot be supplied without a Step Route")
+        return {}, {}
+    if route_input is None:
+        raise ValueError("Step Route requires typed Route input")
+    route = next(item for item in definition.routes if item.key == route_key)
+    if route.activation != "step" or route.source_template_key != required.template_key:
+        raise ValueError("Step Route does not accept this Step Template")
+    validate_payload(route_input, route.activation_contract)
+    return materialize_route(
+        connection,
+        instance_id=required.instance_id,
+        route=route,
+        source_kind="step",
+        source_id=required.attempt_id,
+        route_input=route_input,
+    )

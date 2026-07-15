@@ -10,7 +10,7 @@ from uuid import UUID, uuid5
 from openmagic_runtime.commands import Actor, Cause
 from openmagic_runtime.kernel.work import ClaimedAttempt
 
-from example_insurance.renewal_effects import RenewalEmailEffect
+from example_insurance.renewal_effect_types import RenewalEmailEffect
 
 DecisionOutcome = Literal[
     "approved",

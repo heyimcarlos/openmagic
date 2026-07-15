@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
 from psycopg import Connection
 from psycopg.pq import TransactionStatus
+from psycopg.rows import dict_row
 
 from openmagic_runtime.kernel._control_support import lock_open_instance
 from openmagic_runtime.kernel.transitions import GuardCurrentAttempt
@@ -23,14 +25,14 @@ class AttemptAuthorityRecord:
     step_pending: bool
 
     @classmethod
-    def from_row(cls, row: tuple[Any, ...]) -> AttemptAuthorityRecord:
+    def decode(cls, record: Mapping[str, Any]) -> AttemptAuthorityRecord:
         return cls(
-            step_id=UUID(str(row[0])),
-            attempt_number=int(row[1]),
-            leased=bool(row[2]),
-            lease_valid=bool(row[3]),
-            deadline_valid=bool(row[4]),
-            step_pending=bool(row[5]),
+            step_id=UUID(str(record["step_id"])),
+            attempt_number=int(record["attempt_number"]),
+            leased=bool(record["leased"]),
+            lease_valid=bool(record["lease_valid"]),
+            deadline_valid=bool(record["deadline_valid"]),
+            step_pending=bool(record["step_pending"]),
         )
 
     def authorizes(self, request: GuardCurrentAttempt) -> bool:
@@ -63,8 +65,9 @@ class CurrentAttemptGuard:
             or self._connection.info.transaction_status is TransactionStatus.IDLE
         ):
             raise RuntimeError("Current Attempt guard is no longer transaction-scoped")
-        current = self._connection.execute("SELECT txid_current()").fetchone()
-        if current is None or int(current[0]) != self._transaction_id:
+        with self._connection.cursor(row_factory=dict_row) as cursor:
+            current = cursor.execute("SELECT txid_current() AS transaction_id").fetchone()
+        if current is None or int(current["transaction_id"]) != self._transaction_id:
             raise RuntimeError("Current Attempt guard belongs to an earlier transaction")
 
     def __reduce__(self) -> str | tuple[Any, ...]:
@@ -75,23 +78,30 @@ def guard_current_attempt(
     connection: Connection[tuple[Any, ...]], request: GuardCurrentAttempt
 ) -> CurrentAttemptGuard:
     lock_open_instance(connection, request.instance_id)
-    row = connection.execute(
-        "SELECT a.step_id, a.attempt_number, a.state = 'leased', "
-        "a.lease_expires_at > clock_timestamp(), a.hard_deadline > clock_timestamp(), "
-        "s.state = 'pending' FROM openmagic_runtime.attempts AS a "
-        "JOIN openmagic_runtime.steps AS s ON s.step_id = a.step_id "
-        "WHERE a.attempt_id = %s AND a.instance_id = %s FOR UPDATE OF a, s",
-        (request.attempt_id, request.instance_id),
-    ).fetchone()
-    if row is None:
+    with connection.cursor(row_factory=dict_row) as cursor:
+        record = cursor.execute(
+            "SELECT a.step_id, a.attempt_number, a.state = 'leased' AS leased, "
+            "a.lease_expires_at > clock_timestamp() AS lease_valid, "
+            "a.hard_deadline > clock_timestamp() AS deadline_valid, "
+            "s.state = 'pending' AS step_pending FROM openmagic_runtime.attempts AS a "
+            "JOIN openmagic_runtime.steps AS s ON s.step_id = a.step_id "
+            "WHERE a.attempt_id = %s AND a.instance_id = %s FOR UPDATE OF a, s",
+            (request.attempt_id, request.instance_id),
+        ).fetchone()
+    if record is None:
         raise RuntimeError("Current Attempt guard target does not exist")
-    current = AttemptAuthorityRecord.from_row(row)
+    current = AttemptAuthorityRecord.decode(record)
     if not current.authorizes(request):
         raise RuntimeError("Attempt is not current")
-    transaction = connection.execute("SELECT txid_current()").fetchone()
+    with connection.cursor(row_factory=dict_row) as cursor:
+        transaction = cursor.execute("SELECT txid_current() AS transaction_id").fetchone()
     if transaction is None:
         raise RuntimeError("Current transaction identity is unavailable")
-    return CurrentAttemptGuard(connection, request.attempt_id, int(transaction[0]))
+    return CurrentAttemptGuard(
+        connection,
+        request.attempt_id,
+        int(transaction["transaction_id"]),
+    )
 
 
 __all__ = ["AttemptAuthorityRecord", "CurrentAttemptGuard", "guard_current_attempt"]

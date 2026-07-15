@@ -12,7 +12,8 @@ from psycopg import Connection
 from psycopg.types.json import Jsonb
 
 from openmagic_runtime._canonical import canonical_digest
-from openmagic_runtime.kernel._trace import append_trace
+from openmagic_runtime.kernel._trace import append_trace, read_trace_replay
+from openmagic_runtime.kernel._transition_records import read_instance_definition
 from openmagic_runtime.kernel.definitions import validate_payload, verified_definition
 
 
@@ -71,16 +72,10 @@ class DispositionRequired:
 
 
 def _template(connection: Connection[tuple[Any, ...]], instance_id: UUID, key: str) -> Any:
-    row = connection.execute(
-        "SELECT d.manifest, d.manifest_digest FROM openmagic_runtime.instances AS i "
-        "JOIN openmagic_runtime.workflow_definitions AS d "
-        "ON d.definition_key = i.definition_key AND d.definition_version = i.definition_version "
-        "WHERE i.instance_id = %s",
-        (instance_id,),
-    ).fetchone()
-    if row is None:
+    record = read_instance_definition(connection, instance_id)
+    if record is None:
         raise RuntimeError("Pinned Workflow Definition is unavailable")
-    definition = verified_definition(dict(row[0]), str(row[1]))
+    definition = verified_definition(record.manifest, record.manifest_digest)
     return next(item for item in definition.step_templates if item.key == key)
 
 
@@ -93,15 +88,15 @@ class KernelWork:
             "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
             (str(request.claim_request_id),),
         )
-        replay = self._connection.execute(
-            "SELECT receipt, input_digest FROM openmagic_runtime.trace_events "
-            "WHERE source_kind = 'claim' AND source_id = %s",
-            (request.claim_request_id,),
-        ).fetchone()
+        replay = read_trace_replay(
+            self._connection,
+            source_kind="claim",
+            source_id=request.claim_request_id,
+        )
         if replay is not None:
-            if str(replay[1]) != canonical_digest(request):
+            if replay.input_digest != canonical_digest(request):
                 raise ValueError("Attempt claim identity has conflicting input")
-            value = dict(replay[0])
+            value = replay.receipt
             return ClaimedAttempt(
                 instance_id=UUID(value["instance_id"]),
                 step_id=UUID(value["step_id"]),
@@ -280,15 +275,15 @@ class KernelWork:
             "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
             (str(renewal_id),),
         )
-        replay = self._connection.execute(
-            "SELECT receipt, input_digest FROM openmagic_runtime.trace_events "
-            "WHERE source_kind = 'attempt_lease_renewal' AND source_id = %s",
-            (renewal_id,),
-        ).fetchone()
+        replay = read_trace_replay(
+            self._connection,
+            source_kind="attempt_lease_renewal",
+            source_id=renewal_id,
+        )
         if replay is not None:
-            if str(replay[1]) != canonical_digest(renewal_input):
+            if replay.input_digest != canonical_digest(renewal_input):
                 raise ValueError("Attempt lease renewal identity has conflicting input")
-            receipt = dict(replay[0])
+            receipt = replay.receipt
             return RenewedAttemptLease(
                 attempt_id=UUID(receipt["attempt_id"]),
                 lease_expires_at=datetime.fromisoformat(receipt["lease_expires_at"]),

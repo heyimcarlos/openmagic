@@ -8,7 +8,7 @@ from uuid import UUID
 
 from openmagic_runtime.evidence import content_fingerprint
 
-from example_insurance.renewal_effects import RenewalEmailEffect
+from example_insurance.renewal_effect_types import RenewalEmailEffect
 from example_insurance.renewal_lifecycle_policy import WorkflowLifecycle
 from example_insurance.renewal_policies import RENEWAL_ATTEMPT_RETRY_POLICY
 

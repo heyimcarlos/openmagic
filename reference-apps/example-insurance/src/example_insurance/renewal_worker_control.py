@@ -30,10 +30,8 @@ from example_insurance.renewal_commands import (
     dispatch_command_id,
     effect_observation_command_id,
 )
-from example_insurance.renewal_effects import (
-    ExternalEffectPermit,
-    committed_permit_execution_input,
-)
+from example_insurance.renewal_effect_types import ExternalEffectPermit
+from example_insurance.renewal_effects import committed_permit_execution_input
 
 
 class RenewalWorkerControl:

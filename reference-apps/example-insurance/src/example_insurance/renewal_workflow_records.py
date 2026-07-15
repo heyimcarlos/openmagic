@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
 from openmagic_runtime.commands import Actor
+from openmagic_runtime.kernel.records import (
+    activated_by_attempt,
+    expired_attempt_instances,
+    lock_instance,
+)
 from psycopg import Connection
+from psycopg.rows import dict_row
 
 from example_insurance.renewal_commands import StartRenewalOutreachInput
 
@@ -18,6 +25,14 @@ class WorkflowIdentity:
     instance_id: UUID
     thread_id: UUID
 
+    @classmethod
+    def decode(cls, record: Mapping[str, Any]) -> WorkflowIdentity:
+        return cls(
+            workflow_id=UUID(str(record["workflow_id"])),
+            instance_id=UUID(str(record["instance_id"])),
+            thread_id=UUID(str(record["thread_id"])),
+        )
+
 
 @dataclass(frozen=True)
 class DurableDraft:
@@ -27,6 +42,17 @@ class DurableDraft:
     policyholder_email: str
     subject: str
     body: str
+
+    @classmethod
+    def decode(cls, record: Mapping[str, Any]) -> DurableDraft:
+        return cls(
+            draft_id=UUID(str(record["draft_id"])),
+            agent_run_id=UUID(str(record["agent_run_id"])),
+            presentation_fingerprint=str(record["presentation_fingerprint"]),
+            policyholder_email=str(record["policyholder_email"]),
+            subject=str(record["subject"]),
+            body=str(record["body"]),
+        )
 
 
 @dataclass(frozen=True)
@@ -41,6 +67,27 @@ def workflow_exists(connection: Connection[tuple[Any, ...]], workflow_id: UUID) 
         (workflow_id,),
     ).fetchone()
     return row is not None
+
+
+def _read_workflow_identity(
+    connection: Connection[tuple[Any, ...]], workflow_id: UUID
+) -> WorkflowIdentity | None:
+    with connection.cursor(row_factory=dict_row) as cursor:
+        record = cursor.execute(
+            "SELECT workflow_id, instance_id, thread_id "
+            "FROM example_insurance.renewal_workflows WHERE workflow_id = %s",
+            (workflow_id,),
+        ).fetchone()
+    return WorkflowIdentity.decode(record) if record is not None else None
+
+
+def lock_instance_for_workflow(
+    connection: Connection[tuple[Any, ...]], workflow_id: UUID
+) -> WorkflowIdentity | None:
+    identity = _read_workflow_identity(connection, workflow_id)
+    if identity is None or lock_instance(connection, identity.instance_id) is None:
+        return None
+    return identity
 
 
 def record_workflow(
@@ -74,36 +121,35 @@ def record_workflow(
     return WorkflowIdentity(value.workflow_id, instance_id, value.thread_id)
 
 
-def lock_next_expired_workflow_instance(
+def expired_workflow_instances(
     connection: Connection[tuple[Any, ...]],
-) -> UUID | None:
-    row = connection.execute(
-        "SELECT r.instance_id FROM example_insurance.renewal_workflows r "
-        "WHERE r.lifecycle = 'active' AND EXISTS ("
-        "SELECT 1 FROM openmagic_runtime.attempts a WHERE a.instance_id = r.instance_id "
-        "AND a.state = 'leased' AND (a.lease_expires_at <= clock_timestamp() "
-        "OR a.hard_deadline <= clock_timestamp())) "
-        "ORDER BY r.created_at, r.workflow_id FOR UPDATE SKIP LOCKED LIMIT 1"
-    ).fetchone()
-    return UUID(str(row[0])) if row is not None else None
+) -> tuple[UUID, ...]:
+    candidates = expired_attempt_instances(connection)
+    if not candidates:
+        return ()
+    with connection.cursor(row_factory=dict_row) as cursor:
+        records = cursor.execute(
+            "SELECT instance_id FROM example_insurance.renewal_workflows "
+            "WHERE instance_id = ANY(%s) AND lifecycle = 'active' "
+            "ORDER BY created_at, workflow_id",
+            (list(candidates),),
+        ).fetchall()
+    return tuple(UUID(str(record["instance_id"])) for record in records)
 
 
-def lock_workflow_for_attempt(
+def lock_workflow_after_instance(
     connection: Connection[tuple[Any, ...]], instance_id: UUID
 ) -> WorkflowIdentity:
-    row = connection.execute(
-        "SELECT workflow_id, instance_id, thread_id "
-        "FROM example_insurance.renewal_workflows "
-        "WHERE instance_id = %s FOR UPDATE",
-        (instance_id,),
-    ).fetchone()
-    if row is None:
+    with connection.cursor(row_factory=dict_row) as cursor:
+        record = cursor.execute(
+            "SELECT workflow_id, instance_id, thread_id "
+            "FROM example_insurance.renewal_workflows "
+            "WHERE instance_id = %s FOR UPDATE",
+            (instance_id,),
+        ).fetchone()
+    if record is None:
         raise RuntimeError("Renewal Workflow is unavailable")
-    return WorkflowIdentity(
-        workflow_id=UUID(str(row[0])),
-        instance_id=UUID(str(row[1])),
-        thread_id=UUID(str(row[2])),
-    )
+    return WorkflowIdentity.decode(record)
 
 
 def activation_receipt(
@@ -112,41 +158,25 @@ def activation_receipt(
     instance_id: UUID,
     source_attempt_id: UUID,
 ) -> ActivationReceipt:
-    step_rows = connection.execute(
-        "SELECT output_slot, step_id FROM openmagic_runtime.steps "
-        "WHERE instance_id = %s AND activation_source_kind = 'step' "
-        "AND activation_source_id = %s",
-        (instance_id, source_attempt_id),
-    ).fetchall()
-    wait_rows = connection.execute(
-        "SELECT output_slot, wait_id FROM openmagic_runtime.waits "
-        "WHERE instance_id = %s AND activation_source_kind = 'step' "
-        "AND activation_source_id = %s",
-        (instance_id, source_attempt_id),
-    ).fetchall()
-    return ActivationReceipt(
-        steps={str(row[0]): UUID(str(row[1])) for row in step_rows},
-        waits={str(row[0]): UUID(str(row[1])) for row in wait_rows},
+    activated = activated_by_attempt(
+        connection,
+        instance_id=instance_id,
+        attempt_id=source_attempt_id,
     )
+    return ActivationReceipt(steps=activated.steps, waits=activated.waits)
 
 
 def load_draft_for_step(connection: Connection[tuple[Any, ...]], step_id: UUID) -> DurableDraft:
-    row = connection.execute(
-        "SELECT draft_id, agent_run_id, presentation_fingerprint, "
-        "policyholder_email, subject, body FROM example_insurance.renewal_drafts "
-        "WHERE step_id = %s",
-        (step_id,),
-    ).fetchone()
-    if row is None:
+    with connection.cursor(row_factory=dict_row) as cursor:
+        record = cursor.execute(
+            "SELECT draft_id, agent_run_id, presentation_fingerprint, "
+            "policyholder_email, subject, body FROM example_insurance.renewal_drafts "
+            "WHERE step_id = %s",
+            (step_id,),
+        ).fetchone()
+    if record is None:
         raise RuntimeError("Accepted draft result has no durable draft")
-    return DurableDraft(
-        draft_id=UUID(str(row[0])),
-        agent_run_id=UUID(str(row[1])),
-        presentation_fingerprint=str(row[2]),
-        policyholder_email=str(row[3]),
-        subject=str(row[4]),
-        body=str(row[5]),
-    )
+    return DurableDraft.decode(record)
 
 
 def record_draft(
@@ -177,6 +207,18 @@ def record_draft(
             presentation_fingerprint,
         ),
     )
+
+
+def bind_draft_ready_event(
+    connection: Connection[tuple[Any, ...]], *, draft_id: UUID, event_id: UUID
+) -> None:
+    row = connection.execute(
+        "UPDATE example_insurance.renewal_drafts SET ready_event_id = %s "
+        "WHERE draft_id = %s AND ready_event_id IS NULL RETURNING draft_id",
+        (event_id, draft_id),
+    ).fetchone()
+    if row is None:
+        raise RuntimeError("Renewal Draft ready event is already bound or unavailable")
 
 
 def mark_workflow_authority_revoked(
@@ -210,9 +252,11 @@ __all__ = [
     "DurableDraft",
     "WorkflowIdentity",
     "activation_receipt",
+    "bind_draft_ready_event",
+    "expired_workflow_instances",
     "load_draft_for_step",
-    "lock_next_expired_workflow_instance",
-    "lock_workflow_for_attempt",
+    "lock_instance_for_workflow",
+    "lock_workflow_after_instance",
     "mark_workflow_authority_revoked",
     "mark_workflow_cancelled",
     "mark_workflow_completed",

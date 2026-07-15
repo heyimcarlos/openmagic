@@ -13,19 +13,18 @@ from example_insurance.renewal_approval_policy import (
     ApprovalRejectedDecision,
     RenewalApprovalPolicy,
 )
+from example_insurance.renewal_approval_records import (
+    load_approval_presentation_snapshot,
+    lock_approval_decision_snapshot,
+)
 from example_insurance.renewal_commands import (
     ApproveRenewalDraft,
     ApproveRenewalDraftResult,
     RequestRenewalRevision,
     RequestRenewalRevisionResult,
 )
-from example_insurance.renewal_decisions import (
-    approval_presentation,
-    decision_context,
-    decision_facts,
-    record_decision,
-)
-from example_insurance.renewal_effects import RenewalApprovalPresentation
+from example_insurance.renewal_decisions import decision_facts, record_decision
+from example_insurance.renewal_effect_types import RenewalApprovalPresentation
 from example_insurance.renewal_grant_records import record_approval_grant
 from example_insurance.renewal_records import CommandEventLineage, record_event
 
@@ -38,17 +37,22 @@ class RenewalReviewControl:
     def presentation(
         connection: Connection[tuple[Any, ...]], workflow_id: UUID
     ) -> RenewalApprovalPresentation:
-        return approval_presentation(connection, workflow_id)
+        return load_approval_presentation_snapshot(connection, workflow_id).presentation()
 
     def approve(
         self,
         command: ApproveRenewalDraft,
         connection: Connection[tuple[Any, ...]],
     ) -> ApproveRenewalDraftResult:
-        context = decision_context(connection, command.input)
+        snapshot = lock_approval_decision_snapshot(
+            connection,
+            workflow_id=command.input.workflow_id,
+            draft_id=command.input.draft_id,
+            wait_id=command.input.wait_id,
+        )
         decision = self._policy.decide(
             decision_kind="approve",
-            facts=decision_facts(context, command.actor, command.input),
+            facts=decision_facts(snapshot, command.actor, command.input),
         )
         if isinstance(decision, ApprovalRejectedDecision):
             return ApproveRenewalDraftResult(
@@ -64,7 +68,7 @@ class RenewalReviewControl:
         signal = KernelControl(connection).accept_signal(
             AcceptSignal(
                 signal_id=command.command_id,
-                instance_id=context.instance_id,
+                instance_id=snapshot.workflow.instance_id,
                 wait_id=command.input.wait_id,
                 signal_type="renewal.draft.decision",
                 schema_version=1,
@@ -129,10 +133,15 @@ class RenewalReviewControl:
         command: RequestRenewalRevision,
         connection: Connection[tuple[Any, ...]],
     ) -> RequestRenewalRevisionResult:
-        context = decision_context(connection, command.input)
+        snapshot = lock_approval_decision_snapshot(
+            connection,
+            workflow_id=command.input.workflow_id,
+            draft_id=command.input.draft_id,
+            wait_id=command.input.wait_id,
+        )
         decision = self._policy.decide(
             decision_kind="request_revision",
-            facts=decision_facts(context, command.actor, command.input),
+            facts=decision_facts(snapshot, command.actor, command.input),
         )
         if isinstance(decision, ApprovalRejectedDecision):
             return RequestRenewalRevisionResult(
@@ -144,7 +153,7 @@ class RenewalReviewControl:
         signal = KernelControl(connection).accept_signal(
             AcceptSignal(
                 signal_id=command.command_id,
-                instance_id=context.instance_id,
+                instance_id=snapshot.workflow.instance_id,
                 wait_id=command.input.wait_id,
                 signal_type="renewal.draft.decision",
                 schema_version=1,
@@ -156,13 +165,13 @@ class RenewalReviewControl:
                     "recipient_email": command.input.proposed_effect.recipient_email,
                     "subject": command.input.proposed_effect.subject,
                     "body": command.input.proposed_effect.body,
-                    "thread_id": str(context.thread_id),
+                    "thread_id": str(snapshot.workflow.thread_id),
                     "revision_instruction": command.input.revision_instruction,
-                    "policy_number": context.policy_number,
-                    "policyholder_name": context.policyholder_name,
-                    "policyholder_email": context.policyholder_email,
-                    "renewal_date": context.renewal_date,
-                    "expiring_premium_cents": context.expiring_premium_cents,
+                    "policy_number": snapshot.workflow.policy_number,
+                    "policyholder_name": snapshot.workflow.policyholder_name,
+                    "policyholder_email": snapshot.workflow.policyholder_email,
+                    "renewal_date": snapshot.workflow.renewal_date,
+                    "expiring_premium_cents": snapshot.workflow.expiring_premium_cents,
                 },
                 route_key=decision.route_key,
             )

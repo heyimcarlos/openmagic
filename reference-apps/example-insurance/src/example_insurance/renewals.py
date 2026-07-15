@@ -64,12 +64,15 @@ from example_insurance.renewal_commands import (
 )
 from example_insurance.renewal_definition import RENEWAL_DEFINITION
 from example_insurance.renewal_effect_control import RenewalEffectControl
-from example_insurance.renewal_effects import (
-    EmailProviderExecutor,
-    EmailReconciliationExecutor,
+from example_insurance.renewal_effect_types import (
     ExternalEffectPermit,
     RenewalApprovalPresentation,
     RenewalEmailEffect,
+)
+from example_insurance.renewal_effects import (
+    AuthorizedEmailEffectExecutor,
+    EmailProviderClient,
+    EmailReconciliationExecutor,
 )
 from example_insurance.renewal_evidence import RenewalEvidenceProjector
 from example_insurance.renewal_facts import RenewalFacts, RenewalFactSource
@@ -180,9 +183,9 @@ class ExampleInsurance:
         if email_provider_url is not None:
             executors.update(
                 {
-                    "example_insurance.email_provider.v1": EmailProviderExecutor(
+                    "example_insurance.email_provider.v1": AuthorizedEmailEffectExecutor(
                         database_url=database_url,
-                        provider_url=email_provider_url,
+                        client=EmailProviderClient(provider_url=email_provider_url),
                     ),
                     "example_insurance.email_reconciliation.v1": EmailReconciliationExecutor(
                         provider_url=email_provider_url
@@ -213,7 +216,7 @@ class ExampleInsurance:
 
     def renewal_approval_presentation(self, workflow_id: UUID) -> RenewalApprovalPresentation:
         with psycopg.connect(self._database_url) as connection, connection.transaction():
-            connection.execute("SET TRANSACTION READ ONLY")
+            connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
             return self._review_control.presentation(connection, workflow_id)
 
     def approve_renewal_draft(

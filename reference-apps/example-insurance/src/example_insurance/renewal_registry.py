@@ -32,7 +32,7 @@ from example_insurance.renewal_commands import (
     validate_revocation,
     validate_start,
 )
-from example_insurance.renewal_effects import ExternalEffectPermit, permit_from_record
+from example_insurance.renewal_effect_types import ExternalEffectPermit, permit_from_record
 
 
 @dataclass(frozen=True)

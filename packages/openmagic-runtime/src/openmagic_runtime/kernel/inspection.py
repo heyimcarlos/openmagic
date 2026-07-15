@@ -7,19 +7,28 @@ from uuid import UUID
 
 import psycopg
 
+from openmagic_runtime.kernel._inspection_records import read_instance_inspection
+from openmagic_runtime.kernel.records import (
+    InstanceState,
+    StepState,
+    WaitState,
+    steps_for_instance,
+    waits_for_instance,
+)
+
 
 @dataclass(frozen=True)
 class StepView:
     step_id: UUID
     template_key: str
-    state: str
+    state: StepState
 
 
 @dataclass(frozen=True)
 class WaitView:
     wait_id: UUID
     template_key: str
-    state: str
+    state: WaitState
 
 
 @dataclass(frozen=True)
@@ -27,7 +36,7 @@ class InstanceSnapshot:
     instance_id: UUID
     definition_key: str
     definition_version: int
-    state: str
+    state: InstanceState
     observed_through_sequence: int
     steps: tuple[StepView, ...]
     waits: tuple[WaitView, ...]
@@ -40,31 +49,19 @@ class KernelInspection:
     def snapshot(self, instance_id: UUID) -> InstanceSnapshot:
         with psycopg.connect(self._database_url) as connection, connection.transaction():
             connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
-            instance = connection.execute(
-                "SELECT definition_key, definition_version, state, last_trace_sequence "
-                "FROM openmagic_runtime.instances WHERE instance_id = %s",
-                (instance_id,),
-            ).fetchone()
+            instance = read_instance_inspection(connection, instance_id)
             if instance is None:
                 raise KeyError(f"Instance not found: {instance_id}")
-            steps = connection.execute(
-                "SELECT step_id, template_key, state FROM openmagic_runtime.steps "
-                "WHERE instance_id = %s ORDER BY created_at, step_id",
-                (instance_id,),
-            ).fetchall()
-            waits = connection.execute(
-                "SELECT wait_id, template_key, state FROM openmagic_runtime.waits "
-                "WHERE instance_id = %s ORDER BY created_at, wait_id",
-                (instance_id,),
-            ).fetchall()
+            steps = steps_for_instance(connection, instance_id)
+            waits = waits_for_instance(connection, instance_id)
         return InstanceSnapshot(
             instance_id=instance_id,
-            definition_key=str(instance[0]),
-            definition_version=int(instance[1]),
-            state=str(instance[2]),
-            observed_through_sequence=int(instance[3]),
-            steps=tuple(StepView(UUID(str(row[0])), str(row[1]), str(row[2])) for row in steps),
-            waits=tuple(WaitView(UUID(str(row[0])), str(row[1]), str(row[2])) for row in waits),
+            definition_key=instance.definition_key,
+            definition_version=instance.definition_version,
+            state=instance.state,
+            observed_through_sequence=instance.observed_through_sequence,
+            steps=tuple(StepView(step.step_id, step.template_key, step.state) for step in steps),
+            waits=tuple(WaitView(wait.wait_id, wait.template_key, wait.state) for wait in waits),
         )
 
 

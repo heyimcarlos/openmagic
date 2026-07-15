@@ -11,6 +11,19 @@ import psycopg
 from psycopg import Connection
 from psycopg.types.json import Jsonb
 
+from openmagic_runtime._delivery_records import (
+    DeliveredMessage,
+    DeliveryAttemptState,
+    DeliveryPresentation,
+    DeliveryStatus,
+    RuntimeDeliveryEvidence,
+    deliveries_for_domain_event,
+    delivery_attempt_state,
+    delivery_status,
+    lock_delivery_presentation,
+    read_delivery_presentation,
+)
+
 
 class StaleDeliveryAuthority(RuntimeError):
     """Raised when a Delivery Worker no longer owns the leased Attempt."""
@@ -436,14 +449,24 @@ def acknowledge_delivery(
 __all__ = [
     "ClaimDelivery",
     "ClaimedDelivery",
+    "DeliveredMessage",
     "DeliveryAcknowledgement",
+    "DeliveryAttemptState",
     "DeliveryControl",
     "DeliveryFailureDisposition",
     "DeliveryIntent",
+    "DeliveryPresentation",
     "DeliveryProposalConflict",
     "DeliveryRetryPolicy",
+    "DeliveryStatus",
     "DeliveryWork",
+    "RuntimeDeliveryEvidence",
     "StaleDeliveryAuthority",
     "acknowledge_delivery",
     "claim_delivery_once",
+    "deliveries_for_domain_event",
+    "delivery_attempt_state",
+    "delivery_status",
+    "lock_delivery_presentation",
+    "read_delivery_presentation",
 ]

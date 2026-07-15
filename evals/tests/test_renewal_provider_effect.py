@@ -14,9 +14,14 @@ from example_insurance.renewal_commands import (
     RenewalEffectObservation,
     effect_observation_command_id,
 )
-from example_insurance.renewal_effects import (
-    EmailProviderExecutor,
+from example_insurance.renewal_effect_types import (
+    ExternalEffectPermit,
     RenewalEmailEffect,
+    logical_effect_id,
+)
+from example_insurance.renewal_effects import (
+    AuthorizedEmailEffectExecutor,
+    EmailProviderClient,
     committed_permit_execution_input,
 )
 from example_insurance.renewals import (
@@ -342,6 +347,34 @@ def test_provider_reuses_one_result_for_duplicate_idempotency_identity(tmp_path)
         assert [request["duplicate"] for request in requests] == [0, 1]
 
 
+def test_email_provider_client_dispatches_typed_permit_without_database(tmp_path) -> None:
+    with LocalEmailProvider(working_directory=tmp_path / "provider") as provider:
+        provider.configure(behaviors=("success",))
+        step_id = uuid4()
+        effect = RenewalEmailEffect(
+            "typed@example.test",
+            "Typed permit",
+            "Database-independent provider input",
+        )
+        effect_id = logical_effect_id(step_id)
+        permit = ExternalEffectPermit(
+            logical_effect_id=effect_id,
+            step_id=step_id,
+            attempt_id=uuid4(),
+            provider_idempotency_key=str(effect_id),
+            effect_fingerprint=content_fingerprint(effect),
+            effect=effect,
+        )
+
+        observation = EmailProviderClient(provider_url=provider.url).execute(
+            permit,
+            CancellationToken(),
+        )
+
+        assert observation.value["classification"] == "applied"
+        assert provider.requests()[0]["recipient_email"] == "typed@example.test"
+
+
 def test_provider_executor_rejects_mismatched_permit_bound_input(tmp_path) -> None:
     with (
         LocalEmailProvider(working_directory=tmp_path / "provider") as provider,
@@ -397,9 +430,9 @@ def test_provider_executor_rejects_mismatched_permit_bound_input(tmp_path) -> No
 
         for mismatch in mismatches:
             with pytest.raises(RuntimeError, match="permit"):
-                EmailProviderExecutor(
+                AuthorizedEmailEffectExecutor(
                     database_url=database_url,
-                    provider_url=provider.url,
+                    client=EmailProviderClient(provider_url=provider.url),
                 ).execute(
                     replace(execution, input={**execution.input, **mismatch}),
                     CancellationToken(),
@@ -437,9 +470,9 @@ def test_dispatch_and_provider_evidence_commands_return_exact_replay_receipts(tm
             attempt=attempt,
             worker_id="email",
         )
-        observation = EmailProviderExecutor(
+        observation = AuthorizedEmailEffectExecutor(
             database_url=database_url,
-            provider_url=provider.url,
+            client=EmailProviderClient(provider_url=provider.url),
         ).execute(
             AttemptExecution(
                 instance_id=attempt.instance_id,

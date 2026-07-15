@@ -3,17 +3,15 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
 from http.client import RemoteDisconnected
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
-from uuid import UUID, uuid5
+from uuid import UUID
 
 import psycopg
 from openmagic_runtime.commands import CommandReceipt
-from openmagic_runtime.evidence import content_fingerprint
 from openmagic_runtime.execution import (
     AttemptExecution,
     AttemptObservation,
@@ -21,71 +19,7 @@ from openmagic_runtime.execution import (
 )
 
 from example_insurance.renewal_command_records import load_committed_dispatch_permit
-
-_EFFECT_NAMESPACE = UUID("cbd8665d-e683-4c30-aab1-cdce90440e9d")
-
-
-@dataclass(frozen=True)
-class RenewalEmailEffect:
-    recipient_email: str
-    subject: str
-    body: str
-
-    def __post_init__(self) -> None:
-        if not self.recipient_email.strip() or "@" not in self.recipient_email:
-            raise ValueError("Renewal email recipient must be a non-empty email address")
-        if not self.subject.strip() or not self.body.strip():
-            raise ValueError("Renewal email subject and body must be non-empty")
-
-
-@dataclass(frozen=True)
-class RenewalApprovalPresentation:
-    workflow_id: UUID
-    wait_id: UUID
-    draft_id: UUID
-    message_id: UUID
-    thread_sequence: int
-    message_fingerprint: str
-    presentation_fingerprint: str
-    proposed_effect: RenewalEmailEffect
-
-
-@dataclass(frozen=True)
-class ExternalEffectPermit:
-    logical_effect_id: UUID
-    step_id: UUID
-    attempt_id: UUID
-    provider_idempotency_key: str
-    effect_fingerprint: str
-    effect: RenewalEmailEffect
-
-    def __post_init__(self) -> None:
-        if self.logical_effect_id != logical_effect_id(self.step_id):
-            raise ValueError("External Effect permit has a non-canonical effect identity")
-        if self.provider_idempotency_key != str(self.logical_effect_id):
-            raise ValueError("External Effect permit has a non-canonical idempotency identity")
-        if self.effect_fingerprint != content_fingerprint(self.effect):
-            raise ValueError("External Effect permit input differs from its fingerprint")
-
-
-def logical_effect_id(step_id: UUID) -> UUID:
-    return uuid5(_EFFECT_NAMESPACE, str(step_id))
-
-
-def permit_from_record(payload: dict[str, Any]) -> ExternalEffectPermit:
-    effect = dict(payload["effect"])
-    return ExternalEffectPermit(
-        logical_effect_id=UUID(str(payload["logical_effect_id"])),
-        step_id=UUID(str(payload["step_id"])),
-        attempt_id=UUID(str(payload["attempt_id"])),
-        provider_idempotency_key=str(payload["provider_idempotency_key"]),
-        effect_fingerprint=str(payload["effect_fingerprint"]),
-        effect=RenewalEmailEffect(
-            recipient_email=str(effect["recipient_email"]),
-            subject=str(effect["subject"]),
-            body=str(effect["body"]),
-        ),
-    )
+from example_insurance.renewal_effect_types import ExternalEffectPermit, logical_effect_id
 
 
 def committed_permit_execution_input(
@@ -97,11 +31,7 @@ def committed_permit_execution_input(
     }
 
 
-def _permit_bound_input(
-    execution: AttemptExecution,
-    *,
-    database_url: str,
-) -> tuple[UUID, str, RenewalEmailEffect]:
+def _permit_reference(execution: AttemptExecution) -> tuple[UUID, str]:
     expected_fields = {
         "authorization_command_id",
         "authorization_result_digest",
@@ -112,22 +42,16 @@ def _permit_bound_input(
         command_id = UUID(str(execution.input["authorization_command_id"]))
     except ValueError as error:
         raise RuntimeError("Email provider permit identities are invalid") from error
-    requested_digest = str(execution.input["authorization_result_digest"])
-    with psycopg.connect(database_url) as connection, connection.transaction():
-        connection.execute("SET TRANSACTION READ ONLY")
-        receipt = load_committed_dispatch_permit(
-            connection,
-            command_id=command_id,
-            result_digest=requested_digest,
-        )
-    permit = permit_from_record(receipt.result)
+    return command_id, str(execution.input["authorization_result_digest"])
+
+
+def _validate_permit(execution: AttemptExecution, permit: ExternalEffectPermit) -> None:
     if (
         permit.step_id != execution.step_id
         or permit.attempt_id != execution.attempt_id
         or permit.logical_effect_id != logical_effect_id(execution.step_id)
     ):
         raise RuntimeError("Email provider execution conflicts with its committed permit")
-    return permit.logical_effect_id, permit.provider_idempotency_key, permit.effect
 
 
 def _read_json(response: Any) -> dict[str, Any]:
@@ -147,36 +71,25 @@ def _classification(payload: dict[str, Any]) -> tuple[str, str]:
     return classification, request_id
 
 
-class EmailProviderExecutor:
-    def __init__(
-        self,
-        *,
-        database_url: str,
-        provider_url: str,
-        timeout_seconds: float = 3.0,
-    ) -> None:
-        self._database_url = database_url
+class EmailProviderClient:
+    def __init__(self, *, provider_url: str, timeout_seconds: float = 3.0) -> None:
         self._provider_url = provider_url.rstrip("/")
         self._timeout_seconds = timeout_seconds
 
     def execute(
-        self, execution: AttemptExecution, cancellation: CancellationToken
+        self, permit: ExternalEffectPermit, cancellation: CancellationToken
     ) -> AttemptObservation:
         if cancellation.cancelled:
             raise RuntimeError("Attempt execution was cancelled")
-        effect_id, provider_key, effect = _permit_bound_input(
-            execution,
-            database_url=self._database_url,
-        )
         request = Request(
             f"{self._provider_url}/dispatch",
             data=json.dumps(
                 {
-                    "logical_effect_id": str(effect_id),
-                    "idempotency_key": provider_key,
-                    "recipient_email": effect.recipient_email,
-                    "subject": effect.subject,
-                    "body": effect.body,
+                    "logical_effect_id": str(permit.logical_effect_id),
+                    "idempotency_key": permit.provider_idempotency_key,
+                    "recipient_email": permit.effect.recipient_email,
+                    "subject": permit.effect.subject,
+                    "body": permit.effect.body,
                 }
             ).encode("utf-8"),
             headers={"Content-Type": "application/json"},
@@ -190,7 +103,7 @@ class EmailProviderExecutor:
                 classification, request_id = _classification(_read_json(error))
         except (OSError, RemoteDisconnected, TimeoutError, URLError):
             classification = "uncertain"
-            request_id = str(effect_id)
+            request_id = str(permit.logical_effect_id)
         if cancellation.cancelled:
             raise RuntimeError("Attempt execution was cancelled")
         return AttemptObservation(
@@ -199,6 +112,26 @@ class EmailProviderExecutor:
                 "provider_request_id": request_id,
             }
         )
+
+
+class AuthorizedEmailEffectExecutor:
+    def __init__(self, *, database_url: str, client: EmailProviderClient) -> None:
+        self._database_url = database_url
+        self._client = client
+
+    def execute(
+        self, execution: AttemptExecution, cancellation: CancellationToken
+    ) -> AttemptObservation:
+        command_id, result_digest = _permit_reference(execution)
+        with psycopg.connect(self._database_url) as connection, connection.transaction():
+            connection.execute("SET TRANSACTION READ ONLY")
+            permit = load_committed_dispatch_permit(
+                connection,
+                command_id=command_id,
+                result_digest=result_digest,
+            )
+        _validate_permit(execution, permit)
+        return self._client.execute(permit, cancellation)
 
 
 class EmailReconciliationExecutor:
@@ -239,12 +172,8 @@ class EmailReconciliationExecutor:
 
 
 __all__ = [
-    "EmailProviderExecutor",
+    "AuthorizedEmailEffectExecutor",
+    "EmailProviderClient",
     "EmailReconciliationExecutor",
-    "ExternalEffectPermit",
-    "RenewalApprovalPresentation",
-    "RenewalEmailEffect",
     "committed_permit_execution_input",
-    "logical_effect_id",
-    "permit_from_record",
 ]

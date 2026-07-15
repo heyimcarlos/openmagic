@@ -6,36 +6,15 @@ from dataclasses import dataclass
 from typing import Literal
 from uuid import UUID
 
+from openmagic_runtime.delivery import DeliveryStatus
 from openmagic_runtime.evidence import content_fingerprint
+from openmagic_runtime.kernel.records import WaitState
 
-from example_insurance.renewal_effects import RenewalEmailEffect
+from example_insurance.renewal_effect_types import RenewalEmailEffect
 from example_insurance.renewal_lifecycle_policy import WorkflowLifecycle
 
-WaitState = Literal["unsatisfied", "satisfied", "cancelled"]
-DeliveryStatus = Literal["pending", "delivered", "failed", "suppressed"]
 MessageSourceKind = Literal["channel", "delivery", "agent_run", "system"]
-
-
-def wait_state(value: object) -> WaitState:
-    if value == "unsatisfied":
-        return "unsatisfied"
-    if value == "satisfied":
-        return "satisfied"
-    if value == "cancelled":
-        return "cancelled"
-    raise RuntimeError("Approval Wait has an invalid state")
-
-
-def delivery_status(value: object) -> DeliveryStatus:
-    if value == "pending":
-        return "pending"
-    if value == "delivered":
-        return "delivered"
-    if value == "failed":
-        return "failed"
-    if value == "suppressed":
-        return "suppressed"
-    raise RuntimeError("Approval Delivery has an invalid status")
+ApprovalDecisionKind = Literal["approve", "request_revision"]
 
 
 def message_source_kind(value: object) -> MessageSourceKind:
@@ -48,6 +27,14 @@ def message_source_kind(value: object) -> MessageSourceKind:
     if value == "system":
         return "system"
     raise RuntimeError("Approval Message has an invalid source kind")
+
+
+def approval_decision_kind(value: object) -> ApprovalDecisionKind:
+    if value == "approve":
+        return "approve"
+    if value == "request_revision":
+        return "request_revision"
+    raise RuntimeError("Renewal approval has an invalid decision kind")
 
 
 @dataclass(frozen=True)
@@ -190,7 +177,7 @@ class RenewalApprovalPolicy:
     @staticmethod
     def decide(
         *,
-        decision_kind: Literal["approve", "request_revision"],
+        decision_kind: ApprovalDecisionKind,
         facts: ApprovalDecisionFacts,
     ) -> ApprovalDecision:
         requested = facts.requested
@@ -211,6 +198,7 @@ __all__ = [
     "ApprovalAcceptedDecision",
     "ApprovalDecision",
     "ApprovalDecisionFacts",
+    "ApprovalDecisionKind",
     "ApprovalPresentationIdentity",
     "ApprovalRejectedDecision",
     "ApprovalRejectionOutcome",
@@ -222,7 +210,6 @@ __all__ = [
     "RenewalApprovalPolicy",
     "RequestedApprovalPresentation",
     "WaitState",
-    "delivery_status",
+    "approval_decision_kind",
     "message_source_kind",
-    "wait_state",
 ]

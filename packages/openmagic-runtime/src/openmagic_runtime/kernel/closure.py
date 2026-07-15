@@ -6,6 +6,7 @@ from typing import Any
 from uuid import UUID
 
 from psycopg import Connection
+from psycopg.rows import dict_row
 
 from openmagic_runtime._canonical import canonical_digest
 from openmagic_runtime.kernel._control_support import (
@@ -13,7 +14,7 @@ from openmagic_runtime.kernel._control_support import (
     lock_source_identity,
     require_open_instance,
 )
-from openmagic_runtime.kernel._trace import append_trace
+from openmagic_runtime.kernel._trace import append_trace, read_trace_replay
 from openmagic_runtime.kernel.transitions import CloseInstance, CloseInstanceReceipt
 
 
@@ -42,33 +43,34 @@ def close_instance(
         source_kind="instance_closure",
         source_id=request.command_id,
     )
-    replay = connection.execute(
-        "SELECT input_digest, receipt FROM openmagic_runtime.trace_events "
-        "WHERE source_kind = 'instance_closure' AND source_id = %s",
-        (request.command_id,),
-    ).fetchone()
+    replay = read_trace_replay(
+        connection,
+        source_kind="instance_closure",
+        source_id=request.command_id,
+    )
     if replay is not None:
-        if str(replay[0]) != digest:
+        if replay.input_digest != digest:
             raise ValueError("Instance closure identity was reused with conflicting input")
-        return _receipt(dict(replay[1]))
+        return _receipt(replay.receipt)
     require_open_instance(instance_state)
-    cancelled_attempts = connection.execute(
-        "UPDATE openmagic_runtime.attempts SET state = 'cancelled', "
-        "completed_at = clock_timestamp() WHERE instance_id = %s AND state = 'leased' "
-        "RETURNING attempt_id",
-        (request.instance_id,),
-    ).fetchall()
-    cancelled_steps = connection.execute(
-        "UPDATE openmagic_runtime.steps SET state = 'cancelled', "
-        "terminal_at = clock_timestamp(), claimable_at = NULL, deferred_attempt_id = NULL "
-        "WHERE instance_id = %s AND state = 'pending' RETURNING step_id",
-        (request.instance_id,),
-    ).fetchall()
-    cancelled_waits = connection.execute(
-        "UPDATE openmagic_runtime.waits SET state = 'cancelled' "
-        "WHERE instance_id = %s AND state = 'unsatisfied' RETURNING wait_id",
-        (request.instance_id,),
-    ).fetchall()
+    with connection.cursor(row_factory=dict_row) as cursor:
+        cancelled_attempts = cursor.execute(
+            "UPDATE openmagic_runtime.attempts SET state = 'cancelled', "
+            "completed_at = clock_timestamp() WHERE instance_id = %s AND state = 'leased' "
+            "RETURNING attempt_id",
+            (request.instance_id,),
+        ).fetchall()
+        cancelled_steps = cursor.execute(
+            "UPDATE openmagic_runtime.steps SET state = 'cancelled', "
+            "terminal_at = clock_timestamp(), claimable_at = NULL, deferred_attempt_id = NULL "
+            "WHERE instance_id = %s AND state = 'pending' RETURNING step_id",
+            (request.instance_id,),
+        ).fetchall()
+        cancelled_waits = cursor.execute(
+            "UPDATE openmagic_runtime.waits SET state = 'cancelled' "
+            "WHERE instance_id = %s AND state = 'unsatisfied' RETURNING wait_id",
+            (request.instance_id,),
+        ).fetchall()
     connection.execute(
         "UPDATE openmagic_runtime.instances SET state = 'closed', "
         "closed_at = clock_timestamp() WHERE instance_id = %s",
@@ -83,9 +85,9 @@ def close_instance(
         input_value=transition_input,
         receipt=lambda identity: {
             "instance_id": str(request.instance_id),
-            "cancelled_step_ids": [str(row[0]) for row in cancelled_steps],
-            "cancelled_attempt_ids": [str(row[0]) for row in cancelled_attempts],
-            "cancelled_wait_ids": [str(row[0]) for row in cancelled_waits],
+            "cancelled_step_ids": [str(record["step_id"]) for record in cancelled_steps],
+            "cancelled_attempt_ids": [str(record["attempt_id"]) for record in cancelled_attempts],
+            "cancelled_wait_ids": [str(record["wait_id"]) for record in cancelled_waits],
             "trace_event_id": str(identity.trace_event_id),
             "trace_sequence": identity.sequence,
         },

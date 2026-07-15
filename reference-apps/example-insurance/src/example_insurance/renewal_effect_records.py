@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
-from uuid import UUID
+from typing import Any, Literal
+from uuid import UUID, uuid4
 
 from openmagic_runtime.commands import StateConflict
+from openmagic_runtime.kernel.attempt_guard import CurrentAttemptGuard
+from openmagic_runtime.kernel.control import KernelControl
+from openmagic_runtime.kernel.records import read_attempt, read_step
+from openmagic_runtime.kernel.transitions import GuardCurrentAttempt
 from openmagic_runtime.kernel.work import ClaimedAttempt
 from psycopg import Connection
+from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 
 from example_insurance.renewal_effect_policy import (
     DispatchClaim,
@@ -18,10 +25,25 @@ from example_insurance.renewal_effect_policy import (
     EffectObservation,
     effect_certainty,
 )
-from example_insurance.renewal_effects import RenewalEmailEffect
+from example_insurance.renewal_effect_types import RenewalEmailEffect
 from example_insurance.renewal_grant_records import mark_grant_consumed
 from example_insurance.renewal_lifecycle_policy import workflow_lifecycle
-from example_insurance.renewal_records import EffectEvidenceSource, record_effect_evidence
+
+EffectEvidenceSource = Literal[
+    "provider_response",
+    "provider_lookup",
+    "worker_loss_after_fence",
+]
+
+
+def effect_evidence_source(value: object) -> EffectEvidenceSource:
+    if value == "provider_response":
+        return "provider_response"
+    if value == "provider_lookup":
+        return "provider_lookup"
+    if value == "worker_loss_after_fence":
+        return "worker_loss_after_fence"
+    raise RuntimeError("External Effect evidence has an invalid source")
 
 
 @dataclass(frozen=True)
@@ -30,6 +52,74 @@ class ReconciliationTarget:
     effect_step_id: UUID
     basis_attempt_id: UUID
     effect_attempt_number: int
+
+
+@dataclass(frozen=True)
+class LockedDispatchAuthority:
+    guard: CurrentAttemptGuard
+    workflow: DurableWorkflowAuthority
+    grant: DurableApprovalGrant
+    durable_claim: DispatchClaim
+    effect: DurableExternalEffect | None
+
+
+def _workflow_authority(record: Mapping[str, Any]) -> DurableWorkflowAuthority:
+    return DurableWorkflowAuthority(
+        workflow_id=UUID(str(record["workflow_id"])),
+        instance_id=UUID(str(record["instance_id"])),
+        lifecycle=workflow_lifecycle(record["lifecycle"]),
+        authority_revoked=bool(record["authority_revoked"]),
+    )
+
+
+def _approval_grant(record: Mapping[str, Any]) -> DurableApprovalGrant:
+    return DurableApprovalGrant(
+        approval_grant_id=UUID(str(record["approval_grant_id"])),
+        workflow_id=UUID(str(record["workflow_id"])),
+        step_id=UUID(str(record["step_id"])),
+        effect_fingerprint=str(record["effect_fingerprint"]),
+        invalidated=bool(record["invalidated"]),
+        consumed=bool(record["consumed"]),
+    )
+
+
+def _external_effect(record: Mapping[str, Any]) -> DurableExternalEffect:
+    return DurableExternalEffect(
+        logical_effect_id=UUID(str(record["logical_effect_id"])),
+        workflow_id=UUID(str(record["workflow_id"])),
+        step_id=UUID(str(record["step_id"])),
+        approval_grant_id=UUID(str(record["approval_grant_id"])),
+        effect_fingerprint=str(record["effect_fingerprint"]),
+        provider_idempotency_key=str(record["provider_idempotency_key"]),
+        dispatch_attempt_id=UUID(str(record["dispatch_attempt_id"])),
+        dispatch_attempt_number=int(record["dispatch_attempt_number"]),
+        certainty=effect_certainty(record["certainty"]),
+    )
+
+
+def _record_effect_evidence(
+    connection: Connection[tuple[Any, ...]],
+    *,
+    logical_effect_id: UUID,
+    attempt_id: UUID,
+    classification: EffectObservation,
+    source: EffectEvidenceSource,
+    provider_request_id: str | None,
+) -> None:
+    connection.execute(
+        "INSERT INTO example_insurance.external_effect_evidence "
+        "(evidence_id, logical_effect_id, attempt_id, classification, source, "
+        "provider_request_id, details) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+        (
+            uuid4(),
+            logical_effect_id,
+            attempt_id,
+            classification,
+            source,
+            provider_request_id,
+            Jsonb({"classification": classification, "source": source}),
+        ),
+    )
 
 
 def _claim_from_input(
@@ -76,91 +166,93 @@ def requested_dispatch_claim(attempt: ClaimedAttempt, worker_id: str) -> Dispatc
     )
 
 
-def lock_workflow_authority(
+def _lock_workflow_authority(
     connection: Connection[tuple[Any, ...]], instance_id: UUID
 ) -> DurableWorkflowAuthority:
-    row = connection.execute(
-        "SELECT workflow_id, instance_id, lifecycle, authority_revoked_at IS NOT NULL "
-        "FROM example_insurance.renewal_workflows WHERE instance_id = %s FOR UPDATE",
-        (instance_id,),
-    ).fetchone()
-    if row is None:
+    with connection.cursor(row_factory=dict_row) as cursor:
+        record = cursor.execute(
+            "SELECT workflow_id, instance_id, lifecycle, "
+            "authority_revoked_at IS NOT NULL AS authority_revoked "
+            "FROM example_insurance.renewal_workflows "
+            "WHERE instance_id = %s FOR UPDATE",
+            (instance_id,),
+        ).fetchone()
+    if record is None:
         raise StateConflict("Renewal Workflow is unavailable")
-    return DurableWorkflowAuthority(
-        workflow_id=UUID(str(row[0])),
-        instance_id=UUID(str(row[1])),
-        lifecycle=workflow_lifecycle(row[2]),
-        authority_revoked=bool(row[3]),
-    )
+    return _workflow_authority(record)
 
 
-def load_durable_dispatch_claim(
+def _load_durable_dispatch_claim(
     connection: Connection[tuple[Any, ...]], attempt_id: UUID
 ) -> DispatchClaim:
-    row = connection.execute(
-        "SELECT a.instance_id, a.step_id, a.attempt_number, a.worker_id, "
-        "s.template_key, s.input FROM openmagic_runtime.attempts a "
-        "JOIN openmagic_runtime.steps s ON s.step_id = a.step_id "
-        "WHERE a.attempt_id = %s",
-        (attempt_id,),
-    ).fetchone()
-    if row is None:
+    attempt = read_attempt(connection, attempt_id)
+    if attempt is None:
         raise StateConflict("Durable dispatch Attempt is unavailable")
     return _claim_from_input(
-        instance_id=UUID(str(row[0])),
-        step_id=UUID(str(row[1])),
+        instance_id=attempt.instance_id,
+        step_id=attempt.step_id,
         attempt_id=attempt_id,
-        attempt_number=int(row[2]),
-        worker_id=str(row[3]),
-        template_key=str(row[4]),
-        step_input=dict(row[5]),
+        attempt_number=attempt.attempt_number,
+        worker_id=attempt.worker_id,
+        template_key=attempt.template_key,
+        step_input=attempt.step_input,
     )
 
 
-def lock_approval_grant(
+def _lock_approval_grant(
     connection: Connection[tuple[Any, ...]], workflow_id: UUID, step_id: UUID
 ) -> DurableApprovalGrant:
-    row = connection.execute(
-        "SELECT approval_grant_id, workflow_id, step_id, effect_fingerprint, "
-        "invalidated_at IS NOT NULL, consumed_at IS NOT NULL "
-        "FROM example_insurance.approval_grants WHERE workflow_id = %s AND step_id = %s "
-        "FOR UPDATE",
-        (workflow_id, step_id),
-    ).fetchone()
-    if row is None:
+    with connection.cursor(row_factory=dict_row) as cursor:
+        record = cursor.execute(
+            "SELECT approval_grant_id, workflow_id, step_id, effect_fingerprint, "
+            "invalidated_at IS NOT NULL AS invalidated, "
+            "consumed_at IS NOT NULL AS consumed "
+            "FROM example_insurance.approval_grants "
+            "WHERE workflow_id = %s AND step_id = %s FOR UPDATE",
+            (workflow_id, step_id),
+        ).fetchone()
+    if record is None:
         raise StateConflict("Exact Approval Grant is unavailable")
-    return DurableApprovalGrant(
-        approval_grant_id=UUID(str(row[0])),
-        workflow_id=UUID(str(row[1])),
-        step_id=UUID(str(row[2])),
-        effect_fingerprint=str(row[3]),
-        invalidated=bool(row[4]),
-        consumed=bool(row[5]),
-    )
+    return _approval_grant(record)
 
 
 def lock_external_effect(
     connection: Connection[tuple[Any, ...]], step_id: UUID
 ) -> DurableExternalEffect | None:
-    row = connection.execute(
-        "SELECT logical_effect_id, workflow_id, step_id, approval_grant_id, "
-        "effect_fingerprint, provider_idempotency_key, dispatch_attempt_id, "
-        "dispatch_attempt_number, certainty "
-        "FROM example_insurance.external_effects WHERE step_id = %s FOR UPDATE",
-        (step_id,),
-    ).fetchone()
-    if row is None:
+    with connection.cursor(row_factory=dict_row) as cursor:
+        record = cursor.execute(
+            "SELECT logical_effect_id, workflow_id, step_id, approval_grant_id, "
+            "effect_fingerprint, provider_idempotency_key, dispatch_attempt_id, "
+            "dispatch_attempt_number, certainty "
+            "FROM example_insurance.external_effects WHERE step_id = %s FOR UPDATE",
+            (step_id,),
+        ).fetchone()
+    if record is None:
         return None
-    return DurableExternalEffect(
-        logical_effect_id=UUID(str(row[0])),
-        workflow_id=UUID(str(row[1])),
-        step_id=UUID(str(row[2])),
-        approval_grant_id=UUID(str(row[3])),
-        effect_fingerprint=str(row[4]),
-        provider_idempotency_key=str(row[5]),
-        dispatch_attempt_id=UUID(str(row[6])),
-        dispatch_attempt_number=int(row[7]),
-        certainty=effect_certainty(row[8]),
+    return _external_effect(record)
+
+
+def lock_dispatch_authority(
+    connection: Connection[tuple[Any, ...]], claim: DispatchClaim
+) -> LockedDispatchAuthority:
+    guard = KernelControl(connection).guard_current_attempt(
+        GuardCurrentAttempt(
+            instance_id=claim.instance_id,
+            step_id=claim.step_id,
+            attempt_id=claim.attempt_id,
+            attempt_number=claim.attempt_number,
+        )
+    )
+    workflow = _lock_workflow_authority(connection, claim.instance_id)
+    grant = _lock_approval_grant(connection, workflow.workflow_id, claim.step_id)
+    durable_claim = _load_durable_dispatch_claim(connection, claim.attempt_id)
+    effect = lock_external_effect(connection, claim.step_id)
+    return LockedDispatchAuthority(
+        guard=guard,
+        workflow=workflow,
+        grant=grant,
+        durable_claim=durable_claim,
+        effect=effect,
     )
 
 
@@ -206,26 +298,26 @@ def commit_dispatch_fence(
 def lock_reconciliation_target(
     connection: Connection[tuple[Any, ...]], step_id: UUID
 ) -> ReconciliationTarget:
-    row = connection.execute(
-        "SELECT (s.input->>'logical_effect_id')::uuid, "
-        "(s.input->>'effect_step_id')::uuid, (s.input->>'basis_attempt_id')::uuid, "
-        "a.attempt_number FROM openmagic_runtime.steps s "
-        "JOIN openmagic_runtime.attempts a ON a.attempt_id = "
-        "(s.input->>'basis_attempt_id')::uuid "
-        "WHERE s.step_id = %s",
-        (step_id,),
-    ).fetchone()
-    if row is None:
+    step = read_step(connection, step_id)
+    if step is None:
         raise StateConflict("Reconciliation Step input is unavailable")
-    effect_step_id = UUID(str(row[1]))
+    try:
+        logical_effect_id = UUID(str(step.input["logical_effect_id"]))
+        effect_step_id = UUID(str(step.input["effect_step_id"]))
+        basis_attempt_id = UUID(str(step.input["basis_attempt_id"]))
+    except (KeyError, ValueError) as error:
+        raise StateConflict("Reconciliation Step input is unavailable") from error
+    basis_attempt = read_attempt(connection, basis_attempt_id)
+    if basis_attempt is None:
+        raise StateConflict("Reconciliation basis Attempt is unavailable")
     effect = lock_external_effect(connection, effect_step_id)
-    if effect is None or effect.logical_effect_id != UUID(str(row[0])):
+    if effect is None or effect.logical_effect_id != logical_effect_id:
         raise StateConflict("Reconciliation target External Effect is unavailable")
     return ReconciliationTarget(
         effect=effect,
         effect_step_id=effect_step_id,
-        basis_attempt_id=UUID(str(row[2])),
-        effect_attempt_number=int(row[3]),
+        basis_attempt_id=basis_attempt_id,
+        effect_attempt_number=basis_attempt.attempt_number,
     )
 
 
@@ -238,15 +330,16 @@ def record_effect_observation(
     source: EffectEvidenceSource,
     provider_request_id: str | None,
 ) -> UUID:
-    workflow = connection.execute(
-        "UPDATE example_insurance.external_effects SET certainty = %s, "
-        "updated_at = clock_timestamp() WHERE logical_effect_id = %s "
-        "RETURNING workflow_id",
-        (classification, logical_effect_id),
-    ).fetchone()
-    if workflow is None:
+    with connection.cursor(row_factory=dict_row) as cursor:
+        record = cursor.execute(
+            "UPDATE example_insurance.external_effects SET certainty = %s, "
+            "updated_at = clock_timestamp() WHERE logical_effect_id = %s "
+            "RETURNING workflow_id",
+            (classification, logical_effect_id),
+        ).fetchone()
+    if record is None:
         raise StateConflict("External Effect disappeared while recording evidence")
-    record_effect_evidence(
+    _record_effect_evidence(
         connection,
         logical_effect_id=logical_effect_id,
         attempt_id=attempt_id,
@@ -254,17 +347,18 @@ def record_effect_observation(
         source=source,
         provider_request_id=provider_request_id,
     )
-    return UUID(str(workflow[0]))
+    return UUID(str(record["workflow_id"]))
 
 
 __all__ = [
+    "EffectEvidenceSource",
+    "LockedDispatchAuthority",
     "ReconciliationTarget",
     "commit_dispatch_fence",
-    "load_durable_dispatch_claim",
-    "lock_approval_grant",
+    "effect_evidence_source",
+    "lock_dispatch_authority",
     "lock_external_effect",
     "lock_reconciliation_target",
-    "lock_workflow_authority",
     "record_effect_observation",
     "requested_dispatch_claim",
 ]

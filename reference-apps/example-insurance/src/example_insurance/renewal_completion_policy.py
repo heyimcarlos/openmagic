@@ -3,28 +3,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+
+from openmagic_runtime.kernel.records import StepState
 
 from example_insurance.renewal_effect_policy import EffectCertainty
-
-CompletionStepState = Literal["pending", "succeeded", "failed", "cancelled"]
-
-
-def completion_step_state(value: object) -> CompletionStepState:
-    if value == "pending":
-        return "pending"
-    if value == "succeeded":
-        return "succeeded"
-    if value == "failed":
-        return "failed"
-    if value == "cancelled":
-        return "cancelled"
-    raise RuntimeError("Workflow Step has an invalid completion state")
 
 
 @dataclass(frozen=True)
 class CompletionStepFact:
-    state: CompletionStepState
+    state: StepState
     has_accepted_output: bool
 
 
@@ -54,7 +41,5 @@ class RenewalCompletionPolicy:
 __all__ = [
     "CompletionEffectFact",
     "CompletionStepFact",
-    "CompletionStepState",
     "RenewalCompletionPolicy",
-    "completion_step_state",
 ]

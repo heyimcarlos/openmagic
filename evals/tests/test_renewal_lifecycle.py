@@ -9,9 +9,7 @@ from uuid import uuid4
 
 import pytest
 from example_insurance.migrations import apply_migrations
-from example_insurance.renewal_effects import (
-    ExternalEffectPermit,
-)
+from example_insurance.renewal_effect_types import ExternalEffectPermit
 from example_insurance.renewals import (
     ApproveRenewalDraft,
     ApproveRenewalDraftInput,

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
 from openmagic_runtime.commands import StateConflict
 from psycopg import Connection
+from psycopg.rows import dict_row
 
 from example_insurance.renewal_grant_records import invalidate_unconsumed_grants
 from example_insurance.renewal_lifecycle_policy import (
@@ -15,6 +17,7 @@ from example_insurance.renewal_lifecycle_policy import (
     workflow_lifecycle,
 )
 from example_insurance.renewal_workflow_records import (
+    lock_instance_for_workflow,
     mark_workflow_authority_revoked,
     mark_workflow_cancelled,
 )
@@ -26,6 +29,14 @@ class RevocationAuthority:
     authorized_actor_id: str
     already_revoked: bool
 
+    @classmethod
+    def decode(cls, record: Mapping[str, Any]) -> RevocationAuthority:
+        return cls(
+            workflow_id=UUID(str(record["workflow_id"])),
+            authorized_actor_id=str(record["authorized_actor_id"]),
+            already_revoked=bool(record["already_revoked"]),
+        )
+
 
 @dataclass(frozen=True)
 class LifecycleAuthority:
@@ -36,46 +47,62 @@ class LifecycleAuthority:
     authorized_actor_id: str
     dispatch_boundary_crossed: bool
 
+    @classmethod
+    def decode(cls, record: Mapping[str, Any]) -> LifecycleAuthority:
+        return cls(
+            workflow_id=UUID(str(record["workflow_id"])),
+            instance_id=UUID(str(record["instance_id"])),
+            lifecycle=workflow_lifecycle(record["lifecycle"]),
+            authorized_actor_kind=str(record["authorized_actor_kind"]),
+            authorized_actor_id=str(record["authorized_actor_id"]),
+            dispatch_boundary_crossed=bool(record["dispatch_boundary_crossed"]),
+        )
+
 
 def lock_revocation_authority(
     connection: Connection[tuple[Any, ...]], workflow_id: UUID
 ) -> RevocationAuthority:
-    row = connection.execute(
-        "SELECT authorized_actor_id, authority_revoked_at IS NOT NULL "
-        "FROM example_insurance.renewal_workflows WHERE workflow_id = %s FOR UPDATE",
-        (workflow_id,),
-    ).fetchone()
-    if row is None:
+    with connection.cursor(row_factory=dict_row) as cursor:
+        record = cursor.execute(
+            "SELECT workflow_id, authorized_actor_id, "
+            "authority_revoked_at IS NOT NULL AS already_revoked "
+            "FROM example_insurance.renewal_workflows "
+            "WHERE workflow_id = %s FOR UPDATE",
+            (workflow_id,),
+        ).fetchone()
+    if record is None:
         raise StateConflict("Renewal Workflow does not exist")
-    return RevocationAuthority(workflow_id, str(row[0]), bool(row[1]))
+    return RevocationAuthority.decode(record)
 
 
 def lock_lifecycle_authority(
     connection: Connection[tuple[Any, ...]], workflow_id: UUID
 ) -> LifecycleAuthority:
-    row = connection.execute(
-        "SELECT r.instance_id, r.lifecycle, r.authorized_actor_kind, "
-        "r.authorized_actor_id "
-        "FROM example_insurance.renewal_workflows r "
-        "WHERE r.workflow_id = %s FOR UPDATE OF r",
-        (workflow_id,),
-    ).fetchone()
-    if row is None:
+    identity = lock_instance_for_workflow(connection, workflow_id)
+    if identity is None:
         raise StateConflict("Renewal Workflow does not exist")
-    crossed = connection.execute(
-        "SELECT EXISTS (SELECT 1 FROM example_insurance.external_effects WHERE workflow_id = %s)",
-        (workflow_id,),
-    ).fetchone()
-    if crossed is None:
+    with connection.cursor(row_factory=dict_row) as cursor:
+        record = cursor.execute(
+            "SELECT r.workflow_id, r.instance_id, r.lifecycle, r.authorized_actor_kind, "
+            "r.authorized_actor_id "
+            "FROM example_insurance.renewal_workflows r "
+            "WHERE r.workflow_id = %s FOR UPDATE OF r",
+            (workflow_id,),
+        ).fetchone()
+    if record is None:
+        raise StateConflict("Renewal Workflow does not exist")
+    with connection.cursor(row_factory=dict_row) as cursor:
+        boundary = cursor.execute(
+            "SELECT EXISTS (SELECT 1 FROM example_insurance.external_effects "
+            "WHERE workflow_id = %s) AS dispatch_boundary_crossed",
+            (workflow_id,),
+        ).fetchone()
+    if boundary is None:
         raise RuntimeError("Dispatch boundary observation is unavailable")
-    return LifecycleAuthority(
-        workflow_id=workflow_id,
-        instance_id=UUID(str(row[0])),
-        lifecycle=workflow_lifecycle(row[1]),
-        authorized_actor_kind=str(row[2]),
-        authorized_actor_id=str(row[3]),
-        dispatch_boundary_crossed=bool(crossed[0]),
-    )
+    authority = LifecycleAuthority.decode({**record, **boundary})
+    if authority.instance_id != identity.instance_id:
+        raise StateConflict("Renewal Workflow identity changed while locking")
+    return authority
 
 
 def revoke_authority(connection: Connection[tuple[Any, ...]], workflow_id: UUID) -> None:
