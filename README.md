@@ -1,119 +1,45 @@
-# OpenMagic 🌴
+# OpenMagic
 
-OpenMagic is a simplified, open-source take on [Interaction Company’s](https://interaction.co/about) [Poke](https://poke.com/) assistant, built to show how a multi-agent orchestration stack can feel genuinely useful. It keeps the handful of things Poke is great at (email triage, reminders, and persistent agents) while staying easy to spin up locally.
+OpenMagic is being rebuilt as a reusable durable runtime plus an independently
+owned Example Insurance reference application. Issue 67 establishes the clean
+runtime foundation. Later tracer bullets add Workflow behavior.
 
-- Multi-agent FastAPI backend that mirrors Poke's interaction/execution split, powered by [OpenRouter](https://openrouter.ai/).
-- Gmail tooling via [Composio](https://composio.dev/) for drafting/replying/forwarding without leaving chat.
-- Trigger scheduler and background watchers for reminders and "important email" alerts.
-- Next.js web UI that proxies through the shared `.env`, with PostgreSQL and an
-  explicit local identity seed for the durable Workflow path.
+## Workspace
 
-## Requirements
-- Python 3.11+
-- [uv](https://docs.astral.sh/uv/)
-- PostgreSQL 17
-- Node.js 18+
-- npm 9+
+```text
+packages/openmagic-runtime/          reusable runtime distribution
+reference-apps/example-insurance/   reference Application Package
+apps/api/                            deployment composition distribution
+apps/playground/                     demonstration application
+evals/                               private evidence distribution
+```
 
-## Quickstart
-1. **Clone and enter the repo.**
-   ```bash
-   git clone https://github.com/heyimcarlos/openmagic
-   cd openmagic
-   ```
-2. **Create a shared env file.** Copy the template and open it in your editor:
-   ```bash
-   cp .env.example .env
-   ```
-3. **Get your API keys and add them to `.env`:**
-   
-   **OpenRouter (Required)**
-   - Create an account at [openrouter.ai](https://openrouter.ai/)
-   - Generate an API key
-   - Replace `your_openrouter_api_key_here` with your actual key in `.env`
-   
-   **Composio (Required for Gmail)**
-   - Sign in at [composio.dev](https://composio.dev/)
-   - Create an API key
-   - Set up Gmail integration and get your auth config ID
-   - Replace `your_composio_api_key_here` and `your_gmail_auth_config_id_here` in `.env`
+Production dependencies flow in one direction:
 
-   **Workflow verification demo**
-   - Replace the Workflow cursor and verification secrets in `.env`
-   - Set `OPENMAGIC_DEMO_POLICYHOLDER_EMAIL` to an inbox you can read
-   - Set `OPENMAGIC_DEMO_BROKER_EMAIL` to the connected Broker mailbox
-   - Set `OPENMAGIC_WORKFLOW_COMPOSIO_USER_ID` to the connected Composio user that sends the code
-   - The browser SMS surface is a single-user localhost simulator, not an authenticated carrier channel. Do not expose it as a production identity boundary.
-4. **Start PostgreSQL.** For a disposable local database:
-   ```bash
-   docker run --name openmagic-postgres \
-     -e POSTGRES_USER=openmagic \
-     -e POSTGRES_PASSWORD=openmagic \
-     -e POSTGRES_DB=openmagic \
-     -p 5432:5432 \
-     -d postgres:17-alpine
-   ```
-5. **Install backend dependencies and apply migrations:**
-   ```bash
-   uv sync --locked --group dev
-   uv run alembic upgrade head
-   ```
-6. **Seed the local V0 Workflow and trusted demo identity:**
-   ```bash
-   uv run python -m server.scripts.seed_v0_demo
-   ```
-   This explicit local seed creates the Broker, Organization Membership,
-   Policyholder, active renewal Workflow, and verified identifiers referenced
-   by `.env.example`. The Policyholder can request private Workflow information
-   from the SMS simulator, receive a six-digit code by email, and reply with the
-   code to resume the exact protected operation. Migrations never infer current
-   authority from historical Workflow Events. A production environment must
-   provision these records from its trusted identity source instead of using
-   the demo seed.
-7. **Install frontend dependencies:**
-   ```bash
-   npm install --prefix web
-   ```
-8. **Start the FastAPI server:**
-   ```bash
-   uv run python -m server.server --reload
-   ```
-9. **Start the Next.js app (new terminal):**
-   ```bash
-   npm run dev --prefix web
-   ```
-10. **Connect Gmail for email workflows.** With both services running, open [http://localhost:3000](http://localhost:3000), head to *Settings → Gmail*, and complete the Composio OAuth flow. This step is required for email drafting, replies, and the important-email monitor.
+```text
+API -> Example Insurance -> OpenMagic Runtime
+API ---------------------> OpenMagic Runtime
+```
 
-The web app proxies API calls to the Python server using the values in `.env`, so keeping both processes running is required for end-to-end flows. Both development servers bind to localhost by default because the SMS identity surface is intentionally unauthenticated demo infrastructure.
+The eval distribution is never a production dependency.
 
-## Live Workflow system map
+## Development
 
-Set `OPENMAGIC_ENABLE_BACKPRESSURE_DEMO=1` only in the isolated local demo environment, then open [http://localhost:3000/system](http://localhost:3000/system) after starting both services. The system map reads real PostgreSQL state and shows the typed Control Plane command, durable Job backlog, worker claim, fresh Workflow Job Run and Execution Agent identities, Notification delivery, and fresh Interaction Agent turn.
-
-- The **1**, **5**, and **25** controls create mixed renewal, claim intake, and policy review Workflows through the atomic Control Plane interface.
-- **Add Worker** adds a real, independently identified async Worker, up to eight. Remove any extra Worker directly from its circle. These Workers claim and execute concurrently inside the local FastAPI process, not as a distributed production fleet.
-- Each Worker claims at most one eligible Job per tick. The visible queue-to-capacity ratio and p50 timings show how added claim capacity changes backpressure.
-- Every LLM Job receives a fresh Execution Agent. Renewal Send Jobs remain blocked on exact approval, while claim and policy results notify a fresh Interaction Agent without approval.
-- Each delivered approval Notification shows its Notification Worker, fresh Interaction Agent, and command boundary. Open **Approval ready** to approve the exact email or edit it. An edit creates the next immutable Job revision through `revise_and_approve_email`, the same deterministic endpoint as Chat.
-- The observed-state timeline retains roughly three minutes of 400 ms database captures. Pause, scrub backward or forward, then return to the still-running live system without mutating durable state.
-
-## Project Layout
-- `server/`: FastAPI application, agent runtimes, and durable Workflow services
-- `web/`: Next.js application
-- `server/migrations/`: PostgreSQL schema migrations
-
-## Backend checks
-
-The Workflow integration suite requires PostgreSQL. If
-`OPENMAGIC_TEST_DATABASE_URL` is absent, Testcontainers starts an isolated
-PostgreSQL 17 container.
+Requires Python 3.11+, uv, and Docker.
 
 ```bash
-uv run ruff format --check server/workflows server/agents/interaction_agent server/tests server/migrations
-uv run ruff check server/workflows server/agents/interaction_agent server/tests server/migrations
-uv run ty check server/workflows server/agents/interaction_agent
+uv sync --all-packages --locked --group dev
+uv run ruff format --check .
+uv run ruff check .
+uv run ty check packages/openmagic-runtime/src reference-apps/example-insurance/src apps/api/src evals/src
 uv run pytest
 ```
 
-## License
-MIT, see [LICENSE](LICENSE).
+Migrate an explicitly configured PostgreSQL database:
+
+```bash
+uv run example-insurance-migrate --database-url postgresql://user:password@host/database
+```
+
+No production process reads `.env`. API and Worker entry points require their
+database URL, host, and port as explicit arguments.

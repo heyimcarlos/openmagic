@@ -1,0 +1,145 @@
+from __future__ import annotations
+
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
+from uuid import uuid4
+
+import psycopg
+import pytest
+from example_insurance.migrations import apply_migrations
+from example_insurance.reset import (
+    ResetPreflightBlocked,
+    assess_reset,
+    reset_synthetic_deployment,
+)
+from openmagic_evals.harness._postgres import postgres_container
+
+
+@pytest.mark.integration
+def test_cold_migrations_create_independently_owned_schemas_without_reverse_foreign_keys() -> None:
+    with postgres_container(database_name=f"openmagic_test_{uuid4().hex}") as postgres:
+        database_url = postgres.get_connection_url(driver=None)
+        first = apply_migrations(database_url)
+        second = apply_migrations(database_url)
+
+        assert [(bundle.schema, bundle.versions) for bundle in first] == [
+            ("openmagic_runtime", ("0001_runtime_baseline",)),
+            ("example_insurance", ("0001_example_insurance_baseline",)),
+        ]
+        assert all(not bundle.versions for bundle in second)
+
+        with psycopg.connect(database_url) as connection:
+            histories = connection.execute(
+                "SELECT 'openmagic_runtime', version FROM openmagic_runtime.migration_history "
+                "UNION ALL "
+                "SELECT 'example_insurance', version FROM example_insurance.migration_history "
+                "ORDER BY 1"
+            ).fetchall()
+            reverse_foreign_keys = connection.execute(
+                "SELECT tc.constraint_name FROM information_schema.referential_constraints AS rc "
+                "JOIN information_schema.table_constraints AS tc "
+                "ON tc.constraint_catalog = rc.constraint_catalog "
+                "AND tc.constraint_schema = rc.constraint_schema "
+                "AND tc.constraint_name = rc.constraint_name "
+                "WHERE tc.constraint_schema = 'openmagic_runtime'"
+            ).fetchall()
+
+        assert histories == [
+            ("example_insurance", "0001_example_insurance_baseline"),
+            ("openmagic_runtime", "0001_runtime_baseline"),
+        ]
+        assert reverse_foreign_keys == []
+
+
+@pytest.mark.integration
+def test_reset_preflight_rejects_unknown_data_and_rebuilds_accepted_synthetic_data() -> None:
+    demo_workflow_id = uuid4()
+    demo_party_id = uuid4()
+    unexpected_workflow_id = uuid4()
+    with postgres_container(database_name=f"openmagic_test_{uuid4().hex}") as postgres:
+        database_url = postgres.get_connection_url(driver=None)
+        with psycopg.connect(database_url) as connection:
+            connection.execute("CREATE TABLE public.workflows (id uuid PRIMARY KEY)")
+            connection.execute(
+                "CREATE TABLE public.interaction_causes "
+                "(id text PRIMARY KEY, actor_party_id uuid NOT NULL)"
+            )
+            connection.execute(
+                "CREATE TABLE public.interaction_activity_receipts "
+                "(id uuid PRIMARY KEY, cause_id text NOT NULL, workflow_id uuid)"
+            )
+            connection.execute("CREATE TABLE public.customer_records (payload text NOT NULL)")
+            connection.execute(
+                "INSERT INTO public.workflows (id) VALUES (%s), (%s)",
+                (demo_workflow_id, unexpected_workflow_id),
+            )
+            connection.execute(
+                "INSERT INTO public.interaction_causes (id, actor_party_id) VALUES (%s, %s)",
+                ("demo-cause", demo_party_id),
+            )
+            connection.execute(
+                "INSERT INTO public.interaction_activity_receipts "
+                "(id, cause_id, workflow_id) VALUES (%s, %s, %s)",
+                (uuid4(), "demo-cause", demo_workflow_id),
+            )
+            connection.execute("INSERT INTO public.customer_records (payload) VALUES ('real')")
+
+        blocked = assess_reset(
+            database_url,
+            demo_workflow_ids=(demo_workflow_id,),
+            demo_party_ids=(demo_party_id,),
+        )
+        assert not blocked.accepted
+        assert blocked.unexpected_records == (("customer_records", 1), ("workflows", 1))
+
+        with psycopg.connect(database_url) as connection:
+            connection.execute(
+                "DELETE FROM public.workflows WHERE id = %s",
+                (unexpected_workflow_id,),
+            )
+            connection.execute("DELETE FROM public.customer_records")
+
+        racing_connection = psycopg.connect(database_url)
+        try:
+            racing_connection.execute(
+                "INSERT INTO public.customer_records (payload) VALUES ('committed during reset')"
+            )
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                reset = executor.submit(
+                    reset_synthetic_deployment,
+                    database_url,
+                    demo_workflow_ids=(demo_workflow_id,),
+                    demo_party_ids=(demo_party_id,),
+                )
+                with pytest.raises(FutureTimeoutError):
+                    reset.result(timeout=0.2)
+                racing_connection.commit()
+                with pytest.raises(ResetPreflightBlocked):
+                    reset.result(timeout=5)
+        finally:
+            racing_connection.close()
+
+        with psycopg.connect(database_url) as connection:
+            connection.execute("DELETE FROM public.customer_records")
+
+        accepted = assess_reset(
+            database_url,
+            demo_workflow_ids=(demo_workflow_id,),
+            demo_party_ids=(demo_party_id,),
+        )
+        assert accepted.accepted
+        reset_synthetic_deployment(
+            database_url,
+            demo_workflow_ids=(demo_workflow_id,),
+            demo_party_ids=(demo_party_id,),
+        )
+
+        with psycopg.connect(database_url) as connection:
+            result = connection.execute(
+                "SELECT to_regclass('public.workflows'), "
+                "to_regnamespace('openmagic_runtime'), to_regnamespace('example_insurance')"
+            ).fetchone()
+        assert result is not None
+        assert result[0] is None
+        assert result[1] is not None
+        assert result[2] is not None

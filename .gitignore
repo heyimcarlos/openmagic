@@ -1,8 +1,8 @@
-# Node / Next.js
+# Node applications
 node_modules/
 .next/
-web/node_modules/
-web/.next/
+apps/playground/node_modules/
+apps/playground/.next/
 
 # Logs
 npm-debug.log*
@@ -31,19 +31,17 @@ __pycache__/
 *.db-wal
 
 # Data folder
-server/data/
 data/
-
-# Python virtual environment
-server/venv/
 
 # Build metadata
 *.tsbuildinfo
 /package-lock.json
+dist/
+build/
+*.egg-info/
 
 # Generated documentation / analysis artifacts
-server/repomix-output.txt
-server/plans/
+repomix-output.txt
 
 .reference
 .worktrees
