@@ -5,6 +5,7 @@ from openmagic_evals.harness.local_provider import LocalEmailProvider
 from openmagic_evals.harness.renewal_scenario import (
     approve_renewal,
     prepare_renewal_approval,
+    prepare_synthetic_renewal_start,
     renewal_context,
     wait_for_database_fault_window,
     wait_for_renewal_completion,
@@ -26,6 +27,7 @@ __all__ = [
     "approve_renewal",
     "issue_verification_challenge",
     "prepare_renewal_approval",
+    "prepare_synthetic_renewal_start",
     "renewal_context",
     "wait_for_database_fault_window",
     "wait_for_renewal_completion",

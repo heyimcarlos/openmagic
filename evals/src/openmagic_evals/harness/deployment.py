@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
@@ -50,11 +51,22 @@ class TestDeployment:
         readiness_timeout: float = 30.0,
         email_provider_url: str | None = None,
         verification_code_secret: str | None = None,
+        role_capacities: Mapping[ProcessRole, int] | None = None,
     ) -> None:
         self.working_directory = working_directory.resolve()
         self.readiness_timeout = readiness_timeout
         self.email_provider_url = email_provider_url
         self.verification_code_secret = verification_code_secret
+        capacities = role_capacities or {
+            "api": 1,
+            "workflow-worker": 1,
+            "delivery-worker": 1,
+        }
+        if set(capacities) != {"api", "workflow-worker", "delivery-worker"}:
+            raise ValueError("Process pools require explicit API, Workflow, and Delivery capacity")
+        if any(type(capacity) is not int or capacity <= 0 for capacity in capacities.values()):
+            raise ValueError("Initial process-pool capacities must be positive integers")
+        self.role_capacities = dict(capacities)
         self.database_url = ""
         self.database_name = ""
         self.processes: tuple[ManagedProcess, ...] = ()
@@ -85,9 +97,14 @@ class TestDeployment:
             self.database_url = container.get_connection_url(driver=None)
             self.database_name = database_name
             apply_migrations(self.database_url)
-            self._start_process("api", "openmagic-api")
-            self._start_process("workflow-worker", "openmagic-workflow-worker")
-            self._start_process("delivery-worker", "openmagic-delivery-worker")
+            scripts: dict[ProcessRole, str] = {
+                "api": "openmagic-api",
+                "workflow-worker": "openmagic-workflow-worker",
+                "delivery-worker": "openmagic-delivery-worker",
+            }
+            for role, script in scripts.items():
+                for _ in range(self.role_capacities[role]):
+                    self._start_process(role, script)
             self.processes = tuple(running.public for running in self._running)
             for process in self.processes:
                 self._wait_ready(process)
@@ -113,11 +130,11 @@ class TestDeployment:
         return public
 
     def restart_role(self, role: ProcessRole) -> ManagedProcess:
-        for running in tuple(self._running):
-            if running.public.role == role:
-                self._stop_running(running, force=False)
-                self._running.remove(running)
-        scripts = {
+        running = next((item for item in self._running if item.public.role == role), None)
+        if running is not None:
+            self._stop_running(running, force=False)
+            self._running.remove(running)
+        scripts: dict[ProcessRole, str] = {
             "api": "openmagic-api",
             "workflow-worker": "openmagic-workflow-worker",
             "delivery-worker": "openmagic-delivery-worker",
@@ -127,6 +144,39 @@ class TestDeployment:
         self.processes = tuple(item.public for item in self._running)
         self._wait_ready(public)
         return public
+
+    def drain_role(self, role: ProcessRole) -> tuple[ManagedProcess, ...]:
+        drained: list[ManagedProcess] = []
+        for running in tuple(self._running):
+            if running.public.role != role:
+                continue
+            drained.append(running.public)
+            self._stop_running(running, force=False)
+            self._running.remove(running)
+        self.processes = tuple(item.public for item in self._running)
+        return tuple(drained)
+
+    def scale_role(self, role: ProcessRole, *, capacity: int) -> tuple[ManagedProcess, ...]:
+        if type(capacity) is not int or capacity < 0:
+            raise ValueError("Process-pool capacity must be a non-negative integer")
+        current = [item for item in self._running if item.public.role == role]
+        if len(current) > capacity:
+            for running in reversed(current[capacity:]):
+                self._stop_running(running, force=False)
+                self._running.remove(running)
+        scripts: dict[ProcessRole, str] = {
+            "api": "openmagic-api",
+            "workflow-worker": "openmagic-workflow-worker",
+            "delivery-worker": "openmagic-delivery-worker",
+        }
+        started: list[ManagedProcess] = []
+        for _ in range(max(0, capacity - len(current))):
+            self._start_process(role, scripts[role])
+            started.append(self._running[-1].public)
+        self.processes = tuple(item.public for item in self._running)
+        for process in started:
+            self._wait_ready(process)
+        return tuple(started)
 
     @staticmethod
     def _stop_running(running: _RunningProcess, *, force: bool) -> None:
@@ -180,7 +230,7 @@ class TestDeployment:
             "PYTHONNOUSERSITE": "1",
             "PYTHONUNBUFFERED": "1",
         }
-        log_path = self.working_directory / f"{role}.log"
+        log_path = self.working_directory / f"{role}-{uuid4().hex}.log"
         log_handle = log_path.open("wb")
         process = subprocess.Popen(
             command,

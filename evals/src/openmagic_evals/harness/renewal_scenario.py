@@ -46,6 +46,43 @@ def renewal_context(
         yield database_url, application, ThreadStore(database_url=database_url)
 
 
+def prepare_synthetic_renewal_start(
+    application: ExampleInsurance,
+    threads: ThreadStore,
+    seed: int,
+) -> StartRenewalOutreach:
+    """Prepare one synthetic renewal start without submitting it."""
+    thread = threads.create(
+        CreateThread(uuid4(), "email", f"synthetic-renewal-{seed}@example.test")
+    )
+    command = StartRenewalOutreach(
+        command_id=uuid4(),
+        actor=Actor("party", str(uuid4())),
+        cause=Cause("message", str(uuid4())),
+        input=StartRenewalOutreachInput(
+            workflow_id=uuid4(),
+            thread_id=thread.thread_id,
+            policy_id=uuid4(),
+            policy_number=f"OM-SYNTHETIC-{seed}",
+            policyholder_name=f"Synthetic Party {seed}",
+            policyholder_email=f"synthetic-party-{seed}@example.test",
+            renewal_date="2028-12-31",
+            expiring_premium_cents=100_000 + seed,
+        ),
+    )
+    application.replace_renewal_facts(
+        RenewalFacts(
+            policy_id=command.input.policy_id,
+            policy_number=command.input.policy_number,
+            policyholder_name=command.input.policyholder_name,
+            policyholder_email=command.input.policyholder_email,
+            renewal_date=command.input.renewal_date,
+            expiring_premium_cents=command.input.expiring_premium_cents,
+        )
+    )
+    return command
+
+
 def prepare_renewal_approval(
     application: ExampleInsurance,
     threads: ThreadStore,
@@ -155,6 +192,7 @@ def wait_for_database_fault_window(database_url: str, query_prefix: str) -> None
 __all__ = [
     "approve_renewal",
     "prepare_renewal_approval",
+    "prepare_synthetic_renewal_start",
     "renewal_context",
     "wait_for_database_fault_window",
     "wait_for_renewal_completion",
