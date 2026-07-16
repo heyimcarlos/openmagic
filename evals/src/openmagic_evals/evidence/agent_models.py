@@ -232,6 +232,7 @@ class AgentCorpusPin(EvidenceModel):
     held_out_cases_digest: str
     held_out_sealed_at_commit: str
     tuning_locked_paths: tuple[str, ...] = Field(min_length=1)
+    tuning_locked_blobs: dict[str, str] = Field(min_length=1)
     execution_phases: tuple[Literal["development", "held_out"], ...]
     tuning_unchanged_after_seal: Literal[True]
 
@@ -250,6 +251,11 @@ class AgentCorpusPin(EvidenceModel):
             for path in self.tuning_locked_paths
         ):
             raise ValueError("tuning lock paths must be repository-relative")
+        if set(self.tuning_locked_blobs) != set(self.tuning_locked_paths) or any(
+            re.fullmatch(r"[0-9a-f]{40}", blob) is None
+            for blob in self.tuning_locked_blobs.values()
+        ):
+            raise ValueError("every tuning lock path requires one exact Git blob")
         return self
 
 

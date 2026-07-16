@@ -456,6 +456,7 @@ def load_sealed_held_out_cases(repository_root: Path) -> tuple[AgentCase, ...]:
         HELD_OUT_SEALED_AT_COMMIT,
         HELD_OUT_SEALED_BLOB,
         HELD_OUT_SEALED_PATH,
+        TUNING_LOCKED_BLOBS,
         TUNING_LOCKED_PATHS,
     )
 
@@ -485,11 +486,26 @@ def load_sealed_held_out_cases(repository_root: Path) -> tuple[AgentCase, ...]:
         check=False,
         capture_output=True,
     )
+    historical_blobs = {
+        path: subprocess.run(
+            ["git", "rev-parse", f"{HELD_OUT_SEALED_AT_COMMIT}:{path}"],
+            cwd=repository_root,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        for path in TUNING_LOCKED_PATHS
+    }
     if (
         ancestor.returncode != 0
         or sealed_blob.returncode != 0
         or sealed_blob.stdout.strip() != HELD_OUT_SEALED_BLOB
         or unchanged.returncode != 0
+        or tuple(TUNING_LOCKED_BLOBS) != TUNING_LOCKED_PATHS
+        or any(
+            result.returncode != 0 or result.stdout.strip() != TUNING_LOCKED_BLOBS[path]
+            for path, result in historical_blobs.items()
+        )
     ):
         raise RuntimeError("Agent implementation changed after the held-out corpus was sealed")
     return HELD_OUT_CASES
@@ -550,6 +566,7 @@ def run_local_agent_quality(
         HELD_OUT_CORPUS_DIGEST,
         HELD_OUT_CORPUS_VERSION,
         HELD_OUT_SEALED_AT_COMMIT,
+        TUNING_LOCKED_BLOBS,
         TUNING_LOCKED_PATHS,
     )
 
@@ -621,6 +638,7 @@ def run_local_agent_quality(
             held_out_cases_digest=HELD_OUT_CORPUS_DIGEST,
             held_out_sealed_at_commit=HELD_OUT_SEALED_AT_COMMIT,
             tuning_locked_paths=TUNING_LOCKED_PATHS,
+            tuning_locked_blobs=TUNING_LOCKED_BLOBS,
             execution_phases=("development", "held_out"),
             tuning_unchanged_after_seal=True,
         ),

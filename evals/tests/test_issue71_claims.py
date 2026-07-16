@@ -275,6 +275,7 @@ def test_claim_report_rejects_artifacts_from_different_builds(tmp_path: Path) ->
             held_out_cases_digest="sha256:" + "b" * 64,
             held_out_sealed_at_commit="1" * 40,
             tuning_locked_paths=("example/agent.py",),
+            tuning_locked_blobs={"example/agent.py": "2" * 40},
             execution_phases=("development", "held_out"),
             tuning_unchanged_after_seal=True,
         ),
