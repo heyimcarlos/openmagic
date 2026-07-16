@@ -36,7 +36,10 @@ from openmagic_evals.evidence.pins import (
     ExecutablePin,
     PostgresDeploymentPin,
 )
-from openmagic_evals.evidence.race_transitions import transition_race_definitions
+from openmagic_evals.evidence.race_transitions import (
+    _SIGNAL_RELEASE_DEFINITION,
+    transition_race_definitions,
+)
 from openmagic_evals.harness._postgres import POSTGRES_IMAGE
 
 _DISTRIBUTIONS = (
@@ -260,15 +263,7 @@ def reproducibility_pin(
     postgres_deployments: tuple[PostgresDeploymentPin, ...],
     postgres_provenance: Literal["required", "not_applicable"] = "required",
 ) -> ReproducibilityPin:
-    definitions = {
-        f"{definition.identity.key}:{definition.identity.version}": "sha256:"
-        + content_fingerprint(definition)
-        for definition in (
-            RENEWAL_DEFINITION,
-            VERIFICATION_DEFINITION,
-            *transition_race_definitions(),
-        )
-    }
+    definitions = _pinned_definition_digests()
     return ReproducibilityPin(
         build=build_pin(root),
         suite_version="issue-71.v1",
@@ -284,6 +279,21 @@ def reproducibility_pin(
         case_corpus_digest=case_corpus_digest,
         sandbox_digest=sha256(POSTGRES_IMAGE.encode()),
     )
+
+
+def _pinned_definition_digests() -> dict[str, str]:
+    """Return every exact Definition identity observable in release evidence."""
+
+    return {
+        f"{definition.identity.key}:{definition.identity.version}": "sha256:"
+        + content_fingerprint(definition)
+        for definition in (
+            RENEWAL_DEFINITION,
+            VERIFICATION_DEFINITION,
+            _SIGNAL_RELEASE_DEFINITION,
+            *transition_race_definitions(),
+        )
+    }
 
 
 __all__ = [

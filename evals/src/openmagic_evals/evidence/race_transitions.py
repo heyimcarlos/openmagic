@@ -177,8 +177,77 @@ def _signal_definition() -> WorkflowDefinition:
     )
 
 
+def _release_signal_definition() -> WorkflowDefinition:
+    subject = (FieldContract("subject_id", "uuid"),)
+    return WorkflowDefinition(
+        identity=DefinitionIdentity("eval.signal_race", 1),
+        instance_input_contract=subject,
+        step_templates=(
+            StepTemplate(
+                key="winner",
+                executor_key="eval.signal_winner.v1",
+                input_contract=subject,
+                observation_contract=(FieldContract("result", "string"),),
+                output_contract=(FieldContract("result", "string"),),
+                lease_seconds=1,
+                maximum_attempt_seconds=2,
+                retry_policy=RetryPolicy(()),
+            ),
+        ),
+        wait_templates=(
+            WaitTemplate(
+                key="decision",
+                signal_type="eval.signal.decision",
+                input_contract=subject,
+            ),
+        ),
+        routes=(
+            Route(
+                key="start",
+                activation="start",
+                activation_contract=subject,
+                outputs=(
+                    RouteOutput(
+                        slot="decision",
+                        kind="wait",
+                        template_key="decision",
+                        input_bindings=(FieldBinding("subject_id", "subject_id"),),
+                    ),
+                ),
+            ),
+            Route(
+                key="approve",
+                activation="signal",
+                activation_contract=subject,
+                outputs=(
+                    RouteOutput(
+                        slot="approved",
+                        kind="step",
+                        template_key="winner",
+                        input_bindings=(FieldBinding("subject_id", "subject_id"),),
+                    ),
+                ),
+            ),
+            Route(
+                key="revise",
+                activation="signal",
+                activation_contract=subject,
+                outputs=(
+                    RouteOutput(
+                        slot="revision",
+                        kind="step",
+                        template_key="winner",
+                        input_bindings=(FieldBinding("subject_id", "subject_id"),),
+                    ),
+                ),
+            ),
+        ),
+    )
+
+
 _TRANSITION_RACE_DEFINITION = _transition_definition()
 _SIGNAL_RACE_DEFINITION = _signal_definition()
+_SIGNAL_RELEASE_DEFINITION = _release_signal_definition()
 
 
 def transition_race_definitions() -> tuple[WorkflowDefinition, WorkflowDefinition]:

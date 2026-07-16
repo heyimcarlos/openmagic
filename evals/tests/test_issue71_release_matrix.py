@@ -28,6 +28,7 @@ from openmagic_evals.evidence.release import (
     _release_case,
     _release_corpus_digest,
 )
+from openmagic_evals.evidence.reproducibility import _pinned_definition_digests
 from openmagic_evals.harness import prepare_synthetic_renewal_start, renewal_context
 from openmagic_runtime.agents import (
     AgentAudience,
@@ -219,6 +220,10 @@ def test_release_matrix_covers_every_accepted_deterministic_family() -> None:
     )
     assert all(case.pytest_nodes for case in DETERMINISTIC_RELEASE_MATRIX)
     assert all(case.pass_condition for case in DETERMINISTIC_RELEASE_MATRIX)
+
+
+def test_release_reproducibility_pins_the_observed_signal_definition() -> None:
+    assert "eval.signal_race:1" in _pinned_definition_digests()
 
 
 def test_every_cardinality_one_race_declares_barrier_and_100_varied_jitter_seeds() -> None:
