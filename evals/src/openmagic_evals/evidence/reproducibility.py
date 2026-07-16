@@ -55,11 +55,11 @@ def _git(root: Path, *arguments: str) -> str:
 def _package_digest(package_root: Path) -> str:
     content = hashlib.sha256()
     for path in sorted(package_root.rglob("*")):
+        relative = path.relative_to(package_root.parent)
         if not path.is_file() or any(
-            part == "__pycache__" or part.startswith(".") for part in path.parts
+            part == "__pycache__" or part.startswith(".") for part in relative.parts
         ):
             continue
-        relative = path.relative_to(package_root.parent)
         content.update(relative.as_posix().encode())
         content.update(b"\0")
         content.update(path.read_bytes())
