@@ -22,11 +22,13 @@ def test_public_demonstrations_reproduce_from_reused_working_directory(tmp_path:
     first = run_renewal_demo(
         repository_root=repository,
         working_directory=working_directory,
+        execute_approved_local_effect=True,
         output=tmp_path / "renewal-first.json",
     )
     second = run_renewal_demo(
         repository_root=repository,
         working_directory=working_directory,
+        execute_approved_local_effect=True,
         output=tmp_path / "renewal-second.json",
     )
     verification = run_verification_demo(
@@ -67,6 +69,7 @@ def test_renewal_demo_cli_records_its_explicit_timeout(tmp_path: Path) -> None:
             str(repository),
             "--working-directory",
             str(tmp_path / "renewal-cli"),
+            "--execute-approved-local-effect",
             "--output",
             str(output),
             "--timeout-seconds",

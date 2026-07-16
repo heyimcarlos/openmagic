@@ -250,6 +250,7 @@ def _handle_renewal_demo(arguments: argparse.Namespace) -> None:
     artifact = run_renewal_demo(
         repository_root=arguments.repository_root,
         working_directory=arguments.working_directory,
+        execute_approved_local_effect=arguments.execute_approved_local_effect,
         output=arguments.output,
         timeout_seconds=arguments.timeout_seconds,
     )
@@ -260,6 +261,7 @@ def _register_renewal_demo(commands: argparse._SubParsersAction) -> None:
     command = commands.add_parser("demo-renewal", help="run the synthetic renewal demonstration")
     command.add_argument("--repository-root", type=Path, required=True)
     command.add_argument("--working-directory", type=Path, required=True)
+    command.add_argument("--execute-approved-local-effect", action="store_true", required=True)
     command.add_argument("--output", type=Path, required=True)
     command.add_argument("--timeout-seconds", type=int, default=120)
     command.set_defaults(handler=_handle_renewal_demo)

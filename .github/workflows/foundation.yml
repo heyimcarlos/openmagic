@@ -87,6 +87,7 @@ jobs:
           .artifacts/issue71/evidence-env/bin/openmagic-evidence demo-renewal
           --repository-root .
           --working-directory .artifacts/issue71/renewal-demo
+          --execute-approved-local-effect
           --output .artifacts/issue71/renewal-demo.json
       - run: >-
           .artifacts/issue71/evidence-env/bin/openmagic-evidence demo-verification

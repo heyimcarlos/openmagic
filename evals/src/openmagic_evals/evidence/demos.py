@@ -101,9 +101,12 @@ def run_renewal_demo(
     *,
     repository_root: Path,
     working_directory: Path,
+    execute_approved_local_effect: bool,
     output: Path,
     timeout_seconds: int = 120,
 ) -> PlaygroundArtifact:
+    if not execute_approved_local_effect:
+        raise ValueError("renewal demo requires explicit approval for its local effect")
     started_at = datetime.now(UTC)
     command_line = (
         "openmagic-evidence",
@@ -112,6 +115,7 @@ def run_renewal_demo(
         str(repository_root.resolve()),
         "--working-directory",
         str(working_directory.resolve()),
+        "--execute-approved-local-effect",
         "--output",
         str(output.resolve()),
         "--timeout-seconds",

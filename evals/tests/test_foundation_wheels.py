@@ -105,6 +105,7 @@ def test_built_wheels_install_and_boot_in_clean_environments(tmp_path) -> None:
             str(ROOT),
             "--working-directory",
             str(tmp_path / "wheel-renewal-demo"),
+            "--execute-approved-local-effect",
             "--output",
             str(tmp_path / "wheel-renewal-demo.json"),
         ]

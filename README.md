@@ -123,6 +123,7 @@ The public synthetic demonstrations use a fresh database and local provider:
 $EVIDENCE demo-renewal \
   --repository-root . \
   --working-directory .artifacts/issue71/renewal-demo \
+  --execute-approved-local-effect \
   --output .artifacts/issue71/renewal-demo.json
 $EVIDENCE demo-verification \
   --repository-root . \
