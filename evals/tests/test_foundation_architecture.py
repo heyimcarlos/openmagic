@@ -132,6 +132,22 @@ def test_public_persistence_policy_rejects_record_adapter_module(tmp_path: Path)
         'runner = getattr(db, "execute"); runner(make_statement())',
         'getattr(db, "execute")("SELECT 1")',
         "q = sql.SQL(template).format(sql.Identifier(name)); db.execute(q)",
+        'runner = db.execute; forwarded = runner; forwarded("SELECT 1")',
+        'holder.runner = db.execute; holder.runner("SELECT 1")',
+        'runner = partial(db.execute); runner("SELECT 1")',
+        'holder.runner = db.execute; alias = holder; alias.runner("SELECT 1")',
+        'ops = {"sql": db.execute}; ops["sql"]("SELECT 1")',
+        'name = "execute"; runner = getattr(db, name); runner("SELECT 1")',
+        'name = "exe" + "cute"; runner = getattr(db, name); runner("SELECT 1")',
+        'runner = getattr(db, method_name); runner("SELECT 1")',
+        'name = "execute"; runner = getattr(db, name); name = "safe"; runner("SELECT 1")',
+        'lookup = getattr; runner = lookup(db, "execute"); runner("SELECT 1")',
+        'runner = db.__getattribute__("execute"); runner("SELECT 1")',
+        '(runner := getattr(db, method_name))("SELECT 1")',
+        'args = (db, "execute"); runner = getattr(*args); runner("SELECT 1")',
+        'ops = [getattr(db, method_name)]; ops[0]("SELECT 1")',
+        'lookup = getattr if enabled else safe_lookup; runner = lookup(db, "execute"); runner("SELECT 1")',
+        'lookup = db.__getattribute__ if enabled else safe_lookup; runner = lookup("execute"); runner("SELECT 1")',
     ],
 )
 def test_sql_ownership_policy_rejects_public_application_sql(tmp_path: Path, source: str) -> None:
@@ -157,6 +173,30 @@ def test_runtime_declares_private_sql_owners_and_rejects_public_sql(tmp_path: Pa
 
     assert role_sql_ownership_violations(role, (leaked,)) == (
         "openmagic-runtime contains SQL outside approved persistence owner control.py:1",
+    )
+
+
+@pytest.mark.parametrize(
+    ("distribution", "package_name"),
+    [
+        ("openmagic-api", "openmagic_api"),
+        ("openmagic-playground", "openmagic_playground"),
+        ("openmagic-evals", "openmagic_evals"),
+    ],
+)
+def test_role_rejects_sql_outside_its_declared_owners(
+    tmp_path: Path,
+    distribution: str,
+    package_name: str,
+) -> None:
+    role = next(role for role in PACKAGE_ROLES if role.distribution == distribution)
+    package = tmp_path / package_name
+    package.mkdir()
+    leaked = package / "public_service.py"
+    leaked.write_text('db.execute("SELECT 1")\n', encoding="utf-8")
+
+    assert role_sql_ownership_violations(role, (leaked,)) == (
+        f"{distribution} contains SQL outside approved persistence owner public_service.py:1",
     )
 
 
