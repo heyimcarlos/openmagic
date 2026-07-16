@@ -178,6 +178,7 @@ def run_live_smoke(
             finished_at=finished_at,
             timeout_seconds=timeout_seconds,
             postgres_deployments=(),
+            postgres_provenance="not_applicable",
             case_corpus_digest=_digest(synthetic_case_id),
         ),
         provider_configuration=LiveProviderPin(

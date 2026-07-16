@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from multiprocessing import get_context
 from threading import Event, Thread
 from time import monotonic
-from typing import Any, Generic, Protocol, TypeVar
+from typing import Any, Generic, Literal, Protocol, TypeVar
 from uuid import UUID
 
 from openmagic_runtime.agents import AgentExecutionInput
@@ -44,6 +44,24 @@ class CancellationToken:
 
 class ExecutionAuthorityLost(RuntimeError):
     """Raised when execution is cancelled because its durable authority ended."""
+
+
+AgentExecutionFailureReason = Literal[
+    "cancelled",
+    "missing_input",
+    "bounded_timeout",
+    "missing_result",
+    "child_process_failure",
+    "malformed_result",
+]
+
+
+class AgentExecutionFailure(RuntimeError):
+    """A typed failure at the fresh Agent process boundary."""
+
+    def __init__(self, reason: AgentExecutionFailureReason, message: str) -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 class Executor(Protocol):
@@ -140,8 +158,16 @@ def _run_agent_child(
 ) -> None:
     try:
         sender.send(("result", factory()(input_value)))
+    except AgentExecutionFailure as error:
+        sender.send(("failure", error.reason, str(error)))
     except BaseException as error:
-        sender.send(("error", type(error).__name__, str(error)))
+        sender.send(
+            (
+                "failure",
+                "child_process_failure",
+                f"Agent execution failed: {type(error).__name__}: {error}",
+            )
+        )
     finally:
         sender.close()
 
@@ -166,9 +192,11 @@ class FreshAgentExecutor(Generic[CandidateT]):
         self, execution: AttemptExecution, cancellation: CancellationToken
     ) -> AttemptObservation:
         if cancellation.cancelled:
-            raise RuntimeError("Attempt execution was cancelled")
+            raise AgentExecutionFailure("cancelled", "Attempt execution was cancelled")
         if execution.agent_input is None:
-            raise RuntimeError("Agent execution requires its durable typed Run Input")
+            raise AgentExecutionFailure(
+                "missing_input", "Agent execution requires its durable typed Run Input"
+            )
         context = get_context("spawn")
         receiver, sender = context.Pipe(duplex=False)
         process = context.Process(
@@ -189,13 +217,22 @@ class FreshAgentExecutor(Generic[CandidateT]):
                     process.kill()
                     process.join(timeout=1)
                 if cancellation.cancelled:
-                    raise RuntimeError("Attempt execution was cancelled")
-                raise RuntimeError("Agent execution exceeded its bounded timeout")
+                    raise AgentExecutionFailure("cancelled", "Attempt execution was cancelled")
+                raise AgentExecutionFailure(
+                    "bounded_timeout", "Agent execution exceeded its bounded timeout"
+                )
             if not receiver.poll():
-                raise RuntimeError("Agent process ended without a candidate")
-            message = receiver.recv()
-            if message[0] == "error":
-                raise RuntimeError(f"Agent execution failed: {message[1]}: {message[2]}")
+                raise AgentExecutionFailure(
+                    "missing_result", "Agent process ended without a candidate"
+                )
+            try:
+                message = receiver.recv()
+            except EOFError as error:
+                raise AgentExecutionFailure(
+                    "missing_result", "Agent process ended without a candidate"
+                ) from error
+            if message[0] == "failure":
+                raise AgentExecutionFailure(message[1], message[2])
             result = message[1]
         finally:
             receiver.close()
@@ -203,13 +240,17 @@ class FreshAgentExecutor(Generic[CandidateT]):
                 process.kill()
                 process.join(timeout=1)
         if cancellation.cancelled:
-            raise RuntimeError("Attempt execution was cancelled")
+            raise AgentExecutionFailure("cancelled", "Attempt execution was cancelled")
         if type(result) is not self._result_class:
-            raise RuntimeError("Agent returned a candidate outside its typed contract")
+            raise AgentExecutionFailure(
+                "malformed_result", "Agent returned a candidate outside its typed contract"
+            )
         return AttemptObservation(value=self._encoder(result))
 
 
 __all__ = [
+    "AgentExecutionFailure",
+    "AgentExecutionFailureReason",
     "AttemptExecution",
     "AttemptObservation",
     "CancellationToken",

@@ -118,7 +118,12 @@ def _pin() -> ReproducibilityPin:
                     "synchronous_commit": "on",
                     "transaction_isolation": "read committed",
                 },
-                postgres_configuration_digest="sha256:" + "b" * 64,
+                postgres_configuration_digest=canonical_digest(
+                    {
+                        "synchronous_commit": "on",
+                        "transaction_isolation": "read committed",
+                    }
+                ),
                 migration_heads={
                     "example_insurance": "0004_deterministic_verification",
                     "openmagic_runtime": "0003_fenced_effect_kernel",
@@ -158,6 +163,63 @@ def _case(case_id: str = "command.exact_replay") -> ArtifactCase:
         test_results={},
         verdict=CaseVerdict(status="passed", invariant_violations=()),
     )
+
+
+def test_postgres_provenance_is_fail_closed() -> None:
+    pin = _pin()
+    deployment = pin.postgres_deployments[0]
+
+    with pytest.raises(ValueError, match="exact deployment provenance"):
+        ReproducibilityPin.model_validate(
+            pin.model_copy(update={"postgres_deployments": ()}).model_dump()
+        )
+
+    with pytest.raises(ValueError, match="configuration digest"):
+        PostgresDeploymentPin.model_validate(
+            deployment.model_copy(
+                update={"postgres_configuration_digest": "sha256:" + "0" * 64}
+            ).model_dump()
+        )
+
+    with pytest.raises(ValueError, match="concrete migration heads"):
+        ReproducibilityPin.model_validate(
+            pin.model_copy(
+                update={
+                    "postgres_deployments": (
+                        deployment.model_copy(
+                            update={
+                                "migration_heads": {
+                                    "example_insurance": None,
+                                    "openmagic_runtime": "0003_fenced_effect_kernel",
+                                }
+                            }
+                        ),
+                    )
+                }
+            ).model_dump()
+        )
+
+
+def test_process_contract_requires_independent_burst_capacity() -> None:
+    with pytest.raises(ValueError, match="must increase every role"):
+        ProcessContract(
+            scenario_version="process.loss-backpressure-recovery.v1",
+            queued_workflows=4,
+            initial_capacity={"api": 1, "workflow-worker": 1, "delivery-worker": 1},
+            burst_capacity={"api": 1, "workflow-worker": 2, "delivery-worker": 2},
+            provider_behavior="slow_success",
+            provider_delay_seconds=1,
+            forced_loss_points=(
+                "api-readiness",
+                "workflow-worker-provider-io",
+                "delivery-worker-message-lock",
+            ),
+            queue_predicates=(
+                "pending-steps-equal-workflow-denominator",
+                "pending-steps-and-deliveries-drain-to-zero",
+            ),
+            recovery_timeout_seconds=10,
+        )
 
 
 def _agent_configuration() -> AgentConfigurationPin:
@@ -203,7 +265,10 @@ def _agent_case() -> AgentCaseEvidence:
             ("context_projection", "candidate", "outcome_verification"), start=1
         )
     )
-    candidate_observation = BoundaryAgentCandidateObservation(observed_boundary="malformed_result")
+    candidate_observation = BoundaryAgentCandidateObservation(
+        observed_boundary="malformed_result",
+        execution_failure_reason="malformed_result",
+    )
     rubric_scores = {
         "expected_boundary_rejection": True,
         "no_candidate_accepted": True,
@@ -498,6 +563,9 @@ def _process_case() -> ProcessCase:
             ProcessIdentityEvidence(role="api", pid=20, worker_id=None),
             ProcessIdentityEvidence(role="workflow-worker", pid=21, worker_id="workflow-lost"),
             ProcessIdentityEvidence(role="delivery-worker", pid=22, worker_id="delivery-lost"),
+            ProcessIdentityEvidence(role="api", pid=23, worker_id=None),
+            ProcessIdentityEvidence(role="workflow-worker", pid=24, worker_id="workflow-burst"),
+            ProcessIdentityEvidence(role="delivery-worker", pid=25, worker_id="delivery-burst"),
         ),
         forced_losses=(
             ForcedProcessLoss(role="api", pid=20),
@@ -524,7 +592,7 @@ def _process_case() -> ProcessCase:
         scenario_version="process.loss-backpressure-recovery.v1",
         queued_workflows=4,
         initial_capacity={"api": 1, "workflow-worker": 1, "delivery-worker": 1},
-        burst_capacity={"api": 1, "workflow-worker": 1, "delivery-worker": 1},
+        burst_capacity={"api": 2, "workflow-worker": 2, "delivery-worker": 2},
         provider_behavior="slow_success",
         provider_delay_seconds=1,
         forced_loss_points=(
@@ -551,7 +619,7 @@ def _process_case() -> ProcessCase:
         initial_queue=QueueDepth(pending_steps=4, pending_deliveries=0),
         drained_queue=QueueDepth(pending_steps=0, pending_deliveries=0),
         initial_capacity={"api": 1, "workflow-worker": 1, "delivery-worker": 1},
-        started_processes={"api": 1, "workflow-worker": 1, "delivery-worker": 1},
+        started_processes={"api": 2, "workflow-worker": 2, "delivery-worker": 2},
         forced_losses={"api": 1, "workflow-worker": 1, "delivery-worker": 1},
         fresh_interpreters=True,
         postgresql_only_reconstruction=True,
@@ -573,8 +641,15 @@ def _process_case() -> ProcessCase:
             "delivery_attempt_ids": (UUID(int=5),),
         },
         process={
-            "worker_ids": ("workflow-old", "delivery-old", "workflow-lost", "delivery-lost"),
-            "process_ids": (10, 11, 12, 20, 21, 22),
+            "worker_ids": (
+                "workflow-old",
+                "delivery-old",
+                "workflow-lost",
+                "delivery-lost",
+                "workflow-burst",
+                "delivery-burst",
+            ),
+            "process_ids": (10, 11, 12, 20, 21, 22, 23, 24, 25),
         },
     )
     proof = {

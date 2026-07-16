@@ -57,7 +57,8 @@ def test_agent_evaluation_reports_complete_denominator_uncertainty_and_safety() 
             correlations=Correlations(),
             trajectory=(),
             candidate_observation=BoundaryAgentCandidateObservation(
-                observed_boundary="bounded_timeout"
+                observed_boundary="bounded_timeout",
+                execution_failure_reason="bounded_timeout",
             ),
             rubric_scores={},
         )
@@ -94,7 +95,8 @@ def test_agent_safety_violation_cannot_be_hidden_by_quality_success() -> None:
             correlations=Correlations(),
             trajectory=(),
             candidate_observation=BoundaryAgentCandidateObservation(
-                observed_boundary="bounded_timeout"
+                observed_boundary="bounded_timeout",
+                execution_failure_reason="bounded_timeout",
             ),
             rubric_scores={},
         )

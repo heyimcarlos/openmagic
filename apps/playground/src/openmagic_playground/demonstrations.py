@@ -34,7 +34,12 @@ from openmagic_playground.responses import (
     ControlExerciseResponse,
     ExercisedControls,
     FailureScenarioObservation,
+    PlaygroundAgentCorrelations,
+    PlaygroundApplicationCorrelations,
     PlaygroundCorrelations,
+    PlaygroundProcessCorrelations,
+    PlaygroundProviderCorrelations,
+    PlaygroundRuntimeCorrelations,
     PlaygroundScenarioCoverage,
     PostgresDeploymentObservation,
     RenewalDemonstrationObservation,
@@ -60,8 +65,18 @@ def _database(scenario: str) -> tuple[PostgresContainer, str]:
         dbname=f"openmagic_playground_{scenario}_{_id(scenario, 'database').hex}",
         driver=None,
     )
-    container.start()
-    return container, container.get_connection_url(driver=None)
+    try:
+        container.start()
+        return container, container.get_connection_url(driver=None)
+    except BaseException as startup_error:
+        try:
+            container.stop()
+        except BaseException as cleanup_error:
+            raise BaseExceptionGroup(
+                "playground database startup and cleanup failed",
+                [startup_error, cleanup_error],
+            ) from startup_error
+        raise
 
 
 def _renewal_fixture(
@@ -121,17 +136,21 @@ def _safe_renewal_result(
         raise AssertionError("synthetic playground renewal left its safe approval boundary")
     return (
         PlaygroundCorrelations(
-            command_ids=(values.command_id,),
-            workflow_ids=(values.workflow_id,),
-            instance_ids=(values.instance_id,),
-            step_ids=values.step_ids,
-            attempt_ids=values.attempt_ids,
-            wait_ids=outcomes.approval_wait_ids,
-            thread_ids=(values.thread_id,),
-            message_ids=values.message_ids,
-            agent_run_ids=values.agent_run_ids,
-            domain_event_ids=values.domain_event_ids,
-            delivery_ids=values.delivery_ids,
+            runtime=PlaygroundRuntimeCorrelations(
+                command_ids=(values.command_id,),
+                workflow_ids=(values.workflow_id,),
+                instance_ids=(values.instance_id,),
+                step_ids=values.step_ids,
+                attempt_ids=values.attempt_ids,
+                wait_ids=outcomes.approval_wait_ids,
+            ),
+            application=PlaygroundApplicationCorrelations(
+                thread_ids=(values.thread_id,),
+                message_ids=values.message_ids,
+                domain_event_ids=values.domain_event_ids,
+                delivery_ids=values.delivery_ids,
+            ),
+            agent=PlaygroundAgentCorrelations(agent_run_ids=values.agent_run_ids),
         ),
         SafeRenewalBoundaryObservation(
             approval_wait_state="unsatisfied",
@@ -179,23 +198,29 @@ def _correlations(
     values = projection.correlations
     outcomes = projection.outcomes
     return PlaygroundCorrelations(
-        command_ids=(values.command_id,),
-        workflow_ids=(values.workflow_id,),
-        instance_ids=(values.instance_id,),
-        step_ids=values.step_ids,
-        attempt_ids=values.attempt_ids,
-        wait_ids=outcomes.approval_wait_ids,
-        signal_ids=values.signal_ids,
-        thread_ids=(values.thread_id,),
-        message_ids=values.message_ids,
-        agent_run_ids=values.agent_run_ids,
-        domain_event_ids=values.domain_event_ids,
-        delivery_ids=values.delivery_ids,
-        external_effect_ids=values.logical_effect_ids,
-        approval_grant_ids=values.approval_grant_ids,
-        worker_ids=worker_ids,
-        process_ids=process_ids,
-        provider_request_ids=provider_request_ids,
+        runtime=PlaygroundRuntimeCorrelations(
+            command_ids=(values.command_id,),
+            workflow_ids=(values.workflow_id,),
+            instance_ids=(values.instance_id,),
+            step_ids=values.step_ids,
+            attempt_ids=values.attempt_ids,
+            wait_ids=outcomes.approval_wait_ids,
+            signal_ids=values.signal_ids,
+        ),
+        application=PlaygroundApplicationCorrelations(
+            thread_ids=(values.thread_id,),
+            message_ids=values.message_ids,
+            domain_event_ids=values.domain_event_ids,
+            delivery_ids=values.delivery_ids,
+            external_effect_ids=values.logical_effect_ids,
+            approval_grant_ids=values.approval_grant_ids,
+        ),
+        agent=PlaygroundAgentCorrelations(agent_run_ids=values.agent_run_ids),
+        process=PlaygroundProcessCorrelations(
+            worker_ids=worker_ids,
+            process_ids=process_ids,
+        ),
+        provider=PlaygroundProviderCorrelations(provider_request_ids=provider_request_ids),
     )
 
 
@@ -365,10 +390,14 @@ def run_verification_demonstration() -> VerificationDemonstrationResponse:
             raise AssertionError("verification demonstration was not authorized")
         return VerificationDemonstrationResponse(
             correlations=PlaygroundCorrelations(
-                command_ids=(protected.command_id, receipt.command_id),
-                workflow_ids=(renewal.input.workflow_id,),
-                thread_ids=(renewal.input.thread_id, identifier_thread_id),
-                verification_challenge_ids=(challenge_id,),
+                runtime=PlaygroundRuntimeCorrelations(
+                    command_ids=(protected.command_id, receipt.command_id),
+                    workflow_ids=(renewal.input.workflow_id,),
+                ),
+                application=PlaygroundApplicationCorrelations(
+                    thread_ids=(renewal.input.thread_id, identifier_thread_id),
+                    verification_challenge_ids=(challenge_id,),
+                ),
             ),
             observation=VerificationDemonstrationObservation(
                 verification_outcome=receipt.result.verification_outcome,
@@ -430,18 +459,6 @@ def _failure_scenario(
             process_ids=(provider_process_id,) if provider_process_id is not None else (),
             provider_request_ids=provider_request_ids,
         ),
-    )
-
-
-def _merge_playground_correlations(
-    values: tuple[PlaygroundCorrelations, ...],
-) -> PlaygroundCorrelations:
-    fields = PlaygroundCorrelations.model_fields
-    return PlaygroundCorrelations.model_validate(
-        {
-            name: tuple(dict.fromkeys(item for value in values for item in getattr(value, name)))
-            for name in fields
-        }
     )
 
 
@@ -515,7 +532,7 @@ def exercise_process_controls(*, working_directory: Path) -> ControlExerciseResp
                 restart=len(restarted),
                 stop=True,
             ),
-            correlations=_merge_playground_correlations(
+            correlations=PlaygroundCorrelations.merge(
                 (
                     first_correlations,
                     second_correlations,

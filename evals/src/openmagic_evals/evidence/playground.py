@@ -32,50 +32,17 @@ from openmagic_evals.evidence.reproducibility import reproducibility_pin
 def playground_correlations(
     value: PlaygroundCorrelations, process_ids: tuple[int, ...] = ()
 ) -> Correlations:
-    serialized = value.model_dump(mode="python")
     return Correlations(
-        runtime=RuntimeCorrelations.model_validate(
-            {
-                key: item
-                for key, item in serialized.items()
-                if key.endswith("_ids")
-                and key
-                in {
-                    "command_ids",
-                    "workflow_ids",
-                    "instance_ids",
-                    "step_ids",
-                    "attempt_ids",
-                    "wait_ids",
-                    "signal_ids",
-                    "trace_event_ids",
-                }
-            }
-        ),
+        runtime=RuntimeCorrelations.model_validate(value.runtime.model_dump(mode="python")),
         application=ApplicationCorrelations.model_validate(
-            {
-                key: item
-                for key, item in serialized.items()
-                if key
-                in {
-                    "thread_ids",
-                    "message_ids",
-                    "domain_event_ids",
-                    "delivery_ids",
-                    "delivery_attempt_ids",
-                    "external_effect_ids",
-                    "approval_grant_ids",
-                    "verification_challenge_ids",
-                    "verification_session_ids",
-                }
-            }
+            value.application.model_dump(mode="python")
         ),
-        agent=AgentCorrelations(agent_run_ids=value.agent_run_ids),
+        agent=AgentCorrelations.model_validate(value.agent.model_dump(mode="python")),
         process=ProcessCorrelations(
-            worker_ids=value.worker_ids,
-            process_ids=tuple(dict.fromkeys((*process_ids, *value.process_ids))),
+            worker_ids=value.process.worker_ids,
+            process_ids=tuple(dict.fromkeys((*process_ids, *value.process.process_ids))),
         ),
-        provider=ProviderCorrelations(provider_request_ids=value.provider_request_ids),
+        provider=ProviderCorrelations.model_validate(value.provider.model_dump(mode="python")),
     )
 
 

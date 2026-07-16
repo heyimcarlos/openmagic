@@ -158,8 +158,8 @@ class ProcessContract(EvidenceModel):
             raise ValueError("process contract must pin capacity for all process roles")
         if any(value < 1 for value in self.initial_capacity.values()):
             raise ValueError("process contract initial capacities must be positive")
-        if any(self.burst_capacity[role] < self.initial_capacity[role] for role in PROCESS_ROLES):
-            raise ValueError("process contract burst capacity cannot shrink a role")
+        if any(self.burst_capacity[role] <= self.initial_capacity[role] for role in PROCESS_ROLES):
+            raise ValueError("process contract burst capacity must increase every role")
         return self
 
 

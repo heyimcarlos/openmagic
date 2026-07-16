@@ -17,6 +17,7 @@ from openmagic_runtime.agents import (
     AgentTask,
 )
 from openmagic_runtime.execution import (
+    AgentExecutionFailure,
     AttemptExecution,
     CancellationToken,
     FreshAgentExecutor,
@@ -35,6 +36,13 @@ def _candidate_factory():
 
 def _malformed_candidate_factory():
     return lambda _execution: "not-a-typed-candidate"
+
+
+def _failing_candidate_factory():
+    def fail(_execution: AgentExecutionInput) -> Candidate:
+        raise ValueError("synthetic child failure")
+
+    return fail
 
 
 def _slow_candidate_factory(marker: Path):
@@ -100,8 +108,22 @@ def test_fresh_agent_executor_rejects_malformed_candidate_type() -> None:
         timeout_seconds=1,
     )
 
-    with pytest.raises(RuntimeError, match="outside its typed contract"):
+    with pytest.raises(AgentExecutionFailure, match="outside its typed contract") as raised:
         executor.execute(_execution(), CancellationToken())
+    assert raised.value.reason == "malformed_result"
+
+
+def test_fresh_agent_executor_preserves_typed_child_failure() -> None:
+    executor = FreshAgentExecutor(
+        _failing_candidate_factory,
+        result_class=Candidate,
+        encoder=lambda candidate: {"value": candidate.value},
+        timeout_seconds=1,
+    )
+
+    with pytest.raises(AgentExecutionFailure, match="synthetic child failure") as raised:
+        executor.execute(_execution(), CancellationToken())
+    assert raised.value.reason == "child_process_failure"
 
 
 def test_fresh_agent_executor_terminates_work_after_timeout(tmp_path: Path) -> None:
@@ -114,8 +136,9 @@ def test_fresh_agent_executor_terminates_work_after_timeout(tmp_path: Path) -> N
         timeout_seconds=1,
     )
 
-    with pytest.raises(RuntimeError, match="bounded timeout"):
+    with pytest.raises(AgentExecutionFailure, match="bounded timeout") as raised:
         executor.execute(_execution(), CancellationToken())
+    assert raised.value.reason == "bounded_timeout"
     time.sleep(0.7)
 
     assert not marker.exists()

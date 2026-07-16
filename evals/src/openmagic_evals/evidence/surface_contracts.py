@@ -67,6 +67,8 @@ RUNTIME_PUBLIC_EXPORTS = {
         "inspect_runtime_database",
     ),
     "execution.py": (
+        "AgentExecutionFailure",
+        "AgentExecutionFailureReason",
         "AttemptExecution",
         "AttemptObservation",
         "CancellationToken",
@@ -417,8 +419,8 @@ PUBLIC_SURFACE_DIGESTS = {
     "example-insurance": "sha256:3dddf8837885b13136f1edc05fea77352a6e5478db4cb28b65aecaa9eff0e8c2",
     "openmagic-api": "sha256:b47b899d81cf0831f3fa31e984c8e342e9fa8a32adbec983739a29929d131ed3",
     "openmagic-evals": "sha256:954ce8c7057bfca65c798d3d58f98a7bb7dbfe01c76fe1399f774f3672d784be",
-    "openmagic-playground": "sha256:b6b368585f9ae7569561418986faf6d94925aead8a7a8f07cf41b43bc1521a82",
-    "openmagic-runtime": "sha256:e31d4fe502e93b1cbbb18e2e299149c1c1b902acdb5289a5fda663e4ab61dc0b",
+    "openmagic-playground": "sha256:768061cad92cbab2f0775ad936f519c32837c4bb1830b2fc7e7199adcfb5afaa",
+    "openmagic-runtime": "sha256:39c7e16b26f26ee91d02a774414310712a780f76076947d79f64c17b5ecaba4c",
 }
 
 __all__ = [

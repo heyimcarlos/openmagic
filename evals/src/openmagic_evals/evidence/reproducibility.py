@@ -221,6 +221,7 @@ def reproducibility_pin(
     timeout_seconds: int,
     case_corpus_digest: str,
     postgres_deployments: tuple[PostgresDeploymentPin, ...],
+    postgres_provenance: Literal["required", "not_applicable"] = "required",
 ) -> ReproducibilityPin:
     definitions = {
         "example_insurance.renewal_outreach:2": "sha256:" + content_fingerprint(RENEWAL_DEFINITION),
@@ -242,6 +243,7 @@ def reproducibility_pin(
         started_at=started_at,
         finished_at=finished_at,
         timeout_seconds=timeout_seconds,
+        postgres_provenance=postgres_provenance,
         postgres_deployments=postgres_deployments,
         definition_digests=definitions,
         case_corpus_digest=case_corpus_digest,

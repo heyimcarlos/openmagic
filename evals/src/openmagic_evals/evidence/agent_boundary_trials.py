@@ -27,7 +27,13 @@ from openmagic_runtime.agents import (
     AgentTask,
 )
 from openmagic_runtime.commands import Actor, Cause, CommandReceipt
-from openmagic_runtime.execution import AttemptExecution, CancellationToken, FreshAgentExecutor
+from openmagic_runtime.execution import (
+    AgentExecutionFailure,
+    AgentExecutionFailureReason,
+    AttemptExecution,
+    CancellationToken,
+    FreshAgentExecutor,
+)
 from openmagic_runtime.kernel.work import ClaimedAttempt
 from openmagic_runtime.threads import CreateThread, ThreadStore
 
@@ -55,6 +61,7 @@ from openmagic_evals.harness.renewal_scenario import renewal_context
 _BOUNDARY_INSTRUCTION_KEY = "openmagic.executor_boundary.contract.v1"
 _BOUNDARY_TIMEOUT_SECONDS = 1
 _ExpectedBoundary = Literal["malformed_result", "bounded_timeout"]
+_ObservedBoundary = Literal["malformed_result", "bounded_timeout", "unexpected_error"]
 
 
 @dataclass(frozen=True)
@@ -73,7 +80,8 @@ class _BoundaryTrialSetup:
 @dataclass(frozen=True)
 class _BoundaryTrialExecution:
     agent_run_id: UUID
-    observed_boundary: str
+    observed_boundary: _ObservedBoundary
+    failure_reason: AgentExecutionFailureReason | None
     expected_boundary: _ExpectedBoundary
     latency_ms: int
 
@@ -211,7 +219,8 @@ def _execute_boundary(
         timeout_seconds=_BOUNDARY_TIMEOUT_SECONDS,
     )
     started = time.monotonic()
-    observed_boundary = ""
+    observed_boundary: _ObservedBoundary = "unexpected_error"
+    failure_reason: AgentExecutionFailureReason | None = None
     try:
         executor.execute(
             AttemptExecution(
@@ -226,25 +235,28 @@ def _execute_boundary(
             ),
             CancellationToken(),
         )
-    except RuntimeError as error:
-        observed_boundary = (
-            "malformed_result"
-            if "outside its typed contract" in str(error)
-            else "bounded_timeout"
-            if "bounded timeout" in str(error)
-            else "unexpected_error"
-        )
+    except AgentExecutionFailure as error:
+        failure_reason = error.reason
+        if error.reason == "malformed_result":
+            observed_boundary = "malformed_result"
+        elif error.reason == "bounded_timeout":
+            observed_boundary = "bounded_timeout"
     latency_ms = round((time.monotonic() - started) * 1000)
     expected_boundary: _ExpectedBoundary = (
         "malformed_result" if case.boundary == "malformed_result" else "bounded_timeout"
     )
     with psycopg.connect(database_url) as connection, connection.transaction():
         AgentRuns(connection).fail_for_attempt(
-            setup.attempt.attempt_id, {"class": expected_boundary}
+            setup.attempt.attempt_id,
+            {
+                "class": observed_boundary,
+                "execution_failure_reason": failure_reason or "candidate_accepted",
+            },
         )
     return _BoundaryTrialExecution(
         agent_run_id=run.agent_run_id,
         observed_boundary=observed_boundary,
+        failure_reason=failure_reason,
         expected_boundary=expected_boundary,
         latency_ms=latency_ms,
     )
@@ -290,7 +302,10 @@ def _verify_boundary_trial(
         setup.thread_id, setup.receipt.result.instance_id
     )
     prohibited = _boundary_prohibited_actions(case, projection, safety)
-    candidate = BoundaryAgentCandidateObservation(observed_boundary=execution.observed_boundary)
+    candidate = BoundaryAgentCandidateObservation(
+        observed_boundary=execution.observed_boundary,
+        execution_failure_reason=execution.failure_reason,
+    )
     rubric_scores = agent_rubric_scores(
         BoundaryAgentScorerContract(expected_boundary=execution.expected_boundary),
         candidate,

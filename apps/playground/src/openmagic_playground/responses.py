@@ -2,17 +2,25 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from collections.abc import Iterable
+from typing import Literal, TypeVar
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, PositiveInt
+from openmagic_runtime.evidence import content_fingerprint
+from pydantic import BaseModel, ConfigDict, Field, PositiveInt, model_validator
+
+CorrelationValue = TypeVar("CorrelationValue")
 
 
 class _ResponseModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
-class PlaygroundCorrelations(_ResponseModel):
+def _unique(values: Iterable[CorrelationValue]) -> tuple[CorrelationValue, ...]:
+    return tuple(dict.fromkeys(values))
+
+
+class PlaygroundRuntimeCorrelations(_ResponseModel):
     command_ids: tuple[UUID, ...] = ()
     workflow_ids: tuple[UUID, ...] = Field(min_length=1)
     instance_ids: tuple[UUID, ...] = ()
@@ -21,9 +29,11 @@ class PlaygroundCorrelations(_ResponseModel):
     wait_ids: tuple[UUID, ...] = ()
     signal_ids: tuple[UUID, ...] = ()
     trace_event_ids: tuple[UUID, ...] = ()
+
+
+class PlaygroundApplicationCorrelations(_ResponseModel):
     thread_ids: tuple[UUID, ...] = ()
     message_ids: tuple[UUID, ...] = ()
-    agent_run_ids: tuple[UUID, ...] = ()
     domain_event_ids: tuple[UUID, ...] = ()
     delivery_ids: tuple[UUID, ...] = ()
     delivery_attempt_ids: tuple[UUID, ...] = ()
@@ -31,9 +41,92 @@ class PlaygroundCorrelations(_ResponseModel):
     approval_grant_ids: tuple[UUID, ...] = ()
     verification_challenge_ids: tuple[UUID, ...] = ()
     verification_session_ids: tuple[UUID, ...] = ()
+
+
+class PlaygroundAgentCorrelations(_ResponseModel):
+    agent_run_ids: tuple[UUID, ...] = ()
+
+
+class PlaygroundProcessCorrelations(_ResponseModel):
     worker_ids: tuple[str, ...] = ()
     process_ids: tuple[PositiveInt, ...] = ()
+
+
+class PlaygroundProviderCorrelations(_ResponseModel):
     provider_request_ids: tuple[str, ...] = ()
+
+
+class PlaygroundCorrelations(_ResponseModel):
+    runtime: PlaygroundRuntimeCorrelations
+    application: PlaygroundApplicationCorrelations = Field(
+        default_factory=PlaygroundApplicationCorrelations
+    )
+    agent: PlaygroundAgentCorrelations = Field(default_factory=PlaygroundAgentCorrelations)
+    process: PlaygroundProcessCorrelations = Field(default_factory=PlaygroundProcessCorrelations)
+    provider: PlaygroundProviderCorrelations = Field(default_factory=PlaygroundProviderCorrelations)
+
+    @classmethod
+    def merge(cls, values: Iterable[PlaygroundCorrelations]) -> PlaygroundCorrelations:
+        items = tuple(values)
+        return cls(
+            runtime=PlaygroundRuntimeCorrelations(
+                command_ids=_unique(value for item in items for value in item.runtime.command_ids),
+                workflow_ids=_unique(
+                    value for item in items for value in item.runtime.workflow_ids
+                ),
+                instance_ids=_unique(
+                    value for item in items for value in item.runtime.instance_ids
+                ),
+                step_ids=_unique(value for item in items for value in item.runtime.step_ids),
+                attempt_ids=_unique(value for item in items for value in item.runtime.attempt_ids),
+                wait_ids=_unique(value for item in items for value in item.runtime.wait_ids),
+                signal_ids=_unique(value for item in items for value in item.runtime.signal_ids),
+                trace_event_ids=_unique(
+                    value for item in items for value in item.runtime.trace_event_ids
+                ),
+            ),
+            application=PlaygroundApplicationCorrelations(
+                thread_ids=_unique(
+                    value for item in items for value in item.application.thread_ids
+                ),
+                message_ids=_unique(
+                    value for item in items for value in item.application.message_ids
+                ),
+                domain_event_ids=_unique(
+                    value for item in items for value in item.application.domain_event_ids
+                ),
+                delivery_ids=_unique(
+                    value for item in items for value in item.application.delivery_ids
+                ),
+                delivery_attempt_ids=_unique(
+                    value for item in items for value in item.application.delivery_attempt_ids
+                ),
+                external_effect_ids=_unique(
+                    value for item in items for value in item.application.external_effect_ids
+                ),
+                approval_grant_ids=_unique(
+                    value for item in items for value in item.application.approval_grant_ids
+                ),
+                verification_challenge_ids=_unique(
+                    value for item in items for value in item.application.verification_challenge_ids
+                ),
+                verification_session_ids=_unique(
+                    value for item in items for value in item.application.verification_session_ids
+                ),
+            ),
+            agent=PlaygroundAgentCorrelations(
+                agent_run_ids=_unique(value for item in items for value in item.agent.agent_run_ids)
+            ),
+            process=PlaygroundProcessCorrelations(
+                worker_ids=_unique(value for item in items for value in item.process.worker_ids),
+                process_ids=_unique(value for item in items for value in item.process.process_ids),
+            ),
+            provider=PlaygroundProviderCorrelations(
+                provider_request_ids=_unique(
+                    value for item in items for value in item.provider.provider_request_ids
+                )
+            ),
+        )
 
 
 class PostgresDeploymentObservation(_ResponseModel):
@@ -43,6 +136,18 @@ class PostgresDeploymentObservation(_ResponseModel):
     postgres_configuration: dict[str, str]
     postgres_configuration_digest: str
     migration_heads: dict[str, str | None]
+
+    @model_validator(mode="after")
+    def validate_postgres(self) -> PostgresDeploymentObservation:
+        if self.postgres_configuration_digest != "sha256:" + content_fingerprint(
+            self.postgres_configuration
+        ):
+            raise ValueError("PostgreSQL configuration digest does not match its document")
+        if set(self.migration_heads) != {"example_insurance", "openmagic_runtime"} or any(
+            value is None for value in self.migration_heads.values()
+        ):
+            raise ValueError("playground PostgreSQL provenance requires concrete migration heads")
+        return self
 
 
 class SafeRenewalBoundaryObservation(_ResponseModel):
@@ -128,7 +233,12 @@ __all__ = [
     "ControlExerciseResponse",
     "ExercisedControls",
     "FailureScenarioObservation",
+    "PlaygroundAgentCorrelations",
+    "PlaygroundApplicationCorrelations",
     "PlaygroundCorrelations",
+    "PlaygroundProcessCorrelations",
+    "PlaygroundProviderCorrelations",
+    "PlaygroundRuntimeCorrelations",
     "PlaygroundScenarioCoverage",
     "PostgresDeploymentObservation",
     "RenewalDemonstrationObservation",

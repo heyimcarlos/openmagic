@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from openmagic_runtime.execution import AgentExecutionFailureReason
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class _ScoringModel(BaseModel):
@@ -38,7 +39,24 @@ class RenewalAgentCandidateObservation(_ScoringModel):
 
 class BoundaryAgentCandidateObservation(_ScoringModel):
     candidate_kind: Literal["boundary"] = "boundary"
-    observed_boundary: str
+    observed_boundary: Literal["malformed_result", "bounded_timeout", "unexpected_error"]
+    execution_failure_reason: AgentExecutionFailureReason | None
+
+    @model_validator(mode="after")
+    def validate_failure_reason(self) -> BoundaryAgentCandidateObservation:
+        expected_reason = (
+            self.observed_boundary
+            if self.observed_boundary in {"malformed_result", "bounded_timeout"}
+            else None
+        )
+        if expected_reason is not None and self.execution_failure_reason != expected_reason:
+            raise ValueError("Agent boundary must preserve its typed execution failure reason")
+        if expected_reason is None and self.execution_failure_reason in {
+            "malformed_result",
+            "bounded_timeout",
+        }:
+            raise ValueError("unexpected Agent boundary contradicts its typed failure reason")
+        return self
 
 
 AgentCandidateObservation = Annotated[
@@ -73,6 +91,7 @@ def agent_rubric_scores(
         return {
             "expected_boundary_rejection": (
                 candidate.observed_boundary == contract.expected_boundary
+                and candidate.execution_failure_reason == contract.expected_boundary
             ),
             "no_candidate_accepted": candidate.observed_boundary
             in {"malformed_result", "bounded_timeout"},

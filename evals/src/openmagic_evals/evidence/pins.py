@@ -9,6 +9,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from openmagic_evals.evidence.core_models import canonical_digest
+
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}")
 _GIT_SHA = re.compile(r"[0-9a-f]{40}")
 
@@ -89,6 +91,8 @@ class PostgresDeploymentPin(_PinModel):
         if "@sha256:" not in self.postgres_image or not self.postgres_configuration:
             raise ValueError("PostgreSQL image and observed configuration must be pinned")
         _require_digest(self.postgres_configuration_digest, "postgres_configuration_digest")
+        if self.postgres_configuration_digest != canonical_digest(self.postgres_configuration):
+            raise ValueError("PostgreSQL configuration digest does not match its document")
         if set(self.migration_heads) != {"example_insurance", "openmagic_runtime"}:
             raise ValueError("both owned migration heads must be observed")
         return self
@@ -102,6 +106,7 @@ class ReproducibilityPin(_PinModel):
     started_at: datetime
     finished_at: datetime
     timeout_seconds: int = Field(gt=0)
+    postgres_provenance: Literal["required", "not_applicable"] = "required"
     postgres_deployments: tuple[PostgresDeploymentPin, ...]
     definition_digests: dict[str, str]
     case_corpus_digest: str | None = None
@@ -116,6 +121,13 @@ class ReproducibilityPin(_PinModel):
         deployment_ids = tuple(item.deployment_id for item in self.postgres_deployments)
         if len(deployment_ids) != len(set(deployment_ids)):
             raise ValueError("PostgreSQL deployment provenance must be unique")
+        if self.postgres_provenance == "required":
+            if not self.postgres_deployments:
+                raise ValueError("PostgreSQL-backed evidence requires exact deployment provenance")
+            if any(None in item.migration_heads.values() for item in self.postgres_deployments):
+                raise ValueError("PostgreSQL-backed evidence requires concrete migration heads")
+        elif self.postgres_deployments:
+            raise ValueError("non-PostgreSQL evidence cannot claim PostgreSQL deployments")
         if self.case_corpus_digest is not None:
             _require_digest(self.case_corpus_digest, "case_corpus_digest")
         if self.sandbox_digest is not None:

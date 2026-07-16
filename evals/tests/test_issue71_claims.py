@@ -83,7 +83,9 @@ def _pin(git_sha: str) -> ReproducibilityPin:
                 postgres_version="17.5",
                 postgres_image="postgres@sha256:" + "2" * 64,
                 postgres_configuration={"transaction_isolation": "read committed"},
-                postgres_configuration_digest="sha256:" + "3" * 64,
+                postgres_configuration_digest=canonical_digest(
+                    {"transaction_isolation": "read committed"}
+                ),
                 migration_heads={
                     "example_insurance": "0004",
                     "openmagic_runtime": "0003",
@@ -115,7 +117,10 @@ def _case(
             ("context_projection", "candidate", "outcome_verification"), start=1
         )
     )
-    candidate_observation = BoundaryAgentCandidateObservation(observed_boundary="malformed_result")
+    candidate_observation = BoundaryAgentCandidateObservation(
+        observed_boundary="malformed_result",
+        execution_failure_reason="malformed_result",
+    )
     rubric_scores = {
         "expected_boundary_rejection": True,
         "no_candidate_accepted": True,
