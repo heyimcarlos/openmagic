@@ -12,8 +12,8 @@ from openmagic_evals.evidence.agent_cases import (
 )
 from openmagic_evals.evidence.agent_corpus_phase import HeldOutCorpusPhase
 from openmagic_evals.evidence.agent_experiment import (
+    AgentConfigurationPhase,
     AgentTrialPhase,
-    agent_configuration_documents,
     agent_scorer_contract,
 )
 from openmagic_evals.evidence.agent_trials import AgentTrial
@@ -139,14 +139,13 @@ def _artifact_case(case: AgentCase, trials: tuple[AgentTrial, ...]) -> AgentCase
     )
 
 
-def _configurations() -> tuple[AgentConfigurationPin, ...]:
-    (renewal_instruction, renewal_tool_schema), boundary = agent_configuration_documents()
+def _configurations(configuration: AgentConfigurationPhase) -> tuple[AgentConfigurationPin, ...]:
     return (
         AgentConfigurationPin(
             agent_key=RENEWAL_AGENT_KEY,
             agent_version=1,
-            instruction_digest=canonical_digest(renewal_instruction),
-            tool_schema_digest=canonical_digest(renewal_tool_schema),
+            instruction_digest=configuration.renewal_instruction_digest,
+            tool_schema_digest=configuration.renewal_tool_schema_digest,
             provider="openmagic-fresh-interpreter",
             model="deterministic-reference-agent-v1",
             reasoning="deterministic",
@@ -155,14 +154,8 @@ def _configurations() -> tuple[AgentConfigurationPin, ...]:
         AgentConfigurationPin(
             agent_key=BOUNDARY_AGENT_KEY,
             agent_version=1,
-            instruction_digest=canonical_digest(boundary),
-            tool_schema_digest=canonical_digest(
-                {
-                    "input": "openmagic_runtime.agents.AgentRunInput",
-                    "output": "openmagic_evals.evidence.agent_boundary_trials._BoundaryCandidate",
-                    "timeout_seconds": boundary["timeout_seconds"],
-                }
-            ),
+            instruction_digest=configuration.boundary_instruction_digest,
+            tool_schema_digest=configuration.boundary_tool_schema_digest,
             provider="openmagic-fresh-interpreter",
             model="deterministic-boundary-harness-v1",
             reasoning="none",
@@ -175,6 +168,7 @@ def project_agent_quality_artifact(
     *,
     development: AgentTrialPhase,
     held_out: AgentTrialPhase,
+    configuration: AgentConfigurationPhase,
     seal: HeldOutCorpusPhase,
     reproducibility: ReproducibilityPin,
 ) -> AgentQualityArtifact:
@@ -198,7 +192,7 @@ def project_agent_quality_artifact(
             execution_phases=("development", "held_out"),
             tuning_unchanged_after_seal=True,
         ),
-        agent_configurations=_configurations(),
+        agent_configurations=_configurations(configuration),
         cases=tuple(_artifact_case(case, trials) for case in cases),
         summary=AgentQualitySummary(
             development_cases=len(development.cases),

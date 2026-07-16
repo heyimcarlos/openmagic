@@ -11,6 +11,11 @@ from types import TracebackType
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
+from openmagic_playground.process_launching import (
+    ProcessLauncher,
+    SubprocessLauncher,
+    finish_owned_context,
+)
 from openmagic_runtime.processes import OwnedProcess
 
 from openmagic_evals.harness._network import free_port
@@ -23,12 +28,14 @@ class LocalEmailProvider:
         working_directory: Path,
         readiness_timeout: float = 10.0,
         shutdown_timeout: float = 5.0,
+        process_launcher: ProcessLauncher | None = None,
     ) -> None:
         if readiness_timeout <= 0 or shutdown_timeout <= 0:
             raise ValueError("Provider process timeouts must be positive")
         self.working_directory = working_directory.resolve()
         self.readiness_timeout = readiness_timeout
         self.shutdown_timeout = shutdown_timeout
+        self._process_launcher = process_launcher or SubprocessLauncher()
         self.state_path = self.working_directory / "email-provider.sqlite3"
         self._port = free_port()
         self.url = f"http://127.0.0.1:{self._port}"
@@ -46,7 +53,12 @@ class LocalEmailProvider:
         exc_value: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
-        self.stop()
+        del exc_type, traceback
+        finish_owned_context(
+            self.stop,
+            execution_error=exc_value,
+            message="local email provider execution and cleanup failed",
+        )
 
     @property
     def pid(self) -> int:
@@ -63,7 +75,7 @@ class LocalEmailProvider:
             raise RuntimeError("installed local email provider entry point is missing")
         self._log_handle = (self.working_directory / "email-provider.log").open("ab")
         try:
-            process = subprocess.Popen(
+            process = self._process_launcher.launch(
                 [
                     str(script),
                     "--host",
@@ -73,12 +85,13 @@ class LocalEmailProvider:
                     "--state-path",
                     str(self.state_path),
                 ],
-                cwd=self.working_directory,
-                env={"PATH": os.defpath, "PYTHONNOUSERSITE": "1", "PYTHONUNBUFFERED": "1"},
-                stdin=subprocess.DEVNULL,
-                stdout=self._log_handle,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
+                working_directory=self.working_directory,
+                environment={
+                    "PATH": os.defpath,
+                    "PYTHONNOUSERSITE": "1",
+                    "PYTHONUNBUFFERED": "1",
+                },
+                output=self._log_handle,
             )
             self._owner = OwnedProcess.subprocess(process, resources=(self._log_handle,))
             self._process = process

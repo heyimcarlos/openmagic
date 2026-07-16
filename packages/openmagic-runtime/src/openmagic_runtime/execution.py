@@ -154,6 +154,11 @@ class DeterministicExecutor:
 CandidateT = TypeVar("CandidateT")
 
 
+@dataclass(frozen=True)
+class _AgentSessionReady:
+    process_id: int
+
+
 def _run_agent_child(
     factory: Callable[[], Callable[[AgentExecutionInput], Any]],
     input_value: AgentExecutionInput,
@@ -161,6 +166,7 @@ def _run_agent_child(
 ) -> None:
     try:
         os.setsid()
+        sender.send(_AgentSessionReady(process_id=os.getpid()))
         sender.send(("result", factory()(input_value)))
     except AgentExecutionFailure as error:
         sender.send(("failure", error.reason, str(error)))
@@ -176,27 +182,44 @@ def _run_agent_child(
         sender.close()
 
 
-def _close_unstarted_agent_process(
-    process: Any, receiver: Any, sender: Any
-) -> tuple[BaseException, ...]:
-    errors: list[BaseException] = []
-    for endpoint in (sender, receiver):
-        try:
-            endpoint.close()
-        except BaseException as error:
-            errors.append(error)
+def _observe_agent_session(receiver: Any, process_id: int, timeout: float) -> None:
+    if not receiver.poll(timeout):
+        raise AgentExecutionFailure(
+            "child_process_failure",
+            "Agent child did not establish its owned process session",
+        )
     try:
-        process.close()
-    except BaseException as error:
-        errors.append(error)
-    return tuple(errors)
+        message = receiver.recv()
+    except EOFError as error:
+        raise AgentExecutionFailure(
+            "child_process_failure",
+            "Agent child ended before establishing its owned process session",
+        ) from error
+    if type(message) is not _AgentSessionReady or message.process_id != process_id:
+        raise AgentExecutionFailure(
+            "malformed_result",
+            "Agent child sent an invalid process-session handshake",
+        )
 
 
 @contextmanager
-def _agent_process_scope(process: Any, receiver: Any, sender: Any) -> Iterator[None]:
+def _agent_process_scope(
+    process: Any,
+    receiver: Any,
+    sender: Any,
+    *,
+    startup_timeout: float,
+) -> Iterator[None]:
     owner: OwnedProcess | None = None
     try:
         process.start()
+        process_id = process.pid
+        if not isinstance(process_id, int):
+            raise AgentExecutionFailure(
+                "child_process_failure",
+                "Started Agent child did not expose its process identity",
+            )
+        _observe_agent_session(receiver, process_id, startup_timeout)
         owner = OwnedProcess.multiprocessing(process, resources=(sender, receiver))
         sender.close()
         yield
@@ -204,7 +227,11 @@ def _agent_process_scope(process: Any, receiver: Any, sender: Any) -> Iterator[N
         cleanup_errors = (
             owner.reap(timeout_seconds=1).errors
             if owner is not None
-            else _close_unstarted_agent_process(process, receiver, sender)
+            else OwnedProcess.cleanup_multiprocessing_start(
+                process,
+                resources=(sender, receiver),
+                timeout_seconds=1,
+            ).errors
         )
         if cleanup_errors:
             raise BaseExceptionGroup(
@@ -253,7 +280,12 @@ class FreshAgentExecutor(Generic[CandidateT]):
             name="openmagic-agent-attempt",
         )
         deadline = monotonic() + self._timeout_seconds
-        with _agent_process_scope(process, receiver, sender):
+        with _agent_process_scope(
+            process,
+            receiver,
+            sender,
+            startup_timeout=self._timeout_seconds,
+        ):
             while process.is_alive() and monotonic() < deadline and not cancellation.cancelled:
                 process.join(timeout=0.01)
             if process.is_alive():

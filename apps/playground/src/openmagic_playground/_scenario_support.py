@@ -21,6 +21,7 @@ from openmagic_runtime.threads import CreateThread, ThreadStore
 from testcontainers.postgres import PostgresContainer
 
 from openmagic_playground.deployment import POSTGRES_IMAGE
+from openmagic_playground.process_launching import finish_owned_context
 from openmagic_playground.renewal_observation import RenewalProjection, decode_renewal_projection
 from openmagic_playground.reset import mark_synthetic_deployment
 from openmagic_playground.responses import (
@@ -79,8 +80,19 @@ def scenario_database(scenario: str) -> Iterator[str]:
         apply_migrations(database_url)
         mark_synthetic_deployment(database_url)
         yield database_url
-    finally:
-        container.stop()
+    except BaseException as execution_error:
+        finish_owned_context(
+            container.stop,
+            execution_error=execution_error,
+            message="playground database execution and cleanup failed",
+        )
+        raise
+    else:
+        finish_owned_context(
+            container.stop,
+            execution_error=None,
+            message="playground database cleanup failed",
+        )
 
 
 def create_renewal_fixture(

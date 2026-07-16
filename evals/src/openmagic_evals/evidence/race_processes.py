@@ -8,10 +8,11 @@ import time
 from contextlib import suppress
 from multiprocessing import get_context
 from multiprocessing.connection import Connection
-from multiprocessing.process import BaseProcess
+from multiprocessing.context import SpawnContext
 from typing import TypeVar
 
 import psycopg
+from openmagic_runtime.processes import OwnedProcess
 
 from openmagic_evals.evidence._race_operations import (
     AcceptSignalRace,
@@ -19,7 +20,6 @@ from openmagic_evals.evidence._race_operations import (
     DeliveryClaimRace,
     RaceProtocolError,
     RaceRequest,
-    RaceRequestValue,
     RouteActivationRace,
     RouteActivationRaceResult,
     StartRenewalOutreachRace,
@@ -36,6 +36,7 @@ from openmagic_evals.evidence._race_transport import (
     ProcessRacePair,
     ProcessRaceReady,
     ProcessRaceResult,
+    ProcessRaceSessionReady,
     ProcessRaceSucceeded,
     RaceBarrierStage,
     RaceControl,
@@ -44,6 +45,7 @@ from openmagic_evals.evidence._race_transport import (
     decode_fatal,
     decode_process_result,
     decode_ready,
+    decode_session_ready,
 )
 
 ResultT = TypeVar("ResultT")
@@ -58,11 +60,13 @@ def _contend(
     database_url: str,
     barrier_key: int,
     jitter_microseconds: int,
-    request: RaceRequestValue,
+    request: RaceRequest[object],
     control: Connection,
 ) -> None:
     process_id = os.getpid()
     try:
+        os.setsid()
+        control.send(ProcessRaceSessionReady(process_id=process_id))
         with psycopg.connect(database_url, autocommit=True) as barrier:
             backend_id = barrier.info.backend_pid
             control.send(
@@ -143,57 +147,60 @@ def _receive_result(
     return decode_process_result(request, message)
 
 
-def _reap_processes(processes: tuple[BaseProcess, ...], *, timeout_seconds: float = 5.0) -> None:
+def _reap_processes(processes: tuple[OwnedProcess, ...], *, timeout_seconds: float = 5.0) -> None:
     """Reap every owned contender before reporting any cleanup failure."""
 
-    errors: list[Exception] = []
+    errors: list[BaseException] = []
     for process in processes:
-        alive = True
-        try:
-            try:
-                process.join(timeout=timeout_seconds)
-            except Exception as error:
-                errors.append(error)
-            try:
-                alive = process.is_alive()
-            except Exception as error:
-                errors.append(error)
-            if alive:
-                try:
-                    process.terminate()
-                except Exception as error:
-                    errors.append(error)
-                try:
-                    process.join(timeout=timeout_seconds)
-                except Exception as error:
-                    errors.append(error)
-                try:
-                    alive = process.is_alive()
-                except Exception as error:
-                    errors.append(error)
-            if alive:
-                try:
-                    process.kill()
-                except Exception as error:
-                    errors.append(error)
-                try:
-                    process.join(timeout=timeout_seconds)
-                except Exception as error:
-                    errors.append(error)
-                try:
-                    alive = process.is_alive()
-                except Exception as error:
-                    errors.append(error)
-            if alive:
-                errors.append(RuntimeError(f"race contender {process.pid} survived cleanup"))
-        finally:
-            if not alive:
-                try:
-                    process.close()
-                except Exception as error:
-                    errors.append(error)
+        cleanup = process.reap(timeout_seconds=timeout_seconds)
+        errors.extend(cleanup.errors)
     if errors:
-        raise ExceptionGroup("race contender cleanup failed", errors)
+        raise BaseExceptionGroup("race contender cleanup failed", errors)
+
+
+def _start_contender(
+    *,
+    context: SpawnContext,
+    database_url: str,
+    barrier_key: int,
+    jitter_microseconds: int,
+    request: RaceRequest[ResultT],
+    name: str,
+) -> tuple[Connection, OwnedProcess]:
+    parent, child = context.Pipe(duplex=True)
+    process = context.Process(
+        target=_contend,
+        args=(database_url, barrier_key, jitter_microseconds, request, child),
+        name=name,
+    )
+    owner: OwnedProcess | None = None
+    try:
+        process.start()
+        process_id = process.pid
+        if not isinstance(process_id, int):
+            raise RaceProtocolError("started race contender has no process identity")
+        ready = decode_session_ready(_receive(parent))
+        if ready.process_id != process_id:
+            raise RaceProtocolError("race process-session identity does not match its child")
+        owner = OwnedProcess.multiprocessing(process, resources=(parent, child))
+        child.close()
+        return parent, owner
+    except BaseException as start_error:
+        cleanup = (
+            owner.reap(timeout_seconds=1)
+            if owner is not None
+            else OwnedProcess.cleanup_multiprocessing_start(
+                process,
+                resources=(parent, child),
+                timeout_seconds=1,
+            )
+        )
+        if cleanup.errors:
+            raise BaseExceptionGroup(
+                "race contender startup and cleanup failed",
+                [start_error, *cleanup.errors],
+            ) from start_error
+        raise
 
 
 def run_process_contenders(
@@ -210,25 +217,19 @@ def run_process_contenders(
     key = _barrier_key(case_id, seed)
     context = get_context("spawn")
     parents: list[Connection] = []
-    processes: list[BaseProcess] = []
+    processes: list[OwnedProcess] = []
     with psycopg.connect(database_url, autocommit=True) as coordinator:
         coordinator.execute("SELECT pg_advisory_lock(%s)", (key,))
         try:
             for index in range(2):
-                parent, child = context.Pipe(duplex=True)
-                process = context.Process(
-                    target=_contend,
-                    args=(
-                        database_url,
-                        key,
-                        jitter_microseconds[index],
-                        requests[index],
-                        child,
-                    ),
+                parent, process = _start_contender(
+                    context=context,
+                    database_url=database_url,
+                    barrier_key=key,
+                    jitter_microseconds=jitter_microseconds[index],
+                    request=requests[index],
                     name=f"openmagic-race-{case_id}-{seed}-{index}",
                 )
-                process.start()
-                child.close()
                 parents.append(parent)
                 processes.append(process)
             waiting = tuple(_receive_ready(parent, RaceBarrierStage.WAITING) for parent in parents)
@@ -284,11 +285,6 @@ def run_process_contenders(
                 coordinator.execute("SELECT pg_advisory_unlock(%s)", (key,))
             except Exception as error:
                 cleanup_errors.append(error)
-            for parent in parents:
-                try:
-                    parent.close()
-                except Exception as error:
-                    cleanup_errors.append(error)
             try:
                 _reap_processes(tuple(processes))
             except Exception as error:
@@ -306,6 +302,7 @@ __all__ = [
     "ProcessRaceFailure",
     "ProcessRacePair",
     "ProcessRaceResult",
+    "ProcessRaceSessionReady",
     "ProcessRaceSucceeded",
     "RaceFailureKind",
     "RaceFailureReason",
@@ -316,6 +313,7 @@ __all__ = [
     "StepClaimRace",
     "VerificationSubmissionRace",
     "decode_process_result",
+    "decode_session_ready",
     "run_process_contenders",
     "validate_race_pair",
     "validate_race_request",

@@ -23,6 +23,11 @@ from example_insurance.migrations import apply_migrations
 from openmagic_runtime.processes import OwnedProcess, ProcessCleanup
 from testcontainers.postgres import PostgresContainer
 
+from openmagic_playground.process_launching import (
+    ProcessLauncher,
+    SubprocessLauncher,
+    finish_owned_context,
+)
 from openmagic_playground.reset import mark_synthetic_deployment, reset_synthetic_deployment
 
 POSTGRES_IMAGE = "postgres@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193"
@@ -83,6 +88,7 @@ class PlaygroundDeployment:
         email_provider_url: str | None = None,
         verification_code_secret: str | None = None,
         role_capacities: Mapping[ProcessRole, int] | None = None,
+        process_launcher: ProcessLauncher | None = None,
     ) -> None:
         self.working_directory = working_directory.resolve()
         self.readiness_timeout = readiness_timeout
@@ -103,6 +109,7 @@ class PlaygroundDeployment:
         if any(type(value) is not int or value <= 0 for value in capacities.values()):
             raise ValueError("Initial process-pool capacities must be positive integers")
         self.role_capacities = dict(capacities)
+        self._process_launcher = process_launcher or SubprocessLauncher()
         self.database_url = ""
         self.database_name = ""
         self.processes: tuple[ManagedProcess, ...] = ()
@@ -120,7 +127,12 @@ class PlaygroundDeployment:
         exc_value: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
-        self.stop()
+        del exc_type, traceback
+        finish_owned_context(
+            self.stop,
+            execution_error=exc_value,
+            message="playground execution and cleanup failed",
+        )
 
     def start(self) -> tuple[ManagedProcess, ...]:
         if self._container is not None or self._running:
@@ -300,7 +312,7 @@ class PlaygroundDeployment:
             )
         log_handle = (self.working_directory / f"{role}-{uuid4().hex}.log").open("wb")
         try:
-            process = subprocess.Popen(
+            process = self._process_launcher.launch(
                 [
                     str(script),
                     "--database-url",
@@ -311,12 +323,13 @@ class PlaygroundDeployment:
                     str(port),
                     *arguments,
                 ],
-                cwd=self.working_directory,
-                env={"PATH": os.defpath, "PYTHONNOUSERSITE": "1", "PYTHONUNBUFFERED": "1"},
-                stdin=subprocess.DEVNULL,
-                stdout=log_handle,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
+                working_directory=self.working_directory,
+                environment={
+                    "PATH": os.defpath,
+                    "PYTHONNOUSERSITE": "1",
+                    "PYTHONUNBUFFERED": "1",
+                },
+                output=log_handle,
             )
         except BaseException:
             log_handle.close()

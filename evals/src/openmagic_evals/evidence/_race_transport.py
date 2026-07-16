@@ -96,6 +96,11 @@ class RaceControl(StrEnum):
 
 
 @dataclass(frozen=True)
+class ProcessRaceSessionReady:
+    process_id: int
+
+
+@dataclass(frozen=True)
 class ProcessRaceReady:
     stage: RaceBarrierStage
     process_id: int
@@ -176,6 +181,14 @@ def decode_ready(message: object, expected: RaceBarrierStage) -> ProcessRaceRead
     return message
 
 
+def decode_session_ready(message: object) -> ProcessRaceSessionReady:
+    if type(message) is not ProcessRaceSessionReady:
+        raise RaceProtocolError("race contender sent an invalid process-session envelope")
+    if not _valid_process_id(message.process_id):
+        raise RaceProtocolError("race contender sent an invalid process-session identity")
+    return message
+
+
 def decode_process_result(
     request: RaceRequest[ResultT], message: object
 ) -> ProcessRaceResult[ResultT]:
@@ -218,6 +231,7 @@ __all__ = [
     "ProcessRacePair",
     "ProcessRaceReady",
     "ProcessRaceResult",
+    "ProcessRaceSessionReady",
     "ProcessRaceSucceeded",
     "RaceBarrierStage",
     "RaceControl",
@@ -226,4 +240,5 @@ __all__ = [
     "decode_fatal",
     "decode_process_result",
     "decode_ready",
+    "decode_session_ready",
 ]

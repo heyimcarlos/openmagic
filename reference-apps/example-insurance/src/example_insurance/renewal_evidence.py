@@ -12,6 +12,7 @@ from example_insurance._persistence.renewal_evidence_records import (
     RenewalEvidenceSnapshot,
     load_renewal_evidence_snapshot,
 )
+from example_insurance._persistence.transaction_modes import set_repeatable_read_only
 
 
 def _correlations(snapshot: RenewalEvidenceSnapshot) -> dict[str, Any]:
@@ -134,7 +135,7 @@ class RenewalEvidenceProjector:
 
     def to_json(self, workflow_id: UUID) -> str:
         with psycopg.connect(self._database_url) as connection, connection.transaction():
-            connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            set_repeatable_read_only(connection)
             snapshot = load_renewal_evidence_snapshot(connection, workflow_id)
         return EvidenceRecord(
             schema_version="openmagic.evidence.v1",

@@ -13,6 +13,7 @@ import openmagic_api
 import openmagic_evals
 import openmagic_playground
 import openmagic_runtime
+import pytest
 from openmagic_evals.evidence.package_policy import (
     PACKAGE_ROLES,
     project_dependencies,
@@ -101,19 +102,37 @@ def test_public_persistence_policy_rejects_record_adapter_module(tmp_path: Path)
     )
 
 
-def test_sql_ownership_policy_rejects_public_application_sql(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "source",
+    [
+        'connection.execute("SET TRANSACTION READ ONLY")',
+        'connection.execute("WITH value AS (SELECT 1) SELECT * FROM value")',
+        'connection.execute("MERGE INTO target USING source ON false")',
+        'connection.execute("TRUNCATE TABLE target")',
+        'connection.execute("LOCK TABLE target")',
+        'connection.execute("CALL refresh_target()")',
+        "connection.execute(statement)",
+        "connection.cursor()",
+        "sql.SQL(template)",
+    ],
+)
+def test_sql_ownership_policy_rejects_public_application_sql(tmp_path: Path, source: str) -> None:
     package = tmp_path / "example_insurance"
     package.mkdir()
     leaked = package / "renewal_policy.py"
-    leaked.write_text(
-        'statement = "SELECT policy_id FROM example_insurance.policy_renewal_facts"\n',
-        encoding="utf-8",
-    )
+    leaked.write_text(source + "\n", encoding="utf-8")
     role = next(role for role in PACKAGE_ROLES if role.distribution == "example-insurance")
 
     assert role_sql_ownership_violations(role, (leaked,)) == (
         "example-insurance contains SQL outside approved persistence owner renewal_policy.py:1",
     )
+
+
+def test_public_renewal_policy_does_not_import_private_persistence_records() -> None:
+    application_root = ROOT / "reference-apps/example-insurance/src/example_insurance"
+    imports = python_imports((application_root / "renewal_decisions.py",))
+
+    assert not any(name.startswith("example_insurance._persistence") for name in imports)
 
 
 def test_runtime_root_and_role_modules_have_explicit_export_allowlists() -> None:

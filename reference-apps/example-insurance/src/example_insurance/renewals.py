@@ -48,6 +48,7 @@ from example_insurance._persistence.renewal_workflow_records import (
     record_workflow,
     workflow_exists,
 )
+from example_insurance._persistence.transaction_modes import set_repeatable_read_only
 from example_insurance._persistence.verification_workflow_records import (
     has_active_verification_workflows,
 )
@@ -371,7 +372,7 @@ class ExampleInsurance:
 
     def renewal_approval_presentation(self, workflow_id: UUID) -> RenewalApprovalPresentation:
         with psycopg.connect(self._database_url) as connection, connection.transaction():
-            connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            set_repeatable_read_only(connection)
             return self._review_control.presentation(connection, workflow_id)
 
     def approve_renewal_draft(

@@ -7,6 +7,7 @@ import json
 import os
 from collections.abc import Iterator
 from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from uuid import uuid4
 
@@ -15,7 +16,10 @@ from psycopg import sql
 
 from openmagic_evals.evidence.pins import PostgresDeploymentPin
 
-_DIRECTORY_ENVIRONMENT = "OPENMAGIC_EVIDENCE_POSTGRES_DIRECTORY"
+_ACTIVE_RECORDER: ContextVar[Path | None] = ContextVar(
+    "openmagic_postgres_provenance_recorder",
+    default=None,
+)
 
 
 def _sha256(value: bytes) -> str:
@@ -88,10 +92,9 @@ def observe_postgres_deployment(
 def record_postgres_deployment(database_url: str, *, postgres_image: str) -> None:
     """Persist provenance only when an evidence runner has installed a recorder."""
 
-    configured = os.environ.get(_DIRECTORY_ENVIRONMENT)
-    if configured is None:
+    directory = _ACTIVE_RECORDER.get()
+    if directory is None:
         return
-    directory = Path(configured)
     directory.mkdir(parents=True, exist_ok=True)
     pin = observe_postgres_deployment(database_url, postgres_image=postgres_image)
     identity = pin.deployment_id.removeprefix("sha256:")
@@ -114,15 +117,11 @@ def load_postgres_deployments(directory: Path) -> tuple[PostgresDeploymentPin, .
 def record_postgres_deployments(directory: Path) -> Iterator[None]:
     """Direct all nested container observations into one lane-owned directory."""
 
-    previous = os.environ.get(_DIRECTORY_ENVIRONMENT)
-    os.environ[_DIRECTORY_ENVIRONMENT] = str(directory.resolve())
+    token = _ACTIVE_RECORDER.set(directory.resolve())
     try:
         yield
     finally:
-        if previous is None:
-            os.environ.pop(_DIRECTORY_ENVIRONMENT, None)
-        else:
-            os.environ[_DIRECTORY_ENVIRONMENT] = previous
+        _ACTIVE_RECORDER.reset(token)
 
 
 __all__ = [

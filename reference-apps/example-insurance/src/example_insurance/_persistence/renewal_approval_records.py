@@ -21,6 +21,7 @@ from psycopg.rows import dict_row
 
 from example_insurance._persistence.renewal_workflow_records import lock_instance_for_workflow
 from example_insurance.renewal_approval_policy import (
+    ApprovalDecisionAuthority,
     DeliveredApprovalPresentation,
     DurableApprovalPresentation,
     message_source_kind,
@@ -137,6 +138,15 @@ class ApprovalSnapshot:
             presentation_fingerprint=self.draft.presentation_fingerprint,
             effect=self.draft.effect,
             delivery=self._delivered_presentation(),
+        )
+
+    def decision_authority(self) -> ApprovalDecisionAuthority:
+        return ApprovalDecisionAuthority(
+            lifecycle=self.workflow.lifecycle,
+            authorized_actor_kind=self.workflow.authorized_actor_kind,
+            authorized_actor_id=self.workflow.authorized_actor_id,
+            authority_revoked=self.workflow.authority_revoked,
+            durable=self.durable_presentation(),
         )
 
     def presentation(self) -> RenewalApprovalPresentation:

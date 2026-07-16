@@ -8,7 +8,10 @@ from tempfile import TemporaryDirectory
 
 from openmagic_evals.evidence.agent_cases import DEVELOPMENT_CASES, AgentCase
 from openmagic_evals.evidence.agent_corpus_phase import load_verified_held_out_corpus
-from openmagic_evals.evidence.agent_experiment import execute_agent_phase
+from openmagic_evals.evidence.agent_experiment import (
+    capture_agent_configuration_phase,
+    execute_agent_phase,
+)
 from openmagic_evals.evidence.agent_projection import (
     AgentExperimentResult,
     agent_corpus_digest,
@@ -50,6 +53,7 @@ def run_local_agent_quality(
         str(timeout_seconds),
     )
     started_at = datetime.now(UTC)
+    configuration = capture_agent_configuration_phase()
     with TemporaryDirectory(prefix="openmagic-agent-postgres-") as deployment_directory:
         deployment_path = Path(deployment_directory)
         with record_postgres_deployments(deployment_path):
@@ -62,6 +66,7 @@ def run_local_agent_quality(
     artifact = project_agent_quality_artifact(
         development=development,
         held_out=held_out,
+        configuration=configuration,
         seal=seal,
         reproducibility=reproducibility_pin(
             repository_root.resolve(),

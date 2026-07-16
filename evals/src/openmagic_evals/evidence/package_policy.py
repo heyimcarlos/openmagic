@@ -9,12 +9,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 _NORMALIZE = re.compile(r"[-_.]+")
-_SQL_STATEMENT = re.compile(
-    r"\b(?:SELECT|INSERT\s+INTO|UPDATE|DELETE\s+FROM|CREATE\s+TABLE|"
-    r"ALTER\s+TABLE|DROP\s+TABLE)\b",
-    re.IGNORECASE,
-)
-_APPLICATION_SQL_LIFECYCLE_OWNERS = frozenset({"migrations.py", "readiness.py"})
 
 
 @dataclass(frozen=True)
@@ -25,6 +19,7 @@ class PackageRole:
     source: Path
     allowed_internal: frozenset[str]
     declared_internal_dependencies: frozenset[str]
+    sql_owner_roots: tuple[Path, ...] = ()
 
 
 PACKAGE_ROLES: tuple[PackageRole, ...] = (
@@ -43,6 +38,7 @@ PACKAGE_ROLES: tuple[PackageRole, ...] = (
         source=Path("reference-apps/example-insurance/src/example_insurance"),
         allowed_internal=frozenset({"openmagic_runtime"}),
         declared_internal_dependencies=frozenset({"openmagic-runtime"}),
+        sql_owner_roots=(Path("_persistence"), Path("migrations.py"), Path("readiness.py")),
     ),
     PackageRole(
         distribution="openmagic-api",
@@ -173,33 +169,53 @@ def role_public_persistence_violations(
 
 
 def role_sql_ownership_violations(role: PackageRole, paths: tuple[Path, ...]) -> tuple[str, ...]:
-    """Reject Example Insurance SQL outside its canonical persistence owners."""
+    """Reject database call sites outside a distribution's declared SQL owners."""
 
-    if role.distribution != "example-insurance":
+    if not role.sql_owner_roots:
         return ()
-    violations: list[str] = []
+    violations: set[str] = set()
     for path in paths:
         if path.suffix != ".py" or role.package not in path.parts:
             continue
         package_index = path.parts.index(role.package)
         relative = Path(*path.parts[package_index + 1 :])
-        if (
-            "_persistence" in relative.parts
-            or relative.as_posix() in _APPLICATION_SQL_LIFECYCLE_OWNERS
+        if any(
+            relative == owner or relative.parts[: len(owner.parts)] == owner.parts
+            for owner in role.sql_owner_roots
         ):
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
-            if (
-                isinstance(node, ast.Constant)
-                and isinstance(node.value, str)
-                and _SQL_STATEMENT.search(node.value)
-            ):
-                violations.append(
+            if isinstance(node, ast.Call) and _is_sql_boundary_call(node):
+                violations.add(
                     f"{role.distribution} contains SQL outside approved persistence owner "
                     f"{relative.as_posix()}:{node.lineno}"
                 )
     return tuple(sorted(violations))
+
+
+def _is_sql_boundary_call(node: ast.Call) -> bool:
+    function = node.func
+    if not isinstance(function, ast.Attribute):
+        return False
+    if (
+        function.attr == "SQL"
+        and isinstance(function.value, ast.Name)
+        and function.value.id == "sql"
+    ):
+        return True
+    if function.attr == "cursor":
+        return True
+    if function.attr not in {"execute", "executemany"}:
+        return False
+    receiver = function.value
+    if isinstance(receiver, ast.Name):
+        name = receiver.id
+    elif isinstance(receiver, ast.Attribute):
+        name = receiver.attr
+    else:
+        return False
+    return name in {"connection", "cursor"} or name.endswith(("_connection", "_cursor"))
 
 
 def role_dependency_violations(role: PackageRole, dependencies: frozenset[str]) -> tuple[str, ...]:

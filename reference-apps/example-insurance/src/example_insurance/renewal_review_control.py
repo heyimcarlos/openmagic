@@ -52,7 +52,7 @@ class RenewalReviewControl:
         )
         decision = self._policy.decide(
             decision_kind="approve",
-            facts=decision_facts(snapshot, command.actor, command.input),
+            facts=decision_facts(snapshot.decision_authority(), command.actor, command.input),
         )
         if isinstance(decision, ApprovalRejectedDecision):
             return ApproveRenewalDraftResult(
@@ -141,7 +141,7 @@ class RenewalReviewControl:
         )
         decision = self._policy.decide(
             decision_kind="request_revision",
-            facts=decision_facts(snapshot, command.actor, command.input),
+            facts=decision_facts(snapshot.decision_authority(), command.actor, command.input),
         )
         if isinstance(decision, ApprovalRejectedDecision):
             return RequestRenewalRevisionResult(

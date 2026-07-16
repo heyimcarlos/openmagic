@@ -17,11 +17,16 @@ class Closeable(Protocol):
 
 
 class _MultiprocessingProcess(Protocol):
-    pid: int | None
+    @property
+    def pid(self) -> int | None: ...
 
     def join(self, timeout: float | None = None) -> None: ...
 
     def is_alive(self) -> bool: ...
+
+    def terminate(self) -> None: ...
+
+    def kill(self) -> None: ...
 
     def close(self) -> None: ...
 
@@ -56,6 +61,13 @@ def _live_group_members(process_group_id: int) -> tuple[int, ...] | None:
     return tuple(sorted(members))
 
 
+def _is_session_leader(process_id: int) -> bool:
+    try:
+        return os.getpgid(process_id) == process_id
+    except ProcessLookupError:
+        return False
+
+
 class OwnedProcess:
     """Own one session leader, its complete process group, and closeable resources."""
 
@@ -81,6 +93,9 @@ class OwnedProcess:
         *,
         resources: Iterable[Closeable] = (),
     ) -> OwnedProcess:
+        if not _is_session_leader(process.pid):
+            raise ValueError("Owned subprocess must be an observed session leader")
+
         def wait_for_exit(timeout: float) -> bool:
             try:
                 process.wait(timeout=timeout)
@@ -104,6 +119,8 @@ class OwnedProcess:
         process_id = getattr(process, "pid", None)
         if not isinstance(process_id, int):
             raise ValueError("Started multiprocessing child must expose its process identity")
+        if not _is_session_leader(process_id):
+            raise ValueError("Owned multiprocessing child must be an observed session leader")
 
         def wait_for_exit(timeout: float) -> bool:
             process.join(timeout=timeout)
@@ -115,6 +132,74 @@ class OwnedProcess:
             close_process=process.close,
             resources=resources,
         )
+
+    @classmethod
+    def cleanup_multiprocessing_start(
+        cls,
+        process: _MultiprocessingProcess,
+        *,
+        resources: Iterable[Closeable] = (),
+        timeout_seconds: float,
+    ) -> ProcessCleanup:
+        """Clean a partially acquired child without assuming session ownership."""
+        if timeout_seconds <= 0:
+            raise ValueError("Process cleanup timeout must be positive")
+        owned_resources = tuple(resources)
+        process_id = getattr(process, "pid", None)
+        if isinstance(process_id, int) and _is_session_leader(process_id):
+            return cls.multiprocessing(process, resources=owned_resources).reap(
+                timeout_seconds=timeout_seconds
+            )
+
+        errors: list[BaseException] = []
+        leader_exited = not isinstance(process_id, int)
+        if isinstance(process_id, int):
+            try:
+                alive = bool(process.is_alive())
+            except BaseException as error:
+                errors.append(error)
+                alive = True
+            if alive:
+                try:
+                    process.terminate()
+                except BaseException as error:
+                    errors.append(error)
+                try:
+                    process.join(timeout=timeout_seconds)
+                except BaseException as error:
+                    errors.append(error)
+                try:
+                    alive = bool(process.is_alive())
+                except BaseException as error:
+                    errors.append(error)
+                    alive = True
+            if alive:
+                try:
+                    process.kill()
+                except BaseException as error:
+                    errors.append(error)
+                try:
+                    process.join(timeout=timeout_seconds)
+                except BaseException as error:
+                    errors.append(error)
+                try:
+                    alive = bool(process.is_alive())
+                except BaseException as error:
+                    errors.append(error)
+                    alive = True
+            leader_exited = not alive
+            if not leader_exited:
+                errors.append(RuntimeError(f"partial child {process_id} survived cleanup"))
+        for resource in owned_resources:
+            try:
+                resource.close()
+            except BaseException as error:
+                errors.append(error)
+        try:
+            process.close()
+        except BaseException as error:
+            errors.append(error)
+        return ProcessCleanup(reaped=leader_exited, errors=tuple(errors))
 
     def reap(self, *, timeout_seconds: float, forced_loss: bool = False) -> ProcessCleanup:
         if timeout_seconds <= 0:
@@ -188,7 +273,11 @@ class OwnedProcess:
                     self._close_process()
                 except BaseException as error:
                     errors.append(error)
-        return ProcessCleanup(reaped=not group_exists(), errors=tuple(errors))
+        group_disappeared = not group_exists()
+        return ProcessCleanup(
+            reaped=leader_exited and group_disappeared,
+            errors=tuple(errors),
+        )
 
 
 __all__ = ["Closeable", "OwnedProcess", "ProcessCleanup"]

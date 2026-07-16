@@ -7,7 +7,9 @@ import sys
 import time
 from dataclasses import dataclass
 from functools import partial
+from multiprocessing import active_children
 from pathlib import Path
+from threading import Thread
 from uuid import uuid4
 
 import pytest
@@ -183,3 +185,54 @@ def test_fresh_agent_executor_kills_and_reaps_term_resistant_child(tmp_path: Pat
         assert not stat.exists() or stat.read_text(encoding="utf-8").rpartition(")")[2].split()[
             0
         ] in {"X", "Z"}
+
+
+def test_fresh_agent_executor_cancellation_reaps_ready_session_tree(tmp_path: Path) -> None:
+    pid_file = tmp_path / "cancelled-agent-pids"
+    cancellation = CancellationToken()
+    executor = FreshAgentExecutor(
+        partial(_term_resistant_candidate_factory, pid_file),
+        result_class=Candidate,
+        encoder=lambda candidate: {"value": candidate.value},
+        timeout_seconds=5,
+    )
+
+    def cancel_when_candidate_starts() -> None:
+        deadline = time.monotonic() + 3
+        while not pid_file.is_file() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        cancellation.cancel()
+
+    canceller = Thread(target=cancel_when_candidate_starts)
+    canceller.start()
+    with pytest.raises(AgentExecutionFailure) as raised:
+        executor.execute(_execution(), cancellation)
+    canceller.join(timeout=1)
+
+    assert raised.value.reason == "cancelled"
+    assert not canceller.is_alive()
+    process_ids = tuple(int(value) for value in pid_file.read_text(encoding="utf-8").split())
+    for process_id in process_ids:
+        stat = Path(f"/proc/{process_id}/stat")
+        assert not stat.exists() or stat.read_text(encoding="utf-8").rpartition(")")[2].split()[
+            0
+        ] in {"X", "Z"}
+
+
+def test_fresh_agent_executor_cleans_scope_when_spawn_cannot_start() -> None:
+    existing_children = {child.pid for child in active_children()}
+
+    def local_factory():
+        return _candidate_factory()
+
+    executor = FreshAgentExecutor(
+        local_factory,
+        result_class=Candidate,
+        encoder=lambda candidate: {"value": candidate.value},
+        timeout_seconds=1,
+    )
+
+    with pytest.raises((AttributeError, TypeError), match=r"local object|pickle"):
+        executor.execute(_execution(), CancellationToken())
+
+    assert {child.pid for child in active_children()} <= existing_children

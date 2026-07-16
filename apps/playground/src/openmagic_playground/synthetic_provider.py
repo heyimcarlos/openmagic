@@ -20,6 +20,12 @@ from urllib.request import urlopen
 
 from openmagic_runtime.processes import OwnedProcess
 
+from openmagic_playground.process_launching import (
+    ProcessLauncher,
+    SubprocessLauncher,
+    finish_owned_context,
+)
+
 ProviderBehavior = Literal["success", "not_applied"]
 
 
@@ -115,11 +121,13 @@ class SyntheticEmailProvider:
         behavior: ProviderBehavior = "success",
         readiness_timeout: float = 10,
         shutdown_timeout: float = 5,
+        process_launcher: ProcessLauncher | None = None,
     ) -> None:
         self.working_directory = working_directory.resolve()
         self.behavior = behavior
         self.readiness_timeout = readiness_timeout
         self.shutdown_timeout = shutdown_timeout
+        self._process_launcher = process_launcher or SubprocessLauncher()
         self.port = _free_port()
         self.url = f"http://127.0.0.1:{self.port}"
         self.request_log = self.working_directory / "requests.jsonl"
@@ -137,8 +145,12 @@ class SyntheticEmailProvider:
         exc_value: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
-        del exc_type, exc_value, traceback
-        self.stop()
+        del exc_type, traceback
+        finish_owned_context(
+            self.stop,
+            execution_error=exc_value,
+            message="synthetic provider execution and cleanup failed",
+        )
 
     @property
     def pid(self) -> int:
@@ -153,7 +165,7 @@ class SyntheticEmailProvider:
         self.request_log.unlink(missing_ok=True)
         self._log = (self.working_directory / "provider.log").open("ab")
         try:
-            process = subprocess.Popen(
+            process = self._process_launcher.launch(
                 [
                     sys.executable,
                     "-m",
@@ -166,12 +178,13 @@ class SyntheticEmailProvider:
                     "--request-log",
                     str(self.request_log),
                 ],
-                cwd=self.working_directory,
-                env={"PATH": os.defpath, "PYTHONNOUSERSITE": "1", "PYTHONUNBUFFERED": "1"},
-                stdin=subprocess.DEVNULL,
-                stdout=self._log,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
+                working_directory=self.working_directory,
+                environment={
+                    "PATH": os.defpath,
+                    "PYTHONNOUSERSITE": "1",
+                    "PYTHONUNBUFFERED": "1",
+                },
+                output=self._log,
             )
             self._owner = OwnedProcess.subprocess(process, resources=(self._log,))
             self._process = process

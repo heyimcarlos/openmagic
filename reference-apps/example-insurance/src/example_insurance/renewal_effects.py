@@ -19,6 +19,7 @@ from openmagic_runtime.execution import (
 )
 
 from example_insurance._persistence.renewal_command_records import load_committed_dispatch_permit
+from example_insurance._persistence.transaction_modes import set_read_only
 from example_insurance.renewal_effect_types import ExternalEffectPermit, logical_effect_id
 
 
@@ -124,7 +125,7 @@ class AuthorizedEmailEffectExecutor:
     ) -> AttemptObservation:
         command_id, result_digest = _permit_reference(execution)
         with psycopg.connect(self._database_url) as connection, connection.transaction():
-            connection.execute("SET TRANSACTION READ ONLY")
+            set_read_only(connection)
             permit = load_committed_dispatch_permit(
                 connection,
                 command_id=command_id,

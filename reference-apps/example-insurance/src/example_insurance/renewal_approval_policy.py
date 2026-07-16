@@ -152,6 +152,15 @@ class ApprovalDecisionFacts:
     durable: DurableApprovalPresentation
 
 
+@dataclass(frozen=True)
+class ApprovalDecisionAuthority:
+    lifecycle: WorkflowLifecycle
+    authorized_actor_kind: str
+    authorized_actor_id: str
+    authority_revoked: bool
+    durable: DurableApprovalPresentation
+
+
 ApprovalRejectionOutcome = Literal[
     "authority_revoked",
     "stale_presentation",
@@ -197,6 +206,7 @@ class RenewalApprovalPolicy:
 __all__ = [
     "ApprovalAcceptedDecision",
     "ApprovalDecision",
+    "ApprovalDecisionAuthority",
     "ApprovalDecisionFacts",
     "ApprovalDecisionKind",
     "ApprovalPresentationIdentity",

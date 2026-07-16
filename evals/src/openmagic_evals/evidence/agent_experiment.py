@@ -64,6 +64,14 @@ class AgentTrialPhase:
 
 
 @dataclass(frozen=True)
+class AgentConfigurationPhase:
+    renewal_instruction_digest: str
+    renewal_tool_schema_digest: str
+    boundary_instruction_digest: str
+    boundary_tool_schema_digest: str
+
+
+@dataclass(frozen=True)
 class _RenewalTrialSetup:
     thread_id: UUID
     command: StartRenewalOutreach
@@ -402,15 +410,27 @@ def execute_agent_phase(cases: tuple[AgentCase, ...]) -> AgentTrialPhase:
     return AgentTrialPhase(cases=cases, trials=trials)
 
 
-def agent_configuration_documents() -> tuple[
-    tuple[dict[str, object], dict[str, object]], dict[str, object]
-]:
-    return _renewal_agent_configuration_documents(), boundary_configuration_document()
+def capture_agent_configuration_phase() -> AgentConfigurationPhase:
+    renewal_instruction, renewal_tool_schema = _renewal_agent_configuration_documents()
+    boundary = boundary_configuration_document()
+    return AgentConfigurationPhase(
+        renewal_instruction_digest=canonical_digest(renewal_instruction),
+        renewal_tool_schema_digest=canonical_digest(renewal_tool_schema),
+        boundary_instruction_digest=canonical_digest(boundary),
+        boundary_tool_schema_digest=canonical_digest(
+            {
+                "input": "openmagic_runtime.agents.AgentRunInput",
+                "output": "openmagic_evals.evidence.agent_boundary_trials._BoundaryCandidate",
+                "timeout_seconds": boundary["timeout_seconds"],
+            }
+        ),
+    )
 
 
 __all__ = [
+    "AgentConfigurationPhase",
     "AgentTrialPhase",
-    "agent_configuration_documents",
     "agent_scorer_contract",
+    "capture_agent_configuration_phase",
     "execute_agent_phase",
 ]
