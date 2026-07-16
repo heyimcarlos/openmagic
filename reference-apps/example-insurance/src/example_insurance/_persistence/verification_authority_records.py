@@ -1,4 +1,4 @@
-"""Transaction-bound persistence for verification authority."""
+"""Private transaction-bound persistence for verification authority."""
 
 from __future__ import annotations
 

@@ -30,6 +30,7 @@ testpaths = [
     "packages/openmagic-runtime/tests",
     "reference-apps/example-insurance/tests",
     "apps/api/tests",
+    "apps/playground/tests",
     "evals/tests",
 ]
 timeout = 90

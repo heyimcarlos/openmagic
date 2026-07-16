@@ -1,4 +1,4 @@
-"""Transaction-bound persistence for evidence-backed renewal completion."""
+"""Private transaction-bound persistence for renewal completion."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from openmagic_runtime.kernel.inspection import KernelTransactionInspection
 from psycopg import Connection
 from psycopg.rows import dict_row
 
+from example_insurance._persistence.renewal_workflow_records import lock_instance_for_workflow
 from example_insurance.renewal_completion_policy import (
     CompletionEffectFact,
     CompletionStepFact,
@@ -20,7 +21,6 @@ from example_insurance.renewal_lifecycle_policy import (
     WorkflowLifecycle,
     workflow_lifecycle,
 )
-from example_insurance.renewal_workflow_records import lock_instance_for_workflow
 
 
 @dataclass(frozen=True)

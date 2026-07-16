@@ -10,14 +10,7 @@ from openmagic_runtime.kernel.control import KernelControl, ResolveDeferredStep
 from openmagic_runtime.kernel.work import ClaimedAttempt, DispositionRequired
 from psycopg import Connection
 
-from example_insurance.renewal_completion import RenewalCompletionControl
-from example_insurance.renewal_effect_policy import (
-    DispatchAuthority,
-    EffectObservation,
-    RenewalExternalEffectPolicy,
-    effect_observation,
-)
-from example_insurance.renewal_effect_records import (
+from example_insurance._persistence.renewal_effect_records import (
     EffectEvidenceSource,
     commit_dispatch_fence,
     lock_dispatch_authority,
@@ -26,11 +19,18 @@ from example_insurance.renewal_effect_records import (
     record_effect_observation,
     requested_dispatch_claim,
 )
+from example_insurance._persistence.renewal_records import CommandEventLineage, record_event
+from example_insurance.renewal_completion import RenewalCompletionControl
+from example_insurance.renewal_effect_policy import (
+    DispatchAuthority,
+    EffectObservation,
+    RenewalExternalEffectPolicy,
+    effect_observation,
+)
 from example_insurance.renewal_effect_types import (
     ExternalEffectPermit,
     logical_effect_id,
 )
-from example_insurance.renewal_records import CommandEventLineage, record_event
 
 
 class RenewalEffectControl:

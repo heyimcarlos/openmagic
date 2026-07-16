@@ -24,8 +24,11 @@ def _controls(_arguments: argparse.Namespace) -> dict[str, object]:
     return dict(process_controls().as_dict())
 
 
-def _renewal(_arguments: argparse.Namespace) -> BaseModel:
-    return run_renewal_demonstration()
+def _renewal(arguments: argparse.Namespace) -> BaseModel:
+    return run_renewal_demonstration(
+        working_directory=arguments.working_directory,
+        execute_approved_local_effect=arguments.execute_approved_local_effect,
+    )
 
 
 def _verification(_arguments: argparse.Namespace) -> BaseModel:
@@ -45,12 +48,17 @@ def main() -> None:
     ] = (
         ("manifest", "print the synthetic safety contract", _manifest),
         ("controls", "print explicit local role process controls", _controls),
-        ("demo-renewal", "run the effects-disabled renewal demonstration", _renewal),
         ("demo-verification", "run deterministic verification", _verification),
     )
     for name, help_text, handler in handlers:
         command = commands.add_parser(name, help=help_text)
         command.set_defaults(handler=handler)
+    renewal = commands.add_parser(
+        "demo-renewal", help="run one explicitly approved local-provider renewal"
+    )
+    renewal.add_argument("--working-directory", required=True, type=Path)
+    renewal.add_argument("--execute-approved-local-effect", action="store_true", required=True)
+    renewal.set_defaults(handler=_renewal)
     exercise = commands.add_parser("exercise", help="exercise every process and reset control")
     exercise.add_argument("--working-directory", required=True, type=Path)
     exercise.set_defaults(handler=_exercise)

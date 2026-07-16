@@ -148,6 +148,25 @@ def role_private_import_violations(role: PackageRole, imports: frozenset[str]) -
     return tuple(violations)
 
 
+def role_public_persistence_violations(
+    role: PackageRole, paths: tuple[Path, ...]
+) -> tuple[str, ...]:
+    """Reject transaction record adapters exposed as public package modules."""
+
+    violations: list[str] = []
+    for path in paths:
+        if path.suffix != ".py" or role.package not in path.parts:
+            continue
+        package_index = path.parts.index(role.package)
+        relative = Path(*path.parts[package_index + 1 :])
+        is_private = any(part.startswith("_") for part in relative.parts)
+        if not is_private and relative.name.endswith("_records.py"):
+            violations.append(
+                f"{role.distribution} exposes persistence adapter {relative.as_posix()}"
+            )
+    return tuple(sorted(violations))
+
+
 def role_dependency_violations(role: PackageRole, dependencies: frozenset[str]) -> tuple[str, ...]:
     internal_distributions = frozenset(item.distribution for item in PACKAGE_ROLES)
     actual = dependencies & internal_distributions
@@ -178,5 +197,6 @@ __all__ = [
     "role_dependency_violations",
     "role_import_violations",
     "role_private_import_violations",
+    "role_public_persistence_violations",
     "source_python_files",
 ]

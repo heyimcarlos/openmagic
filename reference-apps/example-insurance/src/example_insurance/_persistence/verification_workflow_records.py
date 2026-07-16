@@ -1,4 +1,4 @@
-"""Transaction-bound persistence for deterministic verification Workflows."""
+"""Private transaction-bound persistence for deterministic verification Workflows."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from psycopg import Connection
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from example_insurance.application_event_records import actor_record, cause_record
+from example_insurance._persistence.application_event_records import actor_record, cause_record
 
 VerificationWorkflowLifecycle = Literal["active", "completed", "failed"]
 

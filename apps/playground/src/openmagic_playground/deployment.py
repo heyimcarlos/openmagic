@@ -10,10 +10,12 @@ import sys
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
+from ipaddress import ip_address
 from pathlib import Path
 from types import TracebackType
 from typing import Literal
 from urllib.error import URLError
+from urllib.parse import urlsplit
 from urllib.request import urlopen
 from uuid import uuid4
 
@@ -30,6 +32,21 @@ _SCRIPTS: dict[ProcessRole, str] = {
     "workflow-worker": "openmagic-workflow-worker",
     "delivery-worker": "openmagic-delivery-worker",
 }
+
+
+def _require_local_provider_url(provider_url: str) -> None:
+    parsed = urlsplit(provider_url)
+    hostname = parsed.hostname
+    if parsed.scheme != "http" or hostname is None or parsed.username is not None:
+        raise ValueError("Email provider URL must use HTTP on a local loopback host")
+    if hostname == "localhost":
+        return
+    try:
+        local = ip_address(hostname).is_loopback
+    except ValueError:
+        local = False
+    if not local:
+        raise ValueError("Email provider URL must use HTTP on a local loopback host")
 
 
 def _free_port() -> int:
@@ -71,6 +88,8 @@ class PlaygroundDeployment:
         if shutdown_timeout <= 0:
             raise ValueError("Process shutdown timeout must be positive")
         self.shutdown_timeout = shutdown_timeout
+        if email_provider_url is not None:
+            _require_local_provider_url(email_provider_url)
         self.email_provider_url = email_provider_url
         self.verification_code_secret = verification_code_secret
         capacities = role_capacities or {
@@ -155,8 +174,9 @@ class PlaygroundDeployment:
                         self._container.stop()
                     except Exception as error:
                         errors.append(error)
+                    else:
+                        self._container = None
             finally:
-                self._container = None
                 try:
                     self._verification_secret_path.unlink(missing_ok=True)
                 except Exception as error:

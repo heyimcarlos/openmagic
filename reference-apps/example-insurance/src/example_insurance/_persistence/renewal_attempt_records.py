@@ -1,4 +1,4 @@
-"""Instance-first transaction operations for renewal Attempt results and recovery."""
+"""Private transaction operations for renewal Attempt results and recovery."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from typing import Any
 from openmagic_runtime.kernel.work import ClaimedAttempt, DispositionRequired, KernelWork
 from psycopg import Connection
 
-from example_insurance.renewal_workflow_records import (
+from example_insurance._persistence.renewal_workflow_records import (
     WorkflowIdentity,
     expired_workflow_instances,
     lock_workflow_after_instance,

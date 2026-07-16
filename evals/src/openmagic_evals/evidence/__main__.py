@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from openmagic_evals.evidence.agent_quality import run_local_agent_quality
-from openmagic_evals.evidence.claims import write_claim_report
+from openmagic_evals.evidence.claims import EvidencePackagePaths, write_claim_report
 from openmagic_evals.evidence.contracts import artifact_json_schema
 from openmagic_evals.evidence.demos import run_renewal_demo, run_verification_demo
 from openmagic_evals.evidence.installed_audit import audit_installed_environment
@@ -215,15 +215,17 @@ def _register_playground(commands: argparse._SubParsersAction) -> None:
 
 def _handle_claim_report(arguments: argparse.Namespace) -> None:
     write_claim_report(
-        deterministic_path=arguments.deterministic,
-        surface_path=arguments.surface_audit,
-        agent_path=arguments.agent_quality,
-        live_path=arguments.live_smoke,
-        playground_path=arguments.playground,
-        process_path=arguments.processes,
-        race_path=arguments.races,
-        renewal_demo_path=arguments.renewal_demo,
-        verification_demo_path=arguments.verification_demo,
+        package=EvidencePackagePaths(
+            deterministic=arguments.deterministic,
+            surface_audit=arguments.surface_audit,
+            agent_quality=arguments.agent_quality,
+            live_smoke=arguments.live_smoke,
+            playground=arguments.playground,
+            processes=arguments.processes,
+            races=arguments.races,
+            renewal_demo=arguments.renewal_demo,
+            verification_demo=arguments.verification_demo,
+        ),
         output=arguments.output,
     )
     print(json.dumps({"claim_report": str(arguments.output.resolve())}, sort_keys=True))
@@ -233,13 +235,13 @@ def _register_claim_report(commands: argparse._SubParsersAction) -> None:
     command = commands.add_parser("claim-report", help="assemble the supported claim report")
     command.add_argument("--deterministic", type=Path, required=True)
     command.add_argument("--surface-audit", type=Path, required=True)
-    command.add_argument("--agent-quality", type=Path)
-    command.add_argument("--live-smoke", type=Path)
-    command.add_argument("--playground", type=Path)
-    command.add_argument("--processes", type=Path)
-    command.add_argument("--races", type=Path)
-    command.add_argument("--renewal-demo", type=Path)
-    command.add_argument("--verification-demo", type=Path)
+    command.add_argument("--agent-quality", type=Path, required=True)
+    command.add_argument("--live-smoke", type=Path, required=True)
+    command.add_argument("--playground", type=Path, required=True)
+    command.add_argument("--processes", type=Path, required=True)
+    command.add_argument("--races", type=Path, required=True)
+    command.add_argument("--renewal-demo", type=Path, required=True)
+    command.add_argument("--verification-demo", type=Path, required=True)
     command.add_argument("--output", type=Path, required=True)
     command.set_defaults(handler=_handle_claim_report)
 

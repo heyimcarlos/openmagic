@@ -1,4 +1,4 @@
-"""Typed transaction-scoped renewal evidence snapshot persistence."""
+"""Private typed transaction-scoped renewal projection persistence."""
 
 from __future__ import annotations
 
@@ -15,6 +15,10 @@ from openmagic_runtime.evidence import (
 from psycopg import Connection
 from psycopg.rows import dict_row
 
+from example_insurance._persistence.renewal_effect_records import (
+    EffectEvidenceSource,
+    effect_evidence_source,
+)
 from example_insurance.renewal_approval_policy import (
     ApprovalDecisionKind,
     approval_decision_kind,
@@ -24,10 +28,6 @@ from example_insurance.renewal_effect_policy import (
     EffectObservation,
     effect_certainty,
     effect_observation,
-)
-from example_insurance.renewal_effect_records import (
-    EffectEvidenceSource,
-    effect_evidence_source,
 )
 from example_insurance.renewal_lifecycle_policy import (
     WorkflowLifecycle,

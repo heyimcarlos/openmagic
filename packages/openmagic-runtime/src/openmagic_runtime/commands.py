@@ -231,8 +231,9 @@ class CommandDispatcher:
         command_type: str,
         schema_version: int,
         command: CommandT,
+        prepare_first_execution: Callable[[Connection[tuple[Any, ...]]], None] | None = None,
     ) -> CommandReceipt[Any]:
-        """Execute inside the caller-owned PostgreSQL transaction."""
+        """Execute inside the caller-owned transaction, preparing only a fresh Command."""
         registration = self._registrations.get((command_type, schema_version))
         if registration is None:
             raise CommandUnavailable(f"unregistered Command: {command_type}:{schema_version}")
@@ -282,6 +283,8 @@ class CommandDispatcher:
                 committed_at=existing[5],
             )
 
+        if prepare_first_execution is not None:
+            prepare_first_execution(connection)
         result = registration.handler(command, connection)
         try:
             _validate_value(result, registration.result_class, "result")

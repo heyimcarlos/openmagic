@@ -31,6 +31,9 @@ class PlaygroundCorrelations(_ResponseModel):
     approval_grant_ids: tuple[UUID, ...] = ()
     verification_challenge_ids: tuple[UUID, ...] = ()
     verification_session_ids: tuple[UUID, ...] = ()
+    worker_ids: tuple[str, ...] = ()
+    process_ids: tuple[PositiveInt, ...] = ()
+    provider_request_ids: tuple[str, ...] = ()
 
 
 class PostgresDeploymentObservation(_ResponseModel):
@@ -42,12 +45,39 @@ class PostgresDeploymentObservation(_ResponseModel):
     migration_heads: dict[str, str | None]
 
 
-class RenewalDemonstrationObservation(_ResponseModel):
+class SafeRenewalBoundaryObservation(_ResponseModel):
     approval_wait_state: Literal["unsatisfied"]
     external_email_effect_count: Literal[0]
     instance_state: Literal["open"]
     message_count: Literal[1]
     workflow_lifecycle: Literal["active"]
+
+
+class RenewalDemonstrationObservation(_ResponseModel):
+    approval_wait_state: Literal["satisfied"]
+    external_email_effect_count: Literal[1]
+    external_effect_certainties: tuple[Literal["applied"], ...] = Field(min_length=1)
+    instance_state: Literal["closed"]
+    message_count: Literal[1]
+    workflow_lifecycle: Literal["completed"]
+    completion_event_count: Literal[1]
+    provider_request_count: Literal[1]
+    approved_local_execution: Literal[True]
+
+
+class FailureScenarioObservation(_ResponseModel):
+    scenario: Literal["intentional-failure", "disconnected-provider"]
+    external_effect_certainty: Literal["not_applied", "uncertain"]
+    instance_state: Literal["open"]
+    workflow_lifecycle: Literal["active"]
+    provider_connected: bool
+
+
+class PlaygroundScenarioCoverage(_ResponseModel):
+    reset_reproduced: Literal[True]
+    repeated_run_reproduced: Literal[True]
+    intentional_failure: FailureScenarioObservation
+    disconnected_provider: FailureScenarioObservation
 
 
 class VerificationDemonstrationObservation(_ResponseModel):
@@ -87,7 +117,8 @@ class ControlExerciseResponse(_ResponseModel):
     response_type: Literal["control-exercise"] = "control-exercise"
     controls: ExercisedControls
     correlations: PlaygroundCorrelations
-    fixture: RenewalDemonstrationObservation
+    fixture: SafeRenewalBoundaryObservation
+    scenario_coverage: PlaygroundScenarioCoverage
     original_process_ids: tuple[PositiveInt, ...] = Field(min_length=1)
     restarted_process_ids: tuple[PositiveInt, ...] = Field(min_length=1)
     postgres_deployments: tuple[PostgresDeploymentObservation, ...] = Field(min_length=1)
@@ -96,10 +127,13 @@ class ControlExerciseResponse(_ResponseModel):
 __all__ = [
     "ControlExerciseResponse",
     "ExercisedControls",
+    "FailureScenarioObservation",
     "PlaygroundCorrelations",
+    "PlaygroundScenarioCoverage",
     "PostgresDeploymentObservation",
     "RenewalDemonstrationObservation",
     "RenewalDemonstrationResponse",
+    "SafeRenewalBoundaryObservation",
     "VerificationDemonstrationObservation",
     "VerificationDemonstrationResponse",
 ]

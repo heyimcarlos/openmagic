@@ -18,6 +18,7 @@ from openmagic_evals.evidence.contracts import (
     PlaygroundArtifact,
     PlaygroundSummary,
     ProcessCorrelations,
+    ProviderCorrelations,
     RuntimeCorrelations,
     deterministic_observation_digest,
 )
@@ -70,7 +71,11 @@ def playground_correlations(
             }
         ),
         agent=AgentCorrelations(agent_run_ids=value.agent_run_ids),
-        process=ProcessCorrelations(process_ids=process_ids),
+        process=ProcessCorrelations(
+            worker_ids=value.worker_ids,
+            process_ids=tuple(dict.fromkeys((*process_ids, *value.process_ids))),
+        ),
+        provider=ProviderCorrelations(provider_request_ids=value.provider_request_ids),
     )
 
 
@@ -117,18 +122,47 @@ def verify_playground(
         int(value) for value in (*result.original_process_ids, *result.restarted_process_ids)
     )
     case_correlations = playground_correlations(result.correlations, process_ids)
-    case_observation = {
-        "controls": controls,
-        "fixture": result.fixture.model_dump(mode="json"),
-        "fixture_reproduced_after_reset": True,
-        "effects_enabled": False,
-    }
+    coverage = result.scenario_coverage
     scenarios = (
         DeterministicScenarioEvidence(
-            scenario_id="synthetic-reset-and-process-control",
+            scenario_id="safe-reset",
             correlations=case_correlations,
-            observation=case_observation,
-            observation_digest=canonical_digest(case_observation),
+            observation={
+                "controls": controls,
+                "fixture": result.fixture.model_dump(mode="json"),
+                "reset_reproduced": coverage.reset_reproduced,
+                "effects_enabled_by_default": False,
+            },
+            observation_digest=canonical_digest(
+                {
+                    "controls": controls,
+                    "fixture": result.fixture.model_dump(mode="json"),
+                    "reset_reproduced": coverage.reset_reproduced,
+                    "effects_enabled_by_default": False,
+                }
+            ),
+        ),
+        DeterministicScenarioEvidence(
+            scenario_id="repeated-run",
+            correlations=case_correlations,
+            observation={"reproduced": coverage.repeated_run_reproduced},
+            observation_digest=canonical_digest({"reproduced": coverage.repeated_run_reproduced}),
+        ),
+        DeterministicScenarioEvidence(
+            scenario_id="intentional-failure",
+            correlations=case_correlations,
+            observation=coverage.intentional_failure.model_dump(mode="json"),
+            observation_digest=canonical_digest(
+                coverage.intentional_failure.model_dump(mode="json")
+            ),
+        ),
+        DeterministicScenarioEvidence(
+            scenario_id="disconnected-provider",
+            correlations=case_correlations,
+            observation=coverage.disconnected_provider.model_dump(mode="json"),
+            observation_digest=canonical_digest(
+                coverage.disconnected_provider.model_dump(mode="json")
+            ),
         ),
     )
     artifact = PlaygroundArtifact(
@@ -163,6 +197,9 @@ def verify_playground(
             effects_enabled_by_default=False,
             local_provider=True,
             reset_verified=True,
+            repeated_run_verified=True,
+            intentional_failure_verified=True,
+            disconnected_provider_verified=True,
             process_controls_verified=True,
             contributes_to_correctness=False,
         ),

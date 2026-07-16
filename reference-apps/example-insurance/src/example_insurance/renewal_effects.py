@@ -18,7 +18,7 @@ from openmagic_runtime.execution import (
     CancellationToken,
 )
 
-from example_insurance.renewal_command_records import load_committed_dispatch_permit
+from example_insurance._persistence.renewal_command_records import load_committed_dispatch_permit
 from example_insurance.renewal_effect_types import ExternalEffectPermit, logical_effect_id
 
 

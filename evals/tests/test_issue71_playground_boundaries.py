@@ -10,7 +10,7 @@ import time
 from multiprocessing import get_context
 from pathlib import Path
 from threading import Thread
-from typing import cast
+from typing import Any, cast
 
 import pytest
 from openmagic_evals.evidence.playground_client import parse_playground_response
@@ -52,6 +52,16 @@ class _SurvivingProcess:
     @staticmethod
     def wait(timeout: float) -> None:
         raise subprocess.TimeoutExpired("synthetic-survivor", timeout)
+
+
+class _RetryableContainer:
+    def __init__(self) -> None:
+        self.stop_calls = 0
+
+    def stop(self) -> None:
+        self.stop_calls += 1
+        if self.stop_calls == 1:
+            raise RuntimeError("synthetic container-stop failure")
 
 
 def _term_resistant_process() -> subprocess.Popen[bytes]:
@@ -128,6 +138,59 @@ def test_stop_retains_ownership_when_child_death_cannot_be_verified(tmp_path: Pa
     assert log.closed
 
 
+def test_stop_retains_postgres_ownership_when_container_stop_fails(tmp_path: Path) -> None:
+    deployment = PlaygroundDeployment(working_directory=tmp_path, shutdown_timeout=0.1)
+    container = _RetryableContainer()
+    deployment._container = cast(Any, container)
+
+    with pytest.raises(ExceptionGroup, match="playground cleanup failed"):
+        deployment.stop()
+
+    assert deployment._container is container
+    deployment.stop()
+    assert deployment._container is None
+    assert container.stop_calls == 2
+
+
+@pytest.mark.parametrize(
+    "provider_url",
+    [
+        "http://example.test:8080",
+        "https://192.0.2.71/provider",
+        "http://[2001:db8::71]:8080",
+    ],
+)
+def test_playground_rejects_nonlocal_email_provider_url(
+    tmp_path: Path,
+    provider_url: str,
+) -> None:
+    with pytest.raises(ValueError, match="local loopback"):
+        PlaygroundDeployment(
+            working_directory=tmp_path,
+            email_provider_url=provider_url,
+        )
+
+
+@pytest.mark.parametrize(
+    "provider_url",
+    [
+        "http://localhost:8071",
+        "http://127.0.0.1:8071",
+        "http://[::1]:8071",
+    ],
+)
+def test_playground_accepts_local_email_provider_url(
+    tmp_path: Path,
+    provider_url: str,
+) -> None:
+    deployment = PlaygroundDeployment(
+        working_directory=tmp_path,
+        email_provider_url=provider_url,
+    )
+
+    assert deployment.email_provider_url == provider_url
+
+
 def test_control_response_rejects_malformed_nested_payload() -> None:
     malformed = """{
         "response_schema_version": 1,
@@ -199,7 +262,9 @@ def test_provider_readiness_failure_reaps_child_and_closes_log(tmp_path: Path) -
         os.kill(pid, 0)
 
 
-def test_provider_retains_child_and_log_when_death_cannot_be_verified(tmp_path: Path) -> None:
+def test_provider_retains_child_but_closes_log_when_death_cannot_be_verified(
+    tmp_path: Path,
+) -> None:
     provider = LocalEmailProvider(working_directory=tmp_path, shutdown_timeout=0.1)
     process = cast(subprocess.Popen[bytes], _SurvivingProcess())
     log = (tmp_path / "survivor.log").open("ab")
@@ -210,9 +275,8 @@ def test_provider_retains_child_and_log_when_death_cannot_be_verified(tmp_path: 
         provider.stop()
 
     assert provider._process is process
-    assert provider._log_handle is log
-    assert not log.closed
-    log.close()
+    assert provider._log_handle is None
+    assert log.closed
 
 
 def test_control_response_rejects_unknown_nested_fields() -> None:
@@ -253,8 +317,8 @@ def test_demonstration_response_rejects_invalid_safe_boundary() -> None:
             "demonstration": "renewal",
             "correlations": {"workflow_ids": ["00000000-0000-0000-0000-000000000071"]},
             "observation": {
-                "approval_wait_state": "satisfied",
-                "external_email_effect_count": 1,
+                "approval_wait_state": "unsatisfied",
+                "external_email_effect_count": 0,
                 "instance_state": "closed",
                 "message_count": 2,
                 "workflow_lifecycle": "complete",

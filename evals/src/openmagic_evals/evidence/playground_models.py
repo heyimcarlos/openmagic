@@ -17,6 +17,9 @@ class PlaygroundSummary(EvidenceModel):
     effects_enabled_by_default: Literal[False]
     local_provider: Literal[True]
     reset_verified: bool
+    repeated_run_verified: bool
+    intentional_failure_verified: bool
+    disconnected_provider_verified: bool
     process_controls_verified: bool
     contributes_to_correctness: Literal[False]
 

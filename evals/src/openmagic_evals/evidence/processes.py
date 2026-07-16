@@ -20,6 +20,7 @@ from example_insurance.renewals import (
 from openmagic_api.renewals import StartRenewalRequest, StartRenewalResponse
 from openmagic_playground import ManagedProcess, PlaygroundDeployment, ProcessRole
 from openmagic_playground.deployment_observation import observe_postgres
+from openmagic_playground.renewal_observation import decode_renewal_projection
 from openmagic_runtime.commands import Actor, Cause
 from pydantic import JsonValue
 
@@ -230,39 +231,35 @@ def _application_command(request: StartRenewalRequest) -> StartRenewalOutreach:
     )
 
 
-def _uuid_tuple(values: object) -> tuple[UUID, ...]:
-    return tuple(UUID(str(value)) for value in values) if isinstance(values, list) else ()
-
-
 def _verify_workload_outcome(
     application: ExampleInsurance, workflow_id: UUID
 ) -> tuple[Correlations, SanitizedObservation]:
-    evidence = json.loads(application.renewal_evidence_json(workflow_id))
-    outcomes = evidence["outcomes"]
-    values = evidence["correlations"]
+    projection = decode_renewal_projection(application.renewal_evidence_json(workflow_id))
+    outcomes = projection.outcomes
+    values = projection.correlations
     valid = (
-        outcomes["workflow_lifecycle"] == "active"
-        and outcomes["instance_state"] == "open"
-        and outcomes["approval_wait_state"] == "unsatisfied"
-        and outcomes["external_email_effect_count"] == 0
-        and outcomes["attempt_states"]
-        and set(outcomes["attempt_states"]) == {"completed"}
-        and outcomes["delivery_states"] == ["delivered"]
-        and len(outcomes["delivery_attempt_states"]) == 1
-        and outcomes["delivery_attempt_states"][0][-1] == "succeeded"
-        and set(outcomes["delivery_attempt_states"][0]).issubset({"abandoned", "succeeded"})
-        and len(values["message_ids"]) == 1
+        outcomes.workflow_lifecycle == "active"
+        and outcomes.instance_state == "open"
+        and outcomes.approval_wait_state == "unsatisfied"
+        and outcomes.external_email_effect_count == 0
+        and outcomes.attempt_states
+        and set(outcomes.attempt_states) == {"completed"}
+        and outcomes.delivery_states == ("delivered",)
+        and len(outcomes.delivery_attempt_states) == 1
+        and outcomes.delivery_attempt_states[0][-1] == "succeeded"
+        and set(outcomes.delivery_attempt_states[0]).issubset({"abandoned", "succeeded"})
+        and len(values.message_ids) == 1
     )
     if not valid:
         diagnostic = {
-            "approval_wait_state": outcomes["approval_wait_state"],
-            "attempt_states": outcomes["attempt_states"],
-            "delivery_attempt_states": outcomes["delivery_attempt_states"],
-            "delivery_states": outcomes["delivery_states"],
-            "external_email_effect_count": outcomes["external_email_effect_count"],
-            "instance_state": outcomes["instance_state"],
-            "message_count": len(values["message_ids"]),
-            "workflow_lifecycle": outcomes["workflow_lifecycle"],
+            "approval_wait_state": outcomes.approval_wait_state,
+            "attempt_states": outcomes.attempt_states,
+            "delivery_attempt_states": outcomes.delivery_attempt_states,
+            "delivery_states": outcomes.delivery_states,
+            "external_email_effect_count": outcomes.external_email_effect_count,
+            "instance_state": outcomes.instance_state,
+            "message_count": len(values.message_ids),
+            "workflow_lifecycle": outcomes.workflow_lifecycle,
         }
         raise AssertionError(
             "backpressure workload did not reach its exact safe durable outcome: "
@@ -270,31 +267,31 @@ def _verify_workload_outcome(
         )
     correlations = Correlations(
         runtime=RuntimeCorrelations(
-            command_ids=(UUID(values["command_id"]),),
-            workflow_ids=(UUID(values["workflow_id"]),),
-            instance_ids=(UUID(values["instance_id"]),),
-            step_ids=_uuid_tuple(values["step_ids"]),
-            attempt_ids=_uuid_tuple(values["attempt_ids"]),
-            wait_ids=_uuid_tuple(outcomes["approval_wait_ids"]),
+            command_ids=(values.command_id,),
+            workflow_ids=(values.workflow_id,),
+            instance_ids=(values.instance_id,),
+            step_ids=values.step_ids,
+            attempt_ids=values.attempt_ids,
+            wait_ids=outcomes.approval_wait_ids,
         ),
         application=ApplicationCorrelations(
-            thread_ids=(UUID(values["thread_id"]),),
-            message_ids=_uuid_tuple(values["message_ids"]),
-            domain_event_ids=_uuid_tuple(values["domain_event_ids"]),
-            delivery_ids=_uuid_tuple(values["delivery_ids"]),
+            thread_ids=(values.thread_id,),
+            message_ids=values.message_ids,
+            domain_event_ids=values.domain_event_ids,
+            delivery_ids=values.delivery_ids,
         ),
-        agent=AgentCorrelations(agent_run_ids=_uuid_tuple(values["agent_run_ids"])),
+        agent=AgentCorrelations(agent_run_ids=values.agent_run_ids),
     )
     document = {
         "workflow_id": str(workflow_id),
-        "workflow_lifecycle": outcomes["workflow_lifecycle"],
-        "instance_state": outcomes["instance_state"],
-        "approval_wait_state": outcomes["approval_wait_state"],
-        "attempt_states": outcomes["attempt_states"],
-        "delivery_states": outcomes["delivery_states"],
-        "delivery_attempt_states": outcomes["delivery_attempt_states"],
-        "external_email_effect_count": outcomes["external_email_effect_count"],
-        "message_count": len(values["message_ids"]),
+        "workflow_lifecycle": outcomes.workflow_lifecycle,
+        "instance_state": outcomes.instance_state,
+        "approval_wait_state": outcomes.approval_wait_state,
+        "attempt_states": outcomes.attempt_states,
+        "delivery_states": outcomes.delivery_states,
+        "delivery_attempt_states": outcomes.delivery_attempt_states,
+        "external_email_effect_count": outcomes.external_email_effect_count,
+        "message_count": len(values.message_ids),
     }
     return correlations, SanitizedObservation(
         document=document,

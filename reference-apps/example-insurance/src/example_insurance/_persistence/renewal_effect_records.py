@@ -1,4 +1,4 @@
-"""Transaction-bound persistence for renewal External Effects."""
+"""Private transaction-bound persistence for renewal External Effects."""
 
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ from psycopg import Connection
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
+from example_insurance._persistence.renewal_grant_records import mark_grant_consumed
 from example_insurance.renewal_effect_policy import (
     DispatchClaim,
     DurableApprovalGrant,
@@ -28,7 +29,6 @@ from example_insurance.renewal_effect_policy import (
     effect_certainty,
 )
 from example_insurance.renewal_effect_types import RenewalEmailEffect
-from example_insurance.renewal_grant_records import mark_grant_consumed
 from example_insurance.renewal_lifecycle_policy import workflow_lifecycle
 
 EffectEvidenceSource = Literal[

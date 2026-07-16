@@ -8,10 +8,10 @@ from uuid import UUID
 from openmagic_runtime.kernel.control import CloseInstance, KernelControl
 from psycopg import Connection
 
+from example_insurance._persistence.renewal_completion_records import lock_completion_snapshot
+from example_insurance._persistence.renewal_records import CommandEventLineage, record_event
+from example_insurance._persistence.renewal_workflow_records import mark_workflow_completed
 from example_insurance.renewal_completion_policy import RenewalCompletionPolicy
-from example_insurance.renewal_completion_records import lock_completion_snapshot
-from example_insurance.renewal_records import CommandEventLineage, record_event
-from example_insurance.renewal_workflow_records import mark_workflow_completed
 
 
 class RenewalCompletionControl:

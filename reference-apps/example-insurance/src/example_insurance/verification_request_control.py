@@ -10,18 +10,24 @@ from openmagic_runtime.kernel.control import KernelControl, StartInstance
 from openmagic_runtime.threads import ThreadStore
 from psycopg import Connection
 
-from example_insurance.renewal_records import record_event
-from example_insurance.renewal_workflow_records import lock_instance_for_workflow
-from example_insurance.verification_authority_records import (
+from example_insurance._persistence.renewal_records import record_event
+from example_insurance._persistence.renewal_workflow_records import lock_instance_for_workflow
+from example_insurance._persistence.verification_authority_records import (
     lock_authority,
     provision_authority,
     revoke_authority,
+)
+from example_insurance._persistence.verification_challenge_records import (
+    active_session,
+    record_challenge,
+)
+from example_insurance._persistence.verification_workflow_records import (
+    record_verification_workflow,
 )
 from example_insurance.verification_challenge_lifecycle import (
     LockedPendingChallenges,
     VerificationChallengeLifecycle,
 )
-from example_insurance.verification_challenge_records import active_session, record_challenge
 from example_insurance.verification_commands import (
     ProtectedOutcome,
     ProtectedPolicyRejection,
@@ -38,7 +44,6 @@ from example_insurance.verification_protected_delivery import (
     ProtectedDeliveryContext,
     ProtectedRenewalDeliveryControl,
 )
-from example_insurance.verification_workflow_records import record_verification_workflow
 
 
 class VerificationRequestControl:

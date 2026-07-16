@@ -8,7 +8,7 @@ from uuid import UUID
 import psycopg
 from openmagic_runtime.evidence import EvidenceRecord
 
-from example_insurance.renewal_evidence_records import (
+from example_insurance._persistence.renewal_evidence_records import (
     RenewalEvidenceSnapshot,
     load_renewal_evidence_snapshot,
 )

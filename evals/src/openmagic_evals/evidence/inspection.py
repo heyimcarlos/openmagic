@@ -76,6 +76,9 @@ class DurableChainObservation:
     delivery_ids: tuple[UUID, ...]
     delivery_attempt_ids: tuple[UUID, ...]
     approval_grant_ids: tuple[UUID, ...]
+    external_effect_ids: tuple[UUID, ...]
+    provider_request_ids: tuple[str, ...]
+    worker_ids: tuple[str, ...]
     verification_challenge_ids: tuple[UUID, ...]
     verification_session_ids: tuple[UUID, ...]
     relationship_checks: tuple[str, ...]
@@ -321,6 +324,8 @@ class EvidenceInspection:
         *,
         renewal_workflow_id: UUID,
         challenge_id: UUID,
+        provider_request_id: str,
+        worker_id: str,
     ) -> DurableChainObservation:
         """Prove one FK-backed renewal and verification chain in one snapshot."""
 
@@ -330,7 +335,8 @@ class EvidenceInspection:
                 "SELECT r.start_command_id, r.instance_id, r.thread_id, "
                 "p.protected_command_id, g.approval_grant_id, d.wait_id, d.signal_id, "
                 "c.delivery_workflow_id, c.delivery_instance_id, c.destination_thread_id, "
-                "s.session_id "
+                "s.session_id, effect.logical_effect_id, effect_evidence.provider_request_id, "
+                "effect_attempt.worker_id "
                 "FROM example_insurance.renewal_workflows AS r "
                 "JOIN example_insurance.protected_commands AS p "
                 "ON p.workflow_id = r.workflow_id "
@@ -346,6 +352,15 @@ class EvidenceInspection:
                 "ON w.wait_id = d.wait_id AND w.instance_id = r.instance_id "
                 "JOIN openmagic_runtime.signals AS signal "
                 "ON signal.signal_id = d.signal_id AND signal.wait_id = w.wait_id "
+                "JOIN example_insurance.external_effects AS effect "
+                "ON effect.workflow_id = r.workflow_id "
+                "AND effect.approval_grant_id = g.approval_grant_id "
+                "JOIN openmagic_runtime.attempts AS effect_attempt "
+                "ON effect_attempt.attempt_id = effect.dispatch_attempt_id "
+                "JOIN example_insurance.external_effect_evidence AS effect_evidence "
+                "ON effect_evidence.logical_effect_id = effect.logical_effect_id "
+                "AND effect_evidence.attempt_id = effect_attempt.attempt_id "
+                "AND effect_evidence.classification = 'applied' "
                 "JOIN example_insurance.verification_challenges AS c "
                 "ON c.challenge_id = %s AND c.protected_command_id = p.protected_command_id "
                 "AND c.protected_workflow_id = r.workflow_id "
@@ -360,8 +375,9 @@ class EvidenceInspection:
                 "JOIN example_insurance.verification_sessions AS s "
                 "ON s.challenge_id = c.challenge_id AND s.thread_id = c.thread_id "
                 "AND s.identifier_thread_id = c.destination_thread_id "
-                "WHERE r.workflow_id = %s",
-                (challenge_id, renewal_workflow_id),
+                "WHERE r.workflow_id = %s AND effect_evidence.provider_request_id = %s "
+                "AND effect_attempt.worker_id = %s",
+                (challenge_id, renewal_workflow_id, provider_request_id, worker_id),
             ).fetchone()
             if row is None:
                 raise AssertionError("canonical durable chain is not relationally connected")
@@ -434,6 +450,9 @@ class EvidenceInspection:
             delivery_ids=delivery_ids,
             delivery_attempt_ids=tuple(UUID(str(item[0])) for item in delivery_attempt_rows),
             approval_grant_ids=(UUID(str(row[4])),),
+            external_effect_ids=(UUID(str(row[11])),),
+            provider_request_ids=(str(row[12]),),
+            worker_ids=(str(row[13]),),
             verification_challenge_ids=(challenge_id,),
             verification_session_ids=(UUID(str(row[10])),),
             relationship_checks=(
@@ -441,6 +460,8 @@ class EvidenceInspection:
                 "renewal-workflow-to-runtime-instance",
                 "approval-decision-to-wait-and-signal",
                 "protected-command-to-approval-grant",
+                "approval-grant-to-external-effect",
+                "external-effect-to-attempt-worker-and-provider-request",
                 "challenge-to-protected-workflow",
                 "challenge-to-verification-workflow-instance",
                 "verification-session-to-challenge-and-threads",

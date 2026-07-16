@@ -1,4 +1,4 @@
-"""Canonical transaction-bound approval presentation snapshot."""
+"""Private transaction-bound approval presentation snapshot."""
 
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ from openmagic_runtime.kernel.inspection import KernelTransactionInspection, Run
 from psycopg import Connection
 from psycopg.rows import dict_row
 
+from example_insurance._persistence.renewal_workflow_records import lock_instance_for_workflow
 from example_insurance.renewal_approval_policy import (
     DeliveredApprovalPresentation,
     DurableApprovalPresentation,
@@ -32,7 +33,6 @@ from example_insurance.renewal_lifecycle_policy import (
     WorkflowLifecycle,
     workflow_lifecycle,
 )
-from example_insurance.renewal_workflow_records import lock_instance_for_workflow
 
 
 @dataclass(frozen=True)

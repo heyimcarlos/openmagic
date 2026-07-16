@@ -1,4 +1,4 @@
-"""Transaction-bound persistence for renewal Workflow orchestration."""
+"""Private transaction-bound persistence for renewal Workflow orchestration."""
 
 from __future__ import annotations
 

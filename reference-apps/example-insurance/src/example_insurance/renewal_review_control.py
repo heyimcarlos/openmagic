@@ -8,13 +8,15 @@ from uuid import UUID, uuid4
 from openmagic_runtime.kernel.control import AcceptSignal, KernelControl
 from psycopg import Connection
 
+from example_insurance._persistence.renewal_approval_records import (
+    load_approval_presentation_snapshot,
+    lock_approval_decision_snapshot,
+)
+from example_insurance._persistence.renewal_grant_records import record_approval_grant
+from example_insurance._persistence.renewal_records import CommandEventLineage, record_event
 from example_insurance.renewal_approval_policy import (
     ApprovalRejectedDecision,
     RenewalApprovalPolicy,
-)
-from example_insurance.renewal_approval_records import (
-    load_approval_presentation_snapshot,
-    lock_approval_decision_snapshot,
 )
 from example_insurance.renewal_commands import (
     ApproveRenewalDraft,
@@ -24,8 +26,6 @@ from example_insurance.renewal_commands import (
 )
 from example_insurance.renewal_decisions import decision_facts, record_decision
 from example_insurance.renewal_effect_types import RenewalApprovalPresentation
-from example_insurance.renewal_grant_records import record_approval_grant
-from example_insurance.renewal_records import CommandEventLineage, record_event
 
 
 class RenewalReviewControl:

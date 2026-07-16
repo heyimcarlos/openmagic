@@ -9,7 +9,7 @@ from openmagic_runtime.delivery import lock_delivery_presentation
 from openmagic_runtime.kernel.inspection import KernelTransactionInspection
 from psycopg import Connection
 
-from example_insurance.verification_challenge_records import (
+from example_insurance._persistence.verification_challenge_records import (
     DurableChallenge,
     PendingChallengeIdentity,
     challenge_is_expired,
@@ -17,8 +17,10 @@ from example_insurance.verification_challenge_records import (
     pending_challenge_identities,
     resolve_terminal_challenge,
 )
+from example_insurance._persistence.verification_workflow_records import (
+    verification_delivery_identity,
+)
 from example_insurance.verification_commands import ProtectedPolicyRejection
-from example_insurance.verification_workflow_records import verification_delivery_identity
 
 DeliveryStatus = Literal["pending", "delivered", "failed", "unavailable"]
 LockedPendingChallenges = tuple[PendingChallengeIdentity, ...]

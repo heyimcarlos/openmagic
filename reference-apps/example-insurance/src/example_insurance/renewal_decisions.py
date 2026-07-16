@@ -9,13 +9,13 @@ from openmagic_runtime.commands import Actor, Cause
 from psycopg import Connection
 from psycopg.types.json import Jsonb
 
-from example_insurance.application_event_records import actor_record, cause_record
+from example_insurance._persistence.application_event_records import actor_record, cause_record
+from example_insurance._persistence.renewal_approval_records import ApprovalSnapshot
 from example_insurance.renewal_approval_policy import (
     ApprovalDecisionFacts,
     ApprovalDecisionKind,
     RequestedApprovalPresentation,
 )
-from example_insurance.renewal_approval_records import ApprovalSnapshot
 from example_insurance.renewal_commands import (
     ApproveRenewalDraftInput,
     RequestRenewalRevisionInput,

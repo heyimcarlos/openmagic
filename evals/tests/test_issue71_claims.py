@@ -7,7 +7,11 @@ from pathlib import Path
 from typing import Literal, cast
 
 import pytest
-from openmagic_evals.evidence.claims import _validate_release_matrix, write_claim_report
+from openmagic_evals.evidence.__main__ import _parser
+from openmagic_evals.evidence.claims import (
+    _validate_common_reproducibility,
+    _validate_release_matrix,
+)
 from openmagic_evals.evidence.contracts import (
     REQUIRED_NEGATIVE_CLAIMS,
     AgentCaseEvidence,
@@ -355,9 +359,25 @@ def test_claim_report_rejects_artifacts_from_different_builds(tmp_path: Path) ->
     surface_path.write_text(canonical_artifact_json(surface), encoding="utf-8")
 
     with pytest.raises(ValueError, match="reproducibility pin"):
-        write_claim_report(
-            deterministic_path=deterministic_path,
-            surface_path=surface_path,
-            agent_path=agent_path,
-            output=tmp_path / "claims.md",
+        _validate_common_reproducibility(
+            (
+                ("deterministic", deterministic_path, deterministic),
+                ("surface-audit", surface_path, surface),
+                ("agent-quality", agent_path, agent),
+            )
+        )
+
+
+def test_claim_report_cli_rejects_an_incomplete_evidence_package(tmp_path: Path) -> None:
+    with pytest.raises(SystemExit):
+        _parser().parse_args(
+            [
+                "claim-report",
+                "--deterministic",
+                str(tmp_path / "deterministic.json"),
+                "--surface-audit",
+                str(tmp_path / "surface.json"),
+                "--output",
+                str(tmp_path / "claims.md"),
+            ]
         )

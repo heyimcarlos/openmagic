@@ -36,6 +36,17 @@ def test_public_demonstrations_reproduce_from_reused_working_directory(tmp_path:
 
     assert first.cases[0].verdict.status == "passed"
     assert first.cases[0].case_id == _RENEWAL_DEMONSTRATION_CASE_ID
+    observation = first.cases[0].scenarios[0].observation
+    assert observation["approval_wait_state"] == "satisfied"
+    assert observation["external_email_effect_count"] == 1
+    assert observation["external_effect_certainties"] == ["applied"]
+    assert observation["instance_state"] == "closed"
+    assert observation["workflow_lifecycle"] == "completed"
+    assert observation["approved_local_execution"] is True
+    assert first.cases[0].correlations.application.external_effect_ids
+    assert first.cases[0].correlations.process.worker_ids == ("playground-email",)
+    assert first.cases[0].correlations.process.process_ids
+    assert first.cases[0].correlations.provider.provider_request_ids
     assert second.cases[0].verdict.status == "passed"
     assert verification.cases[0].verdict.status == "passed"
     assert verification.cases[0].case_id == _VERIFICATION_DEMONSTRATION_CASE_ID

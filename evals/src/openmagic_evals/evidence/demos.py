@@ -81,6 +81,9 @@ def _demo_artifact(
             effects_enabled_by_default=False,
             local_provider=True,
             reset_verified=False,
+            repeated_run_verified=False,
+            intentional_failure_verified=False,
+            disconnected_provider_verified=False,
             process_controls_verified=False,
             contributes_to_correctness=False,
         ),
@@ -116,6 +119,9 @@ def run_renewal_demo(
     )
     result = invoke_playground(
         "demo-renewal",
+        "--working-directory",
+        str(working_directory.resolve()),
+        "--execute-approved-local-effect",
         timeout_seconds=timeout_seconds,
         response_type=RenewalDemonstrationResponse,
     )

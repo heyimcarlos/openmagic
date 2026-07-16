@@ -8,10 +8,9 @@ from uuid import UUID
 from openmagic_runtime.kernel.inspection import KernelTransactionInspection
 from psycopg import Connection
 
-from example_insurance.renewal_workflow_records import lock_instance_for_workflow
-from example_insurance.verification_authority_records import lock_authority
-from example_insurance.verification_challenge_lifecycle import VerificationChallengeLifecycle
-from example_insurance.verification_challenge_records import (
+from example_insurance._persistence.renewal_workflow_records import lock_instance_for_workflow
+from example_insurance._persistence.verification_authority_records import lock_authority
+from example_insurance._persistence.verification_challenge_records import (
     DurableChallenge,
     DurableProtectedCommand,
     challenge_is_expired,
@@ -21,6 +20,7 @@ from example_insurance.verification_challenge_records import (
     record_failed_code,
     resolve_terminal_challenge,
 )
+from example_insurance.verification_challenge_lifecycle import VerificationChallengeLifecycle
 from example_insurance.verification_codes import VerificationCodes
 from example_insurance.verification_commands import (
     ProtectedOutcome,

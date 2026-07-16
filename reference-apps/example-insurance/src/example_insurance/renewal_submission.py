@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 import psycopg
 from openmagic_runtime.commands import CommandReceipt, StateConflict
 from openmagic_runtime.threads import CreateThread, ThreadAccess
+from psycopg import Connection
 
 from example_insurance.renewal_commands import (
     StartRenewalOutreach,
@@ -60,14 +62,18 @@ class RenewalSubmissionApplication:
             psycopg.connect(self._submission_database_url) as connection,
             connection.transaction(),
         ):
-            try:
-                ThreadAccess(connection).provision(submission.thread)
-            except ValueError as error:
-                raise StateConflict(str(error)) from error
-            self._submission_facts.replace_on(connection, submission.facts)
+
+            def provision(first_execution: Connection[tuple[Any, ...]]) -> None:
+                try:
+                    ThreadAccess(first_execution).provision(submission.thread)
+                except ValueError as error:
+                    raise StateConflict(str(error)) from error
+                self._submission_facts.replace_on(first_execution, submission.facts)
+
             return self._application.start_renewal_outreach_on(
                 connection,
                 submission.command,
+                prepare_first_execution=provision,
             )
 
 

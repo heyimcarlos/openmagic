@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from pathlib import Path
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 from example_insurance.migrations import apply_migrations
 from example_insurance.renewals import (
@@ -13,6 +12,7 @@ from example_insurance.renewals import (
     SubmitVerificationCode,
     SubmitVerificationCodeInput,
 )
+from openmagic_playground.renewal_observation import decode_renewal_projection
 from openmagic_runtime.commands import Cause
 from openmagic_runtime.threads import ThreadStore
 
@@ -34,10 +34,6 @@ from openmagic_evals.harness import (
     renewal_context,
 )
 from openmagic_evals.harness._postgres import postgres_container
-
-
-def _ids(value: object) -> tuple[UUID, ...]:
-    return tuple(UUID(str(item)) for item in value) if isinstance(value, list) else ()
 
 
 @dataclass(frozen=True)
@@ -71,48 +67,50 @@ def collect_renewal_observation(working_directory: Path) -> DeterministicObserva
         result = application.run_workflow_worker_once(worker_id="synthetic-email")
         if result is None:
             raise AssertionError("renewal observation did not execute its local effect")
-        evidence = json.loads(application.renewal_evidence_json(command.input.workflow_id))
-        values = evidence["correlations"]
-        outcomes = evidence["outcomes"]
+        projection = decode_renewal_projection(
+            application.renewal_evidence_json(command.input.workflow_id)
+        )
+        values = projection.correlations
+        outcomes = projection.outcomes
         trace_event_ids, delivery_attempt_ids = EvidenceInspection(database_url).renewal_demo_ids(
-            UUID(values["instance_id"])
+            values.instance_id
         )
         correlations = Correlations(
             runtime=RuntimeCorrelations(
-                command_ids=(UUID(values["command_id"]),),
-                workflow_ids=(UUID(values["workflow_id"]),),
-                instance_ids=(UUID(values["instance_id"]),),
-                step_ids=_ids(values["step_ids"]),
-                attempt_ids=_ids(values["attempt_ids"]),
-                wait_ids=_ids(outcomes["approval_wait_ids"]),
-                signal_ids=_ids(values["signal_ids"]),
+                command_ids=(values.command_id,),
+                workflow_ids=(values.workflow_id,),
+                instance_ids=(values.instance_id,),
+                step_ids=values.step_ids,
+                attempt_ids=values.attempt_ids,
+                wait_ids=outcomes.approval_wait_ids,
+                signal_ids=values.signal_ids,
                 trace_event_ids=trace_event_ids,
             ),
             application=ApplicationCorrelations(
-                thread_ids=(UUID(values["thread_id"]),),
-                message_ids=_ids(values["message_ids"]),
-                domain_event_ids=_ids(values["domain_event_ids"]),
-                delivery_ids=_ids(values["delivery_ids"]),
+                thread_ids=(values.thread_id,),
+                message_ids=values.message_ids,
+                domain_event_ids=values.domain_event_ids,
+                delivery_ids=values.delivery_ids,
                 delivery_attempt_ids=delivery_attempt_ids,
-                external_effect_ids=_ids(values["logical_effect_ids"]),
-                approval_grant_ids=_ids(values["approval_grant_ids"]),
+                external_effect_ids=values.logical_effect_ids,
+                approval_grant_ids=values.approval_grant_ids,
             ),
-            agent=AgentCorrelations(agent_run_ids=_ids(values["agent_run_ids"])),
+            agent=AgentCorrelations(agent_run_ids=values.agent_run_ids),
             process=ProcessCorrelations(
                 worker_ids=("synthetic-email",), process_ids=(provider.pid,)
             ),
             provider=ProviderCorrelations(
                 provider_request_ids=tuple(
-                    str(item["provider_request_id"])
-                    for item in outcomes["effect_evidence"]
-                    if item["provider_request_id"] is not None
+                    item.provider_request_id
+                    for item in outcomes.effect_evidence
+                    if item.provider_request_id is not None
                 )
             ),
         )
         document = {
-            "workflow_lifecycle": outcomes["workflow_lifecycle"],
-            "instance_state": outcomes["instance_state"],
-            "completion_event_count": outcomes["completion_event_count"],
+            "workflow_lifecycle": outcomes.workflow_lifecycle,
+            "instance_state": outcomes.instance_state,
+            "completion_event_count": outcomes.completion_event_count,
             "provider_request_count": provider.request_count() - provider_request_baseline,
         }
     if document != {

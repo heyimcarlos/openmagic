@@ -20,6 +20,7 @@ from openmagic_evals.evidence.package_policy import (
     role_dependency_violations,
     role_import_violations,
     role_private_import_violations,
+    role_public_persistence_violations,
     source_python_files,
 )
 
@@ -57,6 +58,9 @@ def test_production_dependency_direction_is_one_way() -> None:
         assert role_import_violations(role, imports) == ()
         assert role_private_import_violations(role, imports) == ()
         assert role_dependency_violations(role, dependencies) == ()
+        assert (
+            role_public_persistence_violations(role, source_python_files(ROOT / role.source)) == ()
+        )
 
 
 def test_private_persistence_import_policy_rejects_full_import_paths(tmp_path: Path) -> None:
@@ -73,6 +77,18 @@ def test_private_persistence_import_policy_rejects_full_import_paths(tmp_path: P
     assert role_private_import_violations(api_role, imports) == (
         "openmagic-api imports private persistence package example_insurance._persistence",
         "openmagic-api imports private persistence package openmagic_runtime._persistence",
+    )
+
+
+def test_public_persistence_policy_rejects_record_adapter_module(tmp_path: Path) -> None:
+    package = tmp_path / "example_insurance"
+    package.mkdir()
+    adapter = package / "leaked_records.py"
+    adapter.write_text("__all__ = []\n", encoding="utf-8")
+    role = next(role for role in PACKAGE_ROLES if role.distribution == "example-insurance")
+
+    assert role_public_persistence_violations(role, (adapter,)) == (
+        "example-insurance exposes persistence adapter leaked_records.py",
     )
 
 
@@ -140,9 +156,12 @@ def test_application_sql_does_not_reference_private_runtime_tables() -> None:
 
 def test_verification_persistence_has_canonical_sql_owners_and_named_decoders() -> None:
     application_root = ROOT / "reference-apps/example-insurance/src/example_insurance"
-    challenge_path = application_root / "verification_challenge_records.py"
-    workflow_path = application_root / "verification_workflow_records.py"
-    authority_path = application_root / "verification_authority_records.py"
+    persistence_root = application_root / "_persistence"
+    challenge_path = persistence_root / "verification_challenge_records.py"
+    workflow_path = persistence_root / "verification_workflow_records.py"
+    authority_path = persistence_root / "verification_authority_records.py"
+
+    assert not tuple(application_root.glob("*_records.py"))
 
     assert "example_insurance.verification_workflows" not in challenge_path.read_text(
         encoding="utf-8"

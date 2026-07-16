@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -19,6 +18,7 @@ from example_insurance.renewals import (
     StartRenewalOutreach,
     StartRenewalOutreachInput,
 )
+from openmagic_playground.renewal_observation import decode_renewal_projection
 from openmagic_runtime.commands import Actor, Cause
 from openmagic_runtime.threads import CreateThread, ThreadStore
 
@@ -166,9 +166,9 @@ def wait_for_renewal_completion(
     """Wait for the deployed workers to complete a renewal Workflow."""
     deadline = time.monotonic() + 20
     while time.monotonic() < deadline:
-        evidence = json.loads(application.renewal_evidence_json(workflow_id))
-        if evidence["outcomes"]["workflow_lifecycle"] == "completed":
-            return evidence
+        projection = decode_renewal_projection(application.renewal_evidence_json(workflow_id))
+        if projection.outcomes.workflow_lifecycle == "completed":
+            return projection.model_dump(mode="json")
         time.sleep(0.02)
     raise AssertionError("Renewal Workflow did not complete")
 

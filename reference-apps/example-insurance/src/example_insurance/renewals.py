@@ -42,6 +42,14 @@ from openmagic_runtime.kernel.work import (
 from openmagic_runtime.threads import ThreadAccess, ThreadStore
 from psycopg import Connection
 
+from example_insurance._persistence.renewal_records import CommandEventLineage
+from example_insurance._persistence.renewal_workflow_records import (
+    record_workflow,
+    workflow_exists,
+)
+from example_insurance._persistence.verification_workflow_records import (
+    has_active_verification_workflows,
+)
 from example_insurance.application_registry import application_command_dispatcher
 from example_insurance.renewal_attempt_control import RenewalAttemptControl
 from example_insurance.renewal_commands import (
@@ -85,15 +93,10 @@ from example_insurance.renewal_effects import (
 from example_insurance.renewal_evidence import RenewalEvidenceProjector
 from example_insurance.renewal_facts import RenewalFacts, RenewalFactSource
 from example_insurance.renewal_lifecycle import RenewalLifecycleControl
-from example_insurance.renewal_records import CommandEventLineage
 from example_insurance.renewal_registry import (
     RenewalCommandHandlers,
 )
 from example_insurance.renewal_review_control import RenewalReviewControl
-from example_insurance.renewal_workflow_records import (
-    record_workflow,
-    workflow_exists,
-)
 from example_insurance.verification_attempt_control import VerificationAttemptControl
 from example_insurance.verification_codes import VerificationCodes
 from example_insurance.verification_commands import (
@@ -114,9 +117,6 @@ from example_insurance.verification_commands import (
 from example_insurance.verification_control import VerificationControl
 from example_insurance.verification_definition import VERIFICATION_DEFINITION
 from example_insurance.verification_registry import VerificationCommandHandlers
-from example_insurance.verification_workflow_records import (
-    has_active_verification_workflows,
-)
 from example_insurance.workflow_attempt_dispatch import (
     AttemptHandler,
     AttemptObservationDispatcher,
@@ -320,6 +320,8 @@ class ExampleInsurance:
         self,
         connection: Connection[tuple[Any, ...]],
         command: StartRenewalOutreach,
+        *,
+        prepare_first_execution: Callable[[Connection[tuple[Any, ...]]], None] | None = None,
     ) -> CommandReceipt[StartRenewalOutreachResult]:
         """Start a renewal in the caller-owned PostgreSQL transaction."""
         return self._dispatcher.execute_on(
@@ -327,6 +329,7 @@ class ExampleInsurance:
             command_type="renewal.start_outreach",
             schema_version=1,
             command=command,
+            prepare_first_execution=prepare_first_execution,
         )
 
     def provision_verification_authority(

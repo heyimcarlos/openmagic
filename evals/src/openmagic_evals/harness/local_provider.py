@@ -105,8 +105,18 @@ class LocalEmailProvider:
         errors: list[Exception] = []
         process = self._process
         exited = process is None
+
+        def has_exited() -> bool:
+            if process is None:
+                return True
+            try:
+                return process.poll() is not None
+            except Exception as error:
+                errors.append(error)
+                return False
+
         try:
-            if process is not None and process.poll() is None:
+            if process is not None and not has_exited():
                 try:
                     process.terminate()
                     process.wait(timeout=self.shutdown_timeout)
@@ -114,23 +124,23 @@ class LocalEmailProvider:
                     pass
                 except Exception as error:
                     errors.append(error)
-                if process.poll() is None:
+                if not has_exited():
                     try:
                         process.kill()
                     except Exception as error:
                         errors.append(error)
-                if process.poll() is None:
+                if not has_exited():
                     try:
                         process.wait(timeout=self.shutdown_timeout)
                     except Exception as error:
                         errors.append(error)
-            if process is not None and process.poll() is None:
+            exited = has_exited()
+            if process is not None and not exited:
                 errors.append(RuntimeError(f"local email provider {process.pid} survived cleanup"))
-            exited = process is None or process.poll() is not None
         finally:
             if exited:
                 self._process = None
-            if exited and self._log_handle is not None:
+            if self._log_handle is not None:
                 try:
                     self._log_handle.close()
                 except Exception as error:

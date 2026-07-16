@@ -1,4 +1,4 @@
-"""Read models for committed renewal Command receipts."""
+"""Private read models for committed renewal Command receipts."""
 
 from __future__ import annotations
 

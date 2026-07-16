@@ -196,9 +196,13 @@ def _trace_completeness_case(
         correlations.application.domain_event_ids,
         correlations.application.delivery_ids,
         correlations.application.delivery_attempt_ids,
+        correlations.application.external_effect_ids,
         correlations.application.approval_grant_ids,
         correlations.application.verification_challenge_ids,
         correlations.application.verification_session_ids,
+        correlations.process.worker_ids,
+        correlations.process.process_ids,
+        correlations.provider.provider_request_ids,
     )
     scenario_documents = observation.document.get("scenarios")
     if not isinstance(scenario_documents, list) or len(scenario_documents) != 1:
@@ -206,12 +210,19 @@ def _trace_completeness_case(
     scenario_document = scenario_documents[0]
     proof = scenario_document.get("observation") if isinstance(scenario_document, dict) else None
     relationship_checks = proof.get("relationship_checks") if isinstance(proof, dict) else None
+    provider_process = (
+        proof.get("provider_process_relationship") if isinstance(proof, dict) else None
+    )
     if (
         not all(required_durable_identity_groups)
         or not isinstance(proof, dict)
         or proof.get("connected") is not True
         or not isinstance(relationship_checks, list)
-        or len(relationship_checks) < 7
+        or len(relationship_checks) < 9
+        or not isinstance(provider_process, dict)
+        or provider_process.get("process_id") not in correlations.process.process_ids
+        or provider_process.get("provider_request_id")
+        not in correlations.provider.provider_request_ids
     ):
         raise AssertionError("trace completeness omitted an accepted durable identity")
     return contract

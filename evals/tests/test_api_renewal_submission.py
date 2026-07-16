@@ -104,6 +104,32 @@ def test_api_exact_replay_does_not_change_provisioned_authority() -> None:
         assert thread.channel_reference == "morgan@example.test"
 
 
+def test_api_exact_replay_preserves_newer_authoritative_facts() -> None:
+    with postgres_container(database_name=f"openmagic_test_{uuid4().hex}") as postgres:
+        database_url = postgres.get_connection_url(driver=None)
+        apply_migrations(database_url)
+        submission = _submission()
+        application = ExampleInsurance(database_url=database_url)
+        application.prepare()
+
+        receipt = RenewalSubmissionApplication(
+            database_url=database_url
+        ).provision_and_start_renewal(submission)
+        application.replace_renewal_facts(
+            replace(submission.facts, policyholder_name="Current Authoritative Name")
+        )
+
+        replay = RenewalSubmissionApplication(
+            database_url=database_url
+        ).provision_and_start_renewal(submission)
+
+        assert replay == receipt
+        assert _facts_revision(database_url, submission.facts.policy_id) == (
+            2,
+            "Current Authoritative Name",
+        )
+
+
 def test_conflicting_replay_rolls_back_provisioning_changes() -> None:
     with postgres_container(database_name=f"openmagic_test_{uuid4().hex}") as postgres:
         database_url = postgres.get_connection_url(driver=None)

@@ -32,7 +32,7 @@ uv sync --all-packages --locked --group dev
 uv run ruff format --check .
 uv run ruff check .
 uv run ty check packages/openmagic-runtime/src reference-apps/example-insurance/src apps/api/src evals/src apps/playground/src
-uv run ty check packages/openmagic-runtime/tests reference-apps/example-insurance/tests evals/tests
+uv run ty check packages/openmagic-runtime/tests reference-apps/example-insurance/tests apps/playground/tests evals/tests
 uv run pytest
 ```
 

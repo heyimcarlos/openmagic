@@ -1,4 +1,4 @@
-"""Canonical application Domain Event lineage encoding."""
+"""Private canonical application Domain Event lineage encoding."""
 
 from openmagic_runtime.commands import Actor, Cause
 

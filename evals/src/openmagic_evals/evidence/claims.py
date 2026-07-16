@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from dataclasses import dataclass
 from pathlib import Path
 
 from openmagic_evals.evidence.contracts import (
@@ -36,6 +37,29 @@ _SUPPORTED_CLAIMS = (
     "Application Policy retained authority, completion, retry-safety, and External Effect decisions in the tested cases.",
     "The tested Domain Event and Delivery path recovered to at most one Message in one exact Thread.",
 )
+
+
+@dataclass(frozen=True)
+class EvidencePackagePaths:
+    """One complete issue 71 evidence package, with no omittable lanes."""
+
+    deterministic: Path
+    surface_audit: Path
+    agent_quality: Path
+    live_smoke: Path
+    playground: Path
+    processes: Path
+    races: Path
+    renewal_demo: Path
+    verification_demo: Path
+
+
+@dataclass(frozen=True)
+class _ArtifactRequirement:
+    name: str
+    path: Path
+    artifact_type: type[Artifact]
+    demonstration_case_id: str | None = None
 
 
 def _digest(path: Path) -> str:
@@ -98,75 +122,56 @@ def _validate_release_matrix(artifact: DeterministicArtifact) -> None:
             raise ValueError(f"claim report race proof is incomplete: {case_id}")
 
 
-def write_claim_report(
-    *,
-    deterministic_path: Path,
-    surface_path: Path,
-    output: Path,
-    agent_path: Path | None = None,
-    live_path: Path | None = None,
-    playground_path: Path | None = None,
-    process_path: Path | None = None,
-    race_path: Path | None = None,
-    renewal_demo_path: Path | None = None,
-    verification_demo_path: Path | None = None,
-) -> None:
-    deterministic = parse_artifact(deterministic_path.read_bytes())
-    if not isinstance(deterministic, DeterministicArtifact):
-        raise TypeError("claim report requires a deterministic release artifact")
-    if not deterministic.summary.strict_pass:
-        raise ValueError("claim report cannot publish supported claims from a failed release gate")
-    _validate_release_matrix(deterministic)
-    related: list[tuple[str, Path, Artifact]] = [
-        ("deterministic", deterministic_path, deterministic)
-    ]
-    surface = parse_artifact(surface_path.read_bytes())
-    if not isinstance(surface, SurfaceAuditArtifact) or not surface.summary.strict_pass:
-        raise TypeError("claim report requires a passing surface and cold-schema artifact")
-    related.append(("surface-audit", surface_path, surface))
-    if agent_path is not None:
-        agent = parse_artifact(agent_path.read_bytes())
-        if not isinstance(agent, AgentQualityArtifact):
-            raise TypeError("Agent artifact has the wrong lane")
-        related.append(("agent-quality", agent_path, agent))
-    if live_path is not None:
-        live = parse_artifact(live_path.read_bytes())
-        if not isinstance(live, LiveSmokeArtifact):
-            raise TypeError("live artifact has the wrong lane")
-        related.append(("live-smoke", live_path, live))
-    if playground_path is not None:
-        playground = parse_artifact(playground_path.read_bytes())
-        if not isinstance(playground, PlaygroundArtifact):
-            raise TypeError("playground artifact has the wrong lane")
-        related.append(("playground", playground_path, playground))
-    if process_path is not None:
-        process = parse_artifact(process_path.read_bytes())
-        if not isinstance(process, ProcessArtifact):
-            raise TypeError("process artifact has the wrong lane")
-        related.append(("processes", process_path, process))
-    if race_path is not None:
-        race = parse_artifact(race_path.read_bytes())
-        if not isinstance(race, RaceArtifact):
-            raise TypeError("race artifact has the wrong lane")
-        related.append(("races", race_path, race))
-    for name, path, expected_case in (
-        ("renewal-demo", renewal_demo_path, _RENEWAL_DEMONSTRATION_CASE_ID),
-        (
+def _requirements(package: EvidencePackagePaths) -> tuple[_ArtifactRequirement, ...]:
+    return (
+        _ArtifactRequirement("deterministic", package.deterministic, DeterministicArtifact),
+        _ArtifactRequirement("surface-audit", package.surface_audit, SurfaceAuditArtifact),
+        _ArtifactRequirement("agent-quality", package.agent_quality, AgentQualityArtifact),
+        _ArtifactRequirement("live-smoke", package.live_smoke, LiveSmokeArtifact),
+        _ArtifactRequirement("playground", package.playground, PlaygroundArtifact),
+        _ArtifactRequirement("processes", package.processes, ProcessArtifact),
+        _ArtifactRequirement("races", package.races, RaceArtifact),
+        _ArtifactRequirement(
+            "renewal-demo",
+            package.renewal_demo,
+            PlaygroundArtifact,
+            _RENEWAL_DEMONSTRATION_CASE_ID,
+        ),
+        _ArtifactRequirement(
             "verification-demo",
-            verification_demo_path,
+            package.verification_demo,
+            PlaygroundArtifact,
             _VERIFICATION_DEMONSTRATION_CASE_ID,
         ),
-    ):
-        if path is None:
-            continue
-        demo = parse_artifact(path.read_bytes())
-        if not isinstance(demo, PlaygroundArtifact) or {case.case_id for case in demo.cases} != {
-            expected_case
-        }:
-            raise TypeError(f"{name} artifact has the wrong demonstration contract")
-        related.append((name, path, demo))
+    )
 
-    expected_pin = _common_reproducibility_pin(deterministic)
+
+def _load_required_artifacts(
+    package: EvidencePackagePaths,
+) -> tuple[tuple[str, Path, Artifact], ...]:
+    loaded: list[tuple[str, Path, Artifact]] = []
+    for requirement in _requirements(package):
+        artifact = parse_artifact(requirement.path.read_bytes())
+        if not isinstance(artifact, requirement.artifact_type):
+            raise TypeError(f"{requirement.name} artifact has the wrong evidence lane")
+        if requirement.demonstration_case_id is not None and _demonstration_case_ids(artifact) != {
+            requirement.demonstration_case_id
+        }:
+            raise TypeError(f"{requirement.name} artifact has the wrong demonstration contract")
+        loaded.append((requirement.name, requirement.path, artifact))
+    return tuple(loaded)
+
+
+def _demonstration_case_ids(artifact: Artifact) -> set[str]:
+    if not isinstance(artifact, PlaygroundArtifact):
+        return set()
+    return {case.case_id for case in artifact.cases}
+
+
+def _validate_common_reproducibility(
+    related: tuple[tuple[str, Path, Artifact], ...],
+) -> None:
+    expected_pin = _common_reproducibility_pin(related[0][2])
     if any(_common_reproducibility_pin(artifact) != expected_pin for _, _, artifact in related):
         raise ValueError("claim report artifacts do not share one reproducibility pin")
     if any(
@@ -175,6 +180,20 @@ def write_claim_report(
         for installation_kind in artifact.reproducibility.build.installation_kinds.values()
     ):
         raise ValueError("claim report requires every evidence product from clean wheel installs")
+
+
+def write_claim_report(*, package: EvidencePackagePaths, output: Path) -> None:
+    related = _load_required_artifacts(package)
+    deterministic = related[0][2]
+    if not isinstance(deterministic, DeterministicArtifact):
+        raise TypeError("claim report requires a deterministic release artifact")
+    if not deterministic.summary.strict_pass:
+        raise ValueError("claim report cannot publish supported claims from a failed release gate")
+    _validate_release_matrix(deterministic)
+    surface = related[1][2]
+    if not isinstance(surface, SurfaceAuditArtifact) or not surface.summary.strict_pass:
+        raise TypeError("claim report requires a passing surface and cold-schema artifact")
+    _validate_common_reproducibility(related)
 
     lines = [
         "# OpenMagic tested claim report",
@@ -204,4 +223,4 @@ def write_claim_report(
     output.write_text("\n".join(lines), encoding="utf-8")
 
 
-__all__ = ["write_claim_report"]
+__all__ = ["EvidencePackagePaths", "write_claim_report"]

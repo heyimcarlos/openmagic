@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-import json
 import re
+import socket
 from pathlib import Path
+from typing import Literal
 from uuid import UUID, uuid5
 
 from example_insurance.renewals import (
@@ -27,17 +28,22 @@ from testcontainers.postgres import PostgresContainer
 
 from openmagic_playground.deployment import POSTGRES_IMAGE, PlaygroundDeployment
 from openmagic_playground.deployment_observation import observe_postgres
+from openmagic_playground.renewal_observation import RenewalProjection, decode_renewal_projection
 from openmagic_playground.reset import mark_synthetic_deployment
 from openmagic_playground.responses import (
     ControlExerciseResponse,
     ExercisedControls,
+    FailureScenarioObservation,
     PlaygroundCorrelations,
+    PlaygroundScenarioCoverage,
     PostgresDeploymentObservation,
     RenewalDemonstrationObservation,
     RenewalDemonstrationResponse,
+    SafeRenewalBoundaryObservation,
     VerificationDemonstrationObservation,
     VerificationDemonstrationResponse,
 )
+from openmagic_playground.synthetic_provider import SyntheticEmailProvider
 
 _DEMO_NAMESPACE = UUID("d21783e3-7912-45d6-b3b2-289549e5d3e5")
 
@@ -96,68 +102,172 @@ def _renewal_fixture(
     return command, actor
 
 
-def _renewal_result(
+def _safe_renewal_result(
     application: ExampleInsurance,
     threads: ThreadStore,
     command: StartRenewalOutreach,
-    postgres_deployment: PostgresDeploymentObservation,
-) -> RenewalDemonstrationResponse:
-    evidence = json.loads(application.renewal_evidence_json(command.input.workflow_id))
-    values = evidence["correlations"]
-    outcomes = evidence["outcomes"]
+) -> tuple[PlaygroundCorrelations, SafeRenewalBoundaryObservation]:
+    projection = decode_renewal_projection(
+        application.renewal_evidence_json(command.input.workflow_id)
+    )
+    values = projection.correlations
+    outcomes = projection.outcomes
     messages = threads.read(command.input.thread_id).messages
     if (
-        outcomes["approval_wait_state"] != "unsatisfied"
-        or outcomes["external_email_effect_count"] != 0
+        outcomes.approval_wait_state != "unsatisfied"
+        or outcomes.external_email_effect_count != 0
         or len(messages) != 1
     ):
         raise AssertionError("synthetic playground renewal left its safe approval boundary")
-    return RenewalDemonstrationResponse(
-        correlations=PlaygroundCorrelations(
-            command_ids=(values["command_id"],),
-            workflow_ids=(values["workflow_id"],),
-            instance_ids=(values["instance_id"],),
-            step_ids=values["step_ids"],
-            attempt_ids=values["attempt_ids"],
-            wait_ids=outcomes["approval_wait_ids"],
-            thread_ids=(values["thread_id"],),
-            message_ids=values["message_ids"],
-            agent_run_ids=values["agent_run_ids"],
-            domain_event_ids=values["domain_event_ids"],
-            delivery_ids=values["delivery_ids"],
+    return (
+        PlaygroundCorrelations(
+            command_ids=(values.command_id,),
+            workflow_ids=(values.workflow_id,),
+            instance_ids=(values.instance_id,),
+            step_ids=values.step_ids,
+            attempt_ids=values.attempt_ids,
+            wait_ids=outcomes.approval_wait_ids,
+            thread_ids=(values.thread_id,),
+            message_ids=values.message_ids,
+            agent_run_ids=values.agent_run_ids,
+            domain_event_ids=values.domain_event_ids,
+            delivery_ids=values.delivery_ids,
         ),
-        observation=RenewalDemonstrationObservation(
-            approval_wait_state=outcomes["approval_wait_state"],
-            external_email_effect_count=outcomes["external_email_effect_count"],
-            instance_state=outcomes["instance_state"],
-            message_count=len(messages),
-            workflow_lifecycle=outcomes["workflow_lifecycle"],
+        SafeRenewalBoundaryObservation(
+            approval_wait_state="unsatisfied",
+            external_email_effect_count=0,
+            instance_state="open",
+            message_count=1,
+            workflow_lifecycle="active",
         ),
-        postgres_deployments=(postgres_deployment,),
     )
 
 
-def run_renewal_demonstration() -> RenewalDemonstrationResponse:
-    """Run the effects-disabled renewal demonstration in an isolated database."""
-
-    container, database_url = _database("renewal")
-    try:
-        from example_insurance.migrations import apply_migrations
-
-        apply_migrations(database_url)
-        mark_synthetic_deployment(database_url)
-        application = ExampleInsurance(database_url=database_url)
-        application.prepare()
-        threads = ThreadStore(database_url=database_url)
-        command, _actor = _renewal_fixture(application, threads, "renewal")
-        return _renewal_result(
-            application,
-            threads,
-            command,
-            PostgresDeploymentObservation.model_validate(observe_postgres(database_url)),
+def _approve_renewal(
+    application: ExampleInsurance,
+    renewal: StartRenewalOutreach,
+    actor: Actor,
+    scenario: str,
+) -> None:
+    presentation = application.renewal_approval_presentation(renewal.input.workflow_id)
+    application.approve_renewal_draft(
+        ApproveRenewalDraft(
+            command_id=_id(scenario, "approval-command"),
+            actor=actor,
+            cause=Cause("message", str(_id(scenario, "approval-cause"))),
+            input=ApproveRenewalDraftInput(
+                workflow_id=renewal.input.workflow_id,
+                wait_id=presentation.wait_id,
+                draft_id=presentation.draft_id,
+                message_id=presentation.message_id,
+                thread_sequence=presentation.thread_sequence,
+                message_fingerprint=presentation.message_fingerprint,
+                presentation_fingerprint=presentation.presentation_fingerprint,
+                proposed_effect=presentation.proposed_effect,
+            ),
         )
-    finally:
-        container.stop()
+    )
+
+
+def _correlations(
+    projection: RenewalProjection,
+    *,
+    worker_ids: tuple[str, ...] = (),
+    process_ids: tuple[int, ...] = (),
+    provider_request_ids: tuple[str, ...] = (),
+) -> PlaygroundCorrelations:
+    values = projection.correlations
+    outcomes = projection.outcomes
+    return PlaygroundCorrelations(
+        command_ids=(values.command_id,),
+        workflow_ids=(values.workflow_id,),
+        instance_ids=(values.instance_id,),
+        step_ids=values.step_ids,
+        attempt_ids=values.attempt_ids,
+        wait_ids=outcomes.approval_wait_ids,
+        signal_ids=values.signal_ids,
+        thread_ids=(values.thread_id,),
+        message_ids=values.message_ids,
+        agent_run_ids=values.agent_run_ids,
+        domain_event_ids=values.domain_event_ids,
+        delivery_ids=values.delivery_ids,
+        external_effect_ids=values.logical_effect_ids,
+        approval_grant_ids=values.approval_grant_ids,
+        worker_ids=worker_ids,
+        process_ids=process_ids,
+        provider_request_ids=provider_request_ids,
+    )
+
+
+def run_renewal_demonstration(
+    *,
+    working_directory: Path,
+    execute_approved_local_effect: Literal[True],
+) -> RenewalDemonstrationResponse:
+    """Run one explicitly approved effect through an owned local provider."""
+
+    if execute_approved_local_effect is not True:
+        raise ValueError("renewal demo requires explicit approved local effect execution")
+    with SyntheticEmailProvider(
+        working_directory=working_directory / "provider",
+        behavior="success",
+    ) as provider:
+        container, database_url = _database("renewal")
+        try:
+            from example_insurance.migrations import apply_migrations
+
+            apply_migrations(database_url)
+            mark_synthetic_deployment(database_url)
+            application = ExampleInsurance(
+                database_url=database_url,
+                email_provider_url=provider.url,
+            )
+            application.prepare()
+            threads = ThreadStore(database_url=database_url)
+            command, actor = _renewal_fixture(application, threads, "renewal")
+            _approve_renewal(application, command, actor, "renewal")
+            completed = application.run_workflow_worker_once(worker_id="playground-email")
+            if completed is None:
+                raise AssertionError("approved local effect was not attempted")
+            projection = decode_renewal_projection(
+                application.renewal_evidence_json(command.input.workflow_id)
+            )
+            outcomes = projection.outcomes
+            requests = provider.requests()
+            if (
+                outcomes.approval_wait_state != "satisfied"
+                or outcomes.external_email_effect_count != 1
+                or outcomes.external_effect_certainties != ("applied",)
+                or outcomes.instance_state != "closed"
+                or outcomes.workflow_lifecycle != "completed"
+                or outcomes.completion_event_count != 1
+                or len(requests) != 1
+            ):
+                raise AssertionError("synthetic renewal did not complete its approved local effect")
+            return RenewalDemonstrationResponse(
+                correlations=_correlations(
+                    projection,
+                    worker_ids=("playground-email",),
+                    process_ids=(provider.pid,),
+                    provider_request_ids=(requests[0].provider_request_id,),
+                ),
+                observation=RenewalDemonstrationObservation(
+                    approval_wait_state="satisfied",
+                    external_email_effect_count=1,
+                    external_effect_certainties=("applied",),
+                    instance_state="closed",
+                    message_count=1,
+                    workflow_lifecycle="completed",
+                    completion_event_count=1,
+                    provider_request_count=1,
+                    approved_local_execution=execute_approved_local_effect,
+                ),
+                postgres_deployments=(
+                    PostgresDeploymentObservation.model_validate(observe_postgres(database_url)),
+                ),
+            )
+        finally:
+            container.stop()
 
 
 def run_verification_demonstration() -> VerificationDemonstrationResponse:
@@ -273,8 +383,70 @@ def run_verification_demonstration() -> VerificationDemonstrationResponse:
         container.stop()
 
 
+def _failure_scenario(
+    *,
+    database_url: str,
+    scenario: Literal["intentional-failure", "disconnected-provider"],
+    provider_url: str,
+    provider_connected: bool,
+    provider_process_id: int | None = None,
+) -> tuple[FailureScenarioObservation, PlaygroundCorrelations]:
+    application = ExampleInsurance(database_url=database_url, email_provider_url=provider_url)
+    application.prepare()
+    threads = ThreadStore(database_url=database_url)
+    renewal, actor = _renewal_fixture(application, threads, scenario)
+    _approve_renewal(application, renewal, actor, scenario)
+    result = application.run_workflow_worker_once(worker_id=f"{scenario}-email")
+    if result is None:
+        raise AssertionError(f"{scenario} did not exercise its provider boundary")
+    projection = decode_renewal_projection(
+        application.renewal_evidence_json(renewal.input.workflow_id)
+    )
+    outcomes = projection.outcomes
+    certainties = outcomes.external_effect_certainties
+    expected = "not_applied" if provider_connected else "uncertain"
+    if (
+        certainties != (expected,)
+        or outcomes.instance_state != "open"
+        or outcomes.workflow_lifecycle != "active"
+    ):
+        raise AssertionError(f"{scenario} did not retain its explicit incomplete state")
+    provider_request_ids = tuple(
+        item.provider_request_id
+        for item in outcomes.effect_evidence
+        if item.provider_request_id is not None
+    )
+    return (
+        FailureScenarioObservation(
+            scenario=scenario,
+            external_effect_certainty=expected,
+            instance_state="open",
+            workflow_lifecycle="active",
+            provider_connected=provider_connected,
+        ),
+        _correlations(
+            projection,
+            worker_ids=(f"{scenario}-email",),
+            process_ids=(provider_process_id,) if provider_process_id is not None else (),
+            provider_request_ids=provider_request_ids,
+        ),
+    )
+
+
+def _merge_playground_correlations(
+    values: tuple[PlaygroundCorrelations, ...],
+) -> PlaygroundCorrelations:
+    fields = PlaygroundCorrelations.model_fields
+    return PlaygroundCorrelations.model_validate(
+        {
+            name: tuple(dict.fromkeys(item for value in values for item in getattr(value, name)))
+            for name in fields
+        }
+    )
+
+
 def exercise_process_controls(*, working_directory: Path) -> ControlExerciseResponse:
-    """Exercise start, drain, reset, restart, and stop on one safe deployment."""
+    """Exercise controls and all accepted synthetic playground scenarios."""
 
     deployment = PlaygroundDeployment(working_directory=working_directory)
     original = deployment.start()
@@ -283,10 +455,7 @@ def exercise_process_controls(*, working_directory: Path) -> ControlExerciseResp
         first_application = ExampleInsurance(database_url=deployment.database_url)
         first_application.prepare()
         first_threads = ThreadStore(database_url=deployment.database_url)
-        postgres_deployment = PostgresDeploymentObservation.model_validate(
-            observe_postgres(deployment.database_url)
-        )
-        first = _renewal_result(
+        first_correlations, first_observation = _safe_renewal_result(
             first_application,
             first_threads,
             _renewal_fixture(
@@ -294,13 +463,12 @@ def exercise_process_controls(*, working_directory: Path) -> ControlExerciseResp
                 first_threads,
                 "control",
             )[0],
-            postgres_deployment,
         )
         deployment.reset()
         second_application = ExampleInsurance(database_url=deployment.database_url)
         second_application.prepare()
         second_threads = ThreadStore(database_url=deployment.database_url)
-        second = _renewal_result(
+        second_correlations, second_observation = _safe_renewal_result(
             second_application,
             second_threads,
             _renewal_fixture(
@@ -308,14 +476,34 @@ def exercise_process_controls(*, working_directory: Path) -> ControlExerciseResp
                 second_threads,
                 "control",
             )[0],
-            postgres_deployment,
         )
+        with SyntheticEmailProvider(
+            working_directory=working_directory / "intentional-failure-provider",
+            behavior="not_applied",
+        ) as provider:
+            intentional_failure, intentional_correlations = _failure_scenario(
+                database_url=deployment.database_url,
+                scenario="intentional-failure",
+                provider_url=provider.url,
+                provider_connected=True,
+                provider_process_id=provider.pid,
+            )
+        deployment.reset()
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as disconnected:
+            disconnected.bind(("127.0.0.1", 0))
+            disconnected_port = int(disconnected.getsockname()[1])
+            disconnected_failure, disconnected_correlations = _failure_scenario(
+                database_url=deployment.database_url,
+                scenario="disconnected-provider",
+                provider_url=f"http://127.0.0.1:{disconnected_port}",
+                provider_connected=False,
+            )
         restarted = tuple(
             process
             for role in ("api", "workflow-worker", "delivery-worker")
             for process in deployment.scale_role(role, capacity=1)
         )
-        if first.observation != second.observation:
+        if first_observation != second_observation:
             raise AssertionError("playground reset did not reproduce its deterministic fixture")
         if {item.pid for item in original} & {item.pid for item in restarted}:
             raise AssertionError("playground restart did not use fresh interpreters")
@@ -327,8 +515,21 @@ def exercise_process_controls(*, working_directory: Path) -> ControlExerciseResp
                 restart=len(restarted),
                 stop=True,
             ),
-            correlations=first.correlations,
-            fixture=first.observation,
+            correlations=_merge_playground_correlations(
+                (
+                    first_correlations,
+                    second_correlations,
+                    intentional_correlations,
+                    disconnected_correlations,
+                )
+            ),
+            fixture=first_observation,
+            scenario_coverage=PlaygroundScenarioCoverage(
+                reset_reproduced=True,
+                repeated_run_reproduced=True,
+                intentional_failure=intentional_failure,
+                disconnected_provider=disconnected_failure,
+            ),
             original_process_ids=tuple(item.pid for item in original),
             restarted_process_ids=tuple(item.pid for item in restarted),
             postgres_deployments=(

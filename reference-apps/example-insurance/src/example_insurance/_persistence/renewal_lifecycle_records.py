@@ -1,4 +1,4 @@
-"""Transaction-bound persistence for renewal authority and lifecycle changes."""
+"""Private transaction-bound persistence for renewal authority and lifecycle changes."""
 
 from __future__ import annotations
 
@@ -11,15 +11,15 @@ from openmagic_runtime.commands import StateConflict
 from psycopg import Connection
 from psycopg.rows import dict_row
 
-from example_insurance.renewal_grant_records import invalidate_unconsumed_grants
-from example_insurance.renewal_lifecycle_policy import (
-    WorkflowLifecycle,
-    workflow_lifecycle,
-)
-from example_insurance.renewal_workflow_records import (
+from example_insurance._persistence.renewal_grant_records import invalidate_unconsumed_grants
+from example_insurance._persistence.renewal_workflow_records import (
     lock_instance_for_workflow,
     mark_workflow_authority_revoked,
     mark_workflow_cancelled,
+)
+from example_insurance.renewal_lifecycle_policy import (
+    WorkflowLifecycle,
+    workflow_lifecycle,
 )
 
 

@@ -1,4 +1,4 @@
-"""Canonical persistence writes for renewal Approval Grants."""
+"""Private canonical persistence writes for renewal Approval Grants."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from openmagic_runtime.commands import Actor, Cause
 from psycopg import Connection
 from psycopg.types.json import Jsonb
 
-from example_insurance.application_event_records import actor_record, cause_record
+from example_insurance._persistence.application_event_records import actor_record, cause_record
 
 
 def record_approval_grant(

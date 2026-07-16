@@ -21,7 +21,16 @@ def test_playground_exercises_disabled_effects_process_restart_and_safe_reset(
     assert artifact.summary.synthetic_data_only
     assert not artifact.summary.effects_enabled_by_default
     assert artifact.summary.reset_verified
+    assert artifact.summary.repeated_run_verified
+    assert artifact.summary.intentional_failure_verified
+    assert artifact.summary.disconnected_provider_verified
     assert artifact.summary.process_controls_verified
     assert not artifact.summary.contributes_to_correctness
     assert artifact.cases[0].verdict.status == "passed"
-    assert len(artifact.cases[0].correlations.process.process_ids) == 6
+    assert len(artifact.cases[0].correlations.process.process_ids) == 7
+    assert {scenario.scenario_id for scenario in artifact.cases[0].scenarios} == {
+        "safe-reset",
+        "repeated-run",
+        "intentional-failure",
+        "disconnected-provider",
+    }
