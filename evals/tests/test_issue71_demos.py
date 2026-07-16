@@ -6,7 +6,12 @@ from pathlib import Path
 
 from evidence_repository import prepare_clean_evidence_repository
 from openmagic_evals.evidence.contracts import parse_artifact
-from openmagic_evals.evidence.demos import run_renewal_demo, run_verification_demo
+from openmagic_evals.evidence.demos import (
+    _RENEWAL_DEMONSTRATION_CASE_ID,
+    _VERIFICATION_DEMONSTRATION_CASE_ID,
+    run_renewal_demo,
+    run_verification_demo,
+)
 
 
 def test_public_demonstrations_reproduce_from_reused_working_directory(tmp_path: Path) -> None:
@@ -30,8 +35,10 @@ def test_public_demonstrations_reproduce_from_reused_working_directory(tmp_path:
     )
 
     assert first.cases[0].verdict.status == "passed"
+    assert first.cases[0].case_id == _RENEWAL_DEMONSTRATION_CASE_ID
     assert second.cases[0].verdict.status == "passed"
     assert verification.cases[0].verdict.status == "passed"
+    assert verification.cases[0].case_id == _VERIFICATION_DEMONSTRATION_CASE_ID
 
 
 def test_renewal_demo_cli_records_its_explicit_timeout(tmp_path: Path) -> None:

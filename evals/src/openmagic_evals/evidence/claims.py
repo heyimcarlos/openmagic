@@ -19,6 +19,10 @@ from openmagic_evals.evidence.contracts import (
     has_correlations,
     parse_artifact,
 )
+from openmagic_evals.evidence.demos import (
+    _RENEWAL_DEMONSTRATION_CASE_ID,
+    _VERIFICATION_DEMONSTRATION_CASE_ID,
+)
 from openmagic_evals.evidence.matrix import (
     DETERMINISTIC_RELEASE_MATRIX,
     cardinality_one_races,
@@ -146,11 +150,11 @@ def write_claim_report(
             raise TypeError("race artifact has the wrong lane")
         related.append(("races", race_path, race))
     for name, path, expected_case in (
-        ("renewal-demo", renewal_demo_path, "demo.renewal-complete"),
+        ("renewal-demo", renewal_demo_path, _RENEWAL_DEMONSTRATION_CASE_ID),
         (
             "verification-demo",
             verification_demo_path,
-            "demo.deterministic-verification",
+            _VERIFICATION_DEMONSTRATION_CASE_ID,
         ),
     ):
         if path is None:

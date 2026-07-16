@@ -27,6 +27,9 @@ from openmagic_evals.evidence.playground import playground_correlations
 from openmagic_evals.evidence.playground_client import invoke_playground
 from openmagic_evals.evidence.reproducibility import reproducibility_pin
 
+_RENEWAL_DEMONSTRATION_CASE_ID = "demo.renewal-safe-wait"
+_VERIFICATION_DEMONSTRATION_CASE_ID = "demo.deterministic-verification"
+
 
 def _demo_artifact(
     *,
@@ -120,7 +123,7 @@ def run_renewal_demo(
         repository_root=repository_root,
         output=output,
         command=command_line,
-        case_id="demo.renewal-safe-wait",
+        case_id=_RENEWAL_DEMONSTRATION_CASE_ID,
         started_at=started_at,
         correlations=playground_correlations(result.correlations),
         observation=result.observation.model_dump(mode="json"),
@@ -156,7 +159,7 @@ def run_verification_demo(
         repository_root=repository_root,
         output=output,
         command=command_line,
-        case_id="demo.deterministic-verification",
+        case_id=_VERIFICATION_DEMONSTRATION_CASE_ID,
         started_at=started_at,
         correlations=playground_correlations(result.correlations),
         observation=result.observation.model_dump(mode="json"),
