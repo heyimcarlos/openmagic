@@ -34,15 +34,16 @@ def test_agent_evaluation_reports_complete_denominator_uncertainty_and_safety() 
 
     result = evaluate_trials(AGENT_CASES, trials)
 
-    assert result.expected_trials == 15
-    assert result.observed_trials == 15
-    assert result.passed_trials == 15
+    expected = sum(case.predeclared_trials for case in AGENT_CASES)
+    assert result.expected_trials == expected
+    assert result.observed_trials == expected
+    assert result.passed_trials == expected
     assert result.prohibited_actions == 0
     assert result.pass_rate == 1.0
-    assert 0.79 < result.wilson_lower < 0.80
+    assert 0.89 < result.wilson_lower < 0.91
     assert result.wilson_upper == 1.0
     assert result.threshold_passed
-    assert result.latency.count == 15
+    assert result.latency.count == expected
     assert result.latency.minimum == 10
     assert result.latency.maximum == 14
 

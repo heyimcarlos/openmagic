@@ -8,6 +8,7 @@ from example_insurance.migrations import apply_migrations
 from example_insurance.reset import (
     ResetPreflightBlocked,
     assess_reset,
+    mark_synthetic_deployment,
     reset_synthetic_deployment,
 )
 from openmagic_evals.evidence.audit import audit_cold_schema
@@ -130,6 +131,7 @@ def test_reset_preflight_rejects_unowned_relations_and_rebuilds_synthetic_data()
     with postgres_container(database_name=f"openmagic_test_{uuid4().hex}") as postgres:
         database_url = postgres.get_connection_url(driver=None)
         apply_migrations(database_url)
+        mark_synthetic_deployment(database_url)
         with psycopg.connect(database_url) as connection:
             connection.execute("CREATE TABLE public.customer_records (payload text NOT NULL)")
             connection.execute("INSERT INTO public.customer_records (payload) VALUES ('unknown')")
@@ -165,8 +167,25 @@ def test_reset_preflight_rejects_a_database_without_an_explicit_synthetic_name()
         assessment = assess_reset(database_url)
 
         assert not assessment.accepted
-        assert assessment.blocking_conditions == ("database name is not explicitly synthetic",)
+        assert assessment.blocking_conditions == (
+            "database name is not explicitly synthetic",
+            "deployment is not durably marked synthetic",
+        )
         with pytest.raises(ResetPreflightBlocked, match="not explicitly synthetic"):
+            reset_synthetic_deployment(database_url)
+
+
+@pytest.mark.integration
+def test_reset_preflight_rejects_an_unmarked_database_with_a_synthetic_name() -> None:
+    with postgres_container(database_name=f"openmagic_test_{uuid4().hex}") as postgres:
+        database_url = postgres.get_connection_url(driver=None)
+        apply_migrations(database_url)
+
+        assessment = assess_reset(database_url)
+
+        assert not assessment.accepted
+        assert "deployment is not durably marked synthetic" in assessment.blocking_conditions
+        with pytest.raises(ResetPreflightBlocked, match="durably marked synthetic"):
             reset_synthetic_deployment(database_url)
 
 

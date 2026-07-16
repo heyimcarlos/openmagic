@@ -94,21 +94,14 @@ uv run openmagic-evidence live-smoke \
   --provider openai-responses \
   --model unavailable \
   --endpoint https://api.openai.com/v1/responses \
-  --configuration-digest sha256:0000000000000000000000000000000000000000000000000000000000000000 \
   --synthetic-case-id live.synthetic.unavailable \
   --output .artifacts/issue71/live-smoke.json \
   --timeout-seconds 10
-uv run openmagic-evidence claim-report \
-  --deterministic .artifacts/issue71/deterministic-release.json \
-  --agent-quality .artifacts/issue71/agent-quality.json \
-  --live-smoke .artifacts/issue71/live-smoke.json \
-  --playground .artifacts/issue71/playground.json \
-  --output .artifacts/issue71/claim-report.md
 ```
 
 Live smoke remains unavailable unless `--allow-live` and a mode `0600`
 credential file are supplied with an explicitly pinned provider endpoint,
-model, configuration digest, and reversible synthetic case. Credential values
+model, derived configuration digest, and reversible synthetic case. Credential values
 are never included in commands, logs, or artifacts.
 
 The public synthetic demonstrations use a fresh database and local provider:
@@ -121,6 +114,16 @@ uv run openmagic-evidence demo-renewal \
 uv run openmagic-evidence demo-verification \
   --repository-root . \
   --output .artifacts/issue71/verification-demo.json
+uv run openmagic-evidence claim-report \
+  --deterministic .artifacts/issue71/deterministic-release.json \
+  --agent-quality .artifacts/issue71/agent-quality.json \
+  --live-smoke .artifacts/issue71/live-smoke.json \
+  --playground .artifacts/issue71/playground.json \
+  --processes .artifacts/issue71/processes.json \
+  --races .artifacts/issue71/races.json \
+  --renewal-demo .artifacts/issue71/renewal-demo.json \
+  --verification-demo .artifacts/issue71/verification-demo.json \
+  --output .artifacts/issue71/claim-report.md
 ```
 
 All artifacts are canonical, schema validated, redaction audited, and pinned to

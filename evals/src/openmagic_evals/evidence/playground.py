@@ -21,10 +21,13 @@ from openmagic_evals.evidence.contracts import (
     PlaygroundArtifact,
     PlaygroundSummary,
 )
+from openmagic_evals.evidence.deadline import bounded_evidence
 from openmagic_evals.evidence.release import reproducibility_pin
 from openmagic_evals.harness import (
     LocalEmailProvider,
     TestDeployment,
+    approve_renewal,
+    prepare_renewal_approval,
     prepare_synthetic_renewal_start,
 )
 
@@ -74,6 +77,7 @@ def _run_fixture(
     raise TimeoutError("playground fixture did not reach its safe approval Wait")
 
 
+@bounded_evidence
 def verify_playground(
     *,
     repository_root: Path,
@@ -99,12 +103,13 @@ def verify_playground(
         TestDeployment(working_directory=working_directory / "deployment") as deployment,
     ):
         provider.configure(behaviors=("success",))
+        provider_request_baseline = provider.request_count()
         provider_pid = provider.pid
         application = ExampleInsurance(database_url=deployment.database_url)
         application.prepare()
         threads = ThreadStore(database_url=deployment.database_url)
         first_observation, first_correlations = _run_fixture(application, threads, seed=71)
-        if provider.requests():
+        if provider.request_count() != provider_request_baseline:
             raise AssertionError("playground dispatched an effect while effects were disabled")
         original = deployment.processes
         deployment.drain_role("delivery-worker")
@@ -132,6 +137,37 @@ def verify_playground(
             raise AssertionError("playground reset did not reproduce its deterministic fixture")
         if second_observation["external_email_effect_count"] != 0:
             raise AssertionError("playground fixture enabled an External Effect")
+        deployment.drain_role("delivery-worker")
+        deployment.drain_role("workflow-worker")
+        failure_application = ExampleInsurance(
+            database_url=deployment.database_url,
+            email_provider_url=provider.url,
+        )
+        failure_application.prepare()
+        failure_threads = ThreadStore(database_url=deployment.database_url)
+        failure_command, failure_actor = prepare_renewal_approval(
+            failure_application, failure_threads
+        )
+        approve_renewal(failure_application, failure_command, failure_actor)
+        failure_application.run_workflow_worker_once(worker_id="playground-disconnected-provider")
+        failure_evidence = json.loads(
+            failure_application.renewal_evidence_json(failure_command.input.workflow_id)
+        )
+        failure_outcomes = failure_evidence["outcomes"]
+        if (
+            failure_outcomes["workflow_lifecycle"] != "active"
+            or failure_outcomes["completion_event_count"] != 0
+            or failure_outcomes["external_effect_certainties"] != ["uncertain"]
+        ):
+            raise AssertionError(
+                "disconnected provider did not remain an explicit safe failure: "
+                f"{json.dumps(failure_outcomes, sort_keys=True)}"
+            )
+        failure_observation = {
+            "completion_event_count": failure_outcomes["completion_event_count"],
+            "external_effect_certainties": failure_outcomes["external_effect_certainties"],
+            "workflow_lifecycle": failure_outcomes["workflow_lifecycle"],
+        }
         process_ids = (*original_pids, *restarted_pids, provider_pid)
     finished_at = datetime.now(UTC)
     artifact = PlaygroundArtifact(
@@ -201,6 +237,7 @@ def verify_playground(
                             "fixture_reproduced_after_reset": True,
                             "provider_disconnection_tolerated": True,
                             "provider_request_count": 0,
+                            "intentional_failure": failure_observation,
                         }
                     ),
                 ),

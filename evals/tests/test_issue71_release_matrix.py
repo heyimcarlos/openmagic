@@ -15,6 +15,7 @@ def test_release_matrix_covers_every_accepted_deterministic_family() -> None:
         "domain_event",
         "exact_thread_delivery",
         "external_effect",
+        "executor",
         "lease",
         "recovery",
         "replay",
@@ -22,6 +23,7 @@ def test_release_matrix_covers_every_accepted_deterministic_family() -> None:
         "route",
         "signal",
         "transaction",
+        "trace_completeness",
         "wait",
     } == REQUIRED_EVIDENCE_FAMILIES
     assert {case.family for case in DETERMINISTIC_RELEASE_MATRIX} == REQUIRED_EVIDENCE_FAMILIES

@@ -12,8 +12,11 @@ from openmagic_evals.evidence.contracts import (
     DeterministicArtifact,
     LiveSmokeArtifact,
     PlaygroundArtifact,
+    ProcessArtifact,
+    RaceArtifact,
     parse_artifact,
 )
+from openmagic_evals.evidence.matrix import DETERMINISTIC_RELEASE_MATRIX, cardinality_one_races
 
 _SUPPORTED_CLAIMS = (
     "The tested single-PostgreSQL kernel preserved the pinned Definition, transaction, replay, race, lease, recovery, and retry contracts.",
@@ -49,12 +52,21 @@ def write_claim_report(
     agent_path: Path | None = None,
     live_path: Path | None = None,
     playground_path: Path | None = None,
+    process_path: Path | None = None,
+    race_path: Path | None = None,
+    renewal_demo_path: Path | None = None,
+    verification_demo_path: Path | None = None,
 ) -> None:
     deterministic = parse_artifact(deterministic_path.read_bytes())
     if not isinstance(deterministic, DeterministicArtifact):
         raise TypeError("claim report requires a deterministic release artifact")
     if not deterministic.summary.strict_pass:
         raise ValueError("claim report cannot publish supported claims from a failed release gate")
+    expected_release_cases = {case.case_id for case in DETERMINISTIC_RELEASE_MATRIX} | {
+        race.case_id for race in cardinality_one_races()
+    }
+    if {case.case_id for case in deterministic.cases} != expected_release_cases:
+        raise ValueError("claim report requires the complete deterministic release matrix")
     related: list[tuple[str, Path, Artifact]] = [
         ("deterministic", deterministic_path, deterministic)
     ]
@@ -73,6 +85,32 @@ def write_claim_report(
         if not isinstance(playground, PlaygroundArtifact):
             raise TypeError("playground artifact has the wrong lane")
         related.append(("playground", playground_path, playground))
+    if process_path is not None:
+        process = parse_artifact(process_path.read_bytes())
+        if not isinstance(process, ProcessArtifact):
+            raise TypeError("process artifact has the wrong lane")
+        related.append(("processes", process_path, process))
+    if race_path is not None:
+        race = parse_artifact(race_path.read_bytes())
+        if not isinstance(race, RaceArtifact):
+            raise TypeError("race artifact has the wrong lane")
+        related.append(("races", race_path, race))
+    for name, path, expected_case in (
+        ("renewal-demo", renewal_demo_path, "demo.renewal-complete"),
+        (
+            "verification-demo",
+            verification_demo_path,
+            "demo.deterministic-verification",
+        ),
+    ):
+        if path is None:
+            continue
+        demo = parse_artifact(path.read_bytes())
+        if not isinstance(demo, PlaygroundArtifact) or {case.case_id for case in demo.cases} != {
+            expected_case
+        }:
+            raise TypeError(f"{name} artifact has the wrong demonstration contract")
+        related.append((name, path, demo))
 
     expected_pin = _common_reproducibility_pin(deterministic)
     if any(_common_reproducibility_pin(artifact) != expected_pin for _, _, artifact in related):

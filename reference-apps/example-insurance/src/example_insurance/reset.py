@@ -59,6 +59,11 @@ def _assess_connection(connection: Connection[tuple[object, ...]]) -> ResetAsses
         conditions.append("database contains an unowned schema")
     if _public_tables(connection):
         conditions.append("public schema contains application tables")
+    purpose = connection.execute(
+        "SELECT deployment_purpose FROM example_insurance.deployment_metadata WHERE singleton"
+    ).fetchone()
+    if purpose != ("synthetic",):
+        conditions.append("deployment is not durably marked synthetic")
     return ResetAssessment(accepted=not conditions, blocking_conditions=tuple(conditions))
 
 
@@ -79,24 +84,56 @@ def _owned_tables(connection: Connection[tuple[object, ...]]) -> tuple[tuple[str
     return tuple((str(row[0]), str(row[1])) for row in rows)
 
 
+def mark_synthetic_deployment(database_url: str) -> None:
+    """Mark one empty, explicitly named deployment as synthetic and resettable."""
+
+    with psycopg.connect(database_url) as connection, connection.transaction():
+        if not _database_name(connection).startswith(_SYNTHETIC_DATABASE_PREFIXES):
+            raise ResetPreflightBlocked("database name is not explicitly synthetic")
+        tables = tuple(
+            (schema, table)
+            for schema, table in _owned_tables(connection)
+            if table not in {"deployment_metadata", "migration_history"}
+        )
+        for schema, table in tables:
+            row = connection.execute(
+                sql.SQL("SELECT 1 FROM {}.{} LIMIT 1").format(
+                    sql.Identifier(schema), sql.Identifier(table)
+                )
+            ).fetchone()
+            if row is not None:
+                raise ResetPreflightBlocked("synthetic marker requires an empty deployment")
+        connection.execute(
+            "UPDATE example_insurance.deployment_metadata "
+            "SET deployment_purpose = 'synthetic' WHERE singleton"
+        )
+
+
 def reset_synthetic_deployment(database_url: str) -> None:
     """Drop and rebuild only a preflight-approved synthetic deployment."""
 
-    with psycopg.connect(database_url) as connection, connection.transaction():
-        connection.execute("SELECT pg_advisory_xact_lock(hashtextextended(current_database(), 0))")
-        assessment = _assess_connection(connection)
-        if not assessment.accepted:
-            raise ResetPreflightBlocked("; ".join(assessment.blocking_conditions))
-        tables = _owned_tables(connection)
-        if tables:
-            targets = sql.SQL(", ").join(
-                sql.SQL("{}.{}").format(sql.Identifier(schema), sql.Identifier(table))
-                for schema, table in tables
-            )
-            connection.execute(sql.SQL("LOCK TABLE {} IN ACCESS EXCLUSIVE MODE").format(targets))
-        connection.execute("DROP SCHEMA IF EXISTS example_insurance CASCADE")
-        connection.execute("DROP SCHEMA IF EXISTS openmagic_runtime CASCADE")
-    apply_migrations(database_url)
+    with psycopg.connect(database_url, autocommit=True) as connection:
+        connection.execute("SELECT pg_advisory_lock(hashtextextended(current_database(), 0))")
+        try:
+            with connection.transaction():
+                assessment = _assess_connection(connection)
+                if not assessment.accepted:
+                    raise ResetPreflightBlocked("; ".join(assessment.blocking_conditions))
+                tables = _owned_tables(connection)
+                if tables:
+                    targets = sql.SQL(", ").join(
+                        sql.SQL("{}.{}").format(sql.Identifier(schema), sql.Identifier(table))
+                        for schema, table in tables
+                    )
+                    connection.execute(
+                        sql.SQL("LOCK TABLE {} IN ACCESS EXCLUSIVE MODE").format(targets)
+                    )
+                connection.execute("DROP SCHEMA IF EXISTS example_insurance CASCADE")
+                connection.execute("DROP SCHEMA IF EXISTS openmagic_runtime CASCADE")
+            apply_migrations(database_url)
+            mark_synthetic_deployment(database_url)
+        finally:
+            connection.execute("SELECT pg_advisory_unlock(hashtextextended(current_database(), 0))")
 
 
 def main() -> None:
@@ -114,5 +151,6 @@ __all__ = [
     "ResetPreflightBlocked",
     "assess_reset",
     "main",
+    "mark_synthetic_deployment",
     "reset_synthetic_deployment",
 ]

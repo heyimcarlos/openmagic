@@ -15,6 +15,7 @@ from urllib.request import urlopen
 from uuid import uuid4
 
 from example_insurance.migrations import apply_migrations
+from example_insurance.reset import mark_synthetic_deployment
 from testcontainers.postgres import PostgresContainer
 
 from openmagic_evals.harness._network import free_port
@@ -98,6 +99,7 @@ class TestDeployment:
             self.database_url = container.get_connection_url(driver=None)
             self.database_name = database_name
             apply_migrations(self.database_url)
+            mark_synthetic_deployment(self.database_url)
             scripts: dict[ProcessRole, str] = {
                 "api": "openmagic-api",
                 "workflow-worker": "openmagic-workflow-worker",

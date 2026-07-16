@@ -72,7 +72,7 @@ def run_command_receipt_races(
                 RaceSeedResult(
                     seed=seed,
                     jitter_microseconds=jitters,
-                    public_outcomes=("replayed", "replayed"),
+                    public_outcomes=("value_identical_receipt", "value_identical_receipt"),
                     constraint_rows=count,
                     correlations=Correlations(
                         command_ids=(command.command_id,),
@@ -94,6 +94,7 @@ def run_command_receipt_races(
         uses_overlap_barrier=True,
         varied_jitter=True,
         database_constraint="openmagic_runtime.command_receipts(command_id)",
+        expected_public_outcomes=("value_identical_receipt", "value_identical_receipt"),
         results=tuple(results),
     )
 
@@ -197,6 +198,7 @@ def run_verification_submission_races(
         uses_overlap_barrier=True,
         varied_jitter=True,
         database_constraint="example_insurance.verification_sessions(challenge_id)",
+        expected_public_outcomes=("already_used", "verified"),
         results=tuple(results),
     )
 

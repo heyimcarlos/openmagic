@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import statistics
 import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.request import urlopen
+from uuid import UUID
 
 from example_insurance.renewals import ExampleInsurance
 from openmagic_runtime.threads import ThreadStore
@@ -19,11 +22,14 @@ from openmagic_evals.evidence.contracts import (
     ArtifactCase,
     CaseVerdict,
     Correlations,
-    DeterministicArtifact,
     DeterministicSummary,
+    DistributionSummary,
+    ProcessArtifact,
     ProcessMetrics,
     QueueDepth,
+    merge_correlations,
 )
+from openmagic_evals.evidence.deadline import bounded_evidence
 from openmagic_evals.evidence.fault_injection import pause_message_append
 from openmagic_evals.evidence.inspection import (
     AttemptAuthority,
@@ -58,7 +64,103 @@ class ProcessEvidence:
     forced_loss_pids: tuple[int, ...]
     lost_attempt: AttemptAuthority
     lost_delivery: DeliveryAuthority
+    workload_correlations: Correlations
+    workload_observation_digests: tuple[str, ...]
+    api_observation_digests: tuple[str, str]
+    claim_latency_ms: int
+    recovery_times_ms: tuple[int, int]
+    lock_wait_ms: int
+    observed_throughput_per_second: float
     elapsed_ms: int
+
+
+def _distribution(values: tuple[int, ...]) -> DistributionSummary:
+    return DistributionSummary(
+        count=len(values),
+        mean=statistics.mean(values),
+        median=statistics.median(values),
+        sample_standard_deviation=statistics.stdev(values) if len(values) > 1 else 0.0,
+        minimum=min(values),
+        maximum=max(values),
+    )
+
+
+def _api_database_observation(process: ManagedProcess) -> str:
+    with urlopen(process.health_url, timeout=2) as response:
+        payload = json.load(response)
+    if payload.get("role") != "api" or payload.get("status") != "ready":
+        raise AssertionError("API did not reconstruct its readiness from PostgreSQL")
+    return (
+        "sha256:"
+        + hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+    )
+
+
+def _uuid_tuple(values: object) -> tuple[UUID, ...]:
+    return tuple(UUID(str(value)) for value in values) if isinstance(values, list) else ()
+
+
+def _verify_workload_outcome(
+    application: ExampleInsurance, workflow_id: UUID
+) -> tuple[Correlations, str]:
+    evidence = json.loads(application.renewal_evidence_json(workflow_id))
+    outcomes = evidence["outcomes"]
+    values = evidence["correlations"]
+    valid = (
+        outcomes["workflow_lifecycle"] == "active"
+        and outcomes["instance_state"] == "open"
+        and outcomes["approval_wait_state"] == "unsatisfied"
+        and outcomes["external_email_effect_count"] == 0
+        and outcomes["attempt_states"]
+        and set(outcomes["attempt_states"]) == {"completed"}
+        and outcomes["delivery_states"] == ["delivered"]
+        and len(outcomes["delivery_attempt_states"]) == 1
+        and outcomes["delivery_attempt_states"][0][-1] == "succeeded"
+        and set(outcomes["delivery_attempt_states"][0]).issubset({"abandoned", "succeeded"})
+        and len(values["message_ids"]) == 1
+    )
+    if not valid:
+        diagnostic = {
+            "approval_wait_state": outcomes["approval_wait_state"],
+            "attempt_states": outcomes["attempt_states"],
+            "delivery_attempt_states": outcomes["delivery_attempt_states"],
+            "delivery_states": outcomes["delivery_states"],
+            "external_email_effect_count": outcomes["external_email_effect_count"],
+            "instance_state": outcomes["instance_state"],
+            "message_count": len(values["message_ids"]),
+            "workflow_lifecycle": outcomes["workflow_lifecycle"],
+        }
+        raise AssertionError(
+            "backpressure workload did not reach its exact safe durable outcome: "
+            f"{json.dumps(diagnostic, sort_keys=True)}"
+        )
+    correlations = Correlations(
+        command_ids=(UUID(values["command_id"]),),
+        workflow_ids=(UUID(values["workflow_id"]),),
+        instance_ids=(UUID(values["instance_id"]),),
+        step_ids=_uuid_tuple(values["step_ids"]),
+        attempt_ids=_uuid_tuple(values["attempt_ids"]),
+        wait_ids=_uuid_tuple(outcomes["approval_wait_ids"]),
+        trace_event_ids=(),
+        thread_ids=(UUID(values["thread_id"]),),
+        message_ids=_uuid_tuple(values["message_ids"]),
+        agent_run_ids=_uuid_tuple(values["agent_run_ids"]),
+        domain_event_ids=_uuid_tuple(values["domain_event_ids"]),
+        delivery_ids=_uuid_tuple(values["delivery_ids"]),
+    )
+    digest = (
+        "sha256:"
+        + hashlib.sha256(
+            json.dumps(
+                {"correlations": values, "outcomes": outcomes},
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+    )
+    return correlations, digest
 
 
 def _wait_for(
@@ -79,13 +181,14 @@ def _wait_attempt(
     inspection: EvidenceInspection,
     process: ManagedProcess,
     provider: LocalEmailProvider,
+    provider_request_baseline: int,
 ) -> AttemptAuthority:
     if process.worker_id is None:
         raise AssertionError("Workflow Worker process did not expose its durable worker identity")
     deadline = time.monotonic() + 15
     while time.monotonic() < deadline:
         authority = inspection.active_attempt(process.worker_id)
-        if authority is not None and provider.requests():
+        if authority is not None and provider.request_count() > provider_request_baseline:
             return authority
         time.sleep(0.02)
     raise TimeoutError("Workflow Worker did not hold observed durable authority")
@@ -120,13 +223,16 @@ def run_process_evidence(*, working_directory: Path, workflow_count: int = 12) -
     )
     with provider, deployment:
         provider.configure(behaviors=("slow_success",), reconciliation="unchanged", delay_seconds=3)
+        provider_request_baseline = provider.request_count()
         initial_processes = deployment.processes
         deployment.drain_role("workflow-worker")
         deployment.drain_role("delivery-worker")
         initial_api = next(process for process in initial_processes if process.role == "api")
+        initial_api_observation = _api_database_observation(initial_api)
         api_replacement = deployment.restart_role("api")
         if api_replacement.pid == initial_api.pid:
             raise AssertionError("API restart did not use a fresh interpreter")
+        replacement_api_observation = _api_database_observation(api_replacement)
         application = ExampleInsurance(
             database_url=deployment.database_url,
             email_provider_url=provider.url,
@@ -138,41 +244,62 @@ def run_process_evidence(*, working_directory: Path, workflow_count: int = 12) -
         effect_command, actor = prepare_renewal_approval(application, threads)
         approve_renewal(application, effect_command, actor)
         lost_workflow_process = deployment.scale_role("workflow-worker", capacity=1)[0]
-        lost_attempt = _wait_attempt(inspection, lost_workflow_process, provider)
+        lost_attempt = _wait_attempt(
+            inspection,
+            lost_workflow_process,
+            provider,
+            provider_request_baseline,
+        )
         lost_workflow = deployment.terminate_role("workflow-worker")
         if lost_workflow.pid != lost_workflow_process.pid:
             raise AssertionError("Workflow loss did not target the observed authority holder")
+        workflow_recovery_started = time.monotonic()
         time.sleep(3.2)
         workflow_replacement = deployment.scale_role("workflow-worker", capacity=1)
         wait_for_renewal_completion(application, effect_command.input.workflow_id)
+        workflow_recovery_ms = round((time.monotonic() - workflow_recovery_started) * 1000)
         deployment.drain_role("workflow-worker")
 
+        workload_ids: list[UUID] = []
         for seed in range(workflow_count):
-            application.start_renewal_outreach(
-                prepare_synthetic_renewal_start(application, threads, seed)
-            )
+            command = prepare_synthetic_renewal_start(application, threads, seed)
+            application.start_renewal_outreach(command)
+            workload_ids.append(command.input.workflow_id)
         initial = inspection.queue_state()
         if initial.pending_steps != workflow_count:
             raise AssertionError("queued Workflow count did not match pending Step depth")
 
+        throughput_started = time.monotonic()
         workflow_started = deployment.scale_role("workflow-worker", capacity=3)
+        first_claim = _wait_for(inspection, lambda value: value.pending_steps < workflow_count)
+        if first_claim.pending_steps >= workflow_count:
+            raise AssertionError("Workflow pool did not claim queued work")
+        claim_latency_ms = round((time.monotonic() - throughput_started) * 1000)
         _wait_for(
             inspection,
             lambda value: value.pending_steps == 0 and value.pending_deliveries == workflow_count,
         )
         deployment.drain_role("workflow-worker")
+        workflow_drain_seconds = time.monotonic() - throughput_started
 
         with pause_message_append(deployment.database_url):
+            lock_wait_started = time.monotonic()
             lost_delivery_process = deployment.scale_role("delivery-worker", capacity=1)[0]
             lost_delivery_authority = _wait_delivery(inspection, lost_delivery_process)
+            lock_wait_ms = round((time.monotonic() - lock_wait_started) * 1000)
             lost_delivery = deployment.terminate_role("delivery-worker")
             if lost_delivery.pid != lost_delivery_process.pid:
                 raise AssertionError("Delivery loss did not target the observed authority holder")
+        delivery_recovery_started = time.monotonic()
         time.sleep(1.1)
         delivery_replacement = deployment.scale_role("delivery-worker", capacity=2)
         drained = _wait_for(
             inspection,
             lambda value: value.pending_steps == 0 and value.pending_deliveries == 0,
+        )
+        delivery_recovery_ms = round((time.monotonic() - delivery_recovery_started) * 1000)
+        workload_observations = tuple(
+            _verify_workload_outcome(application, workflow_id) for workflow_id in workload_ids
         )
         replacements = (
             api_replacement,
@@ -191,17 +318,32 @@ def run_process_evidence(*, working_directory: Path, workflow_count: int = 12) -
             forced_loss_pids=(lost_workflow.pid, lost_delivery.pid),
             lost_attempt=lost_attempt,
             lost_delivery=lost_delivery_authority,
+            workload_correlations=merge_correlations(
+                correlations for correlations, _digest in workload_observations
+            ),
+            workload_observation_digests=tuple(
+                digest for _correlations, digest in workload_observations
+            ),
+            api_observation_digests=(
+                initial_api_observation,
+                replacement_api_observation,
+            ),
+            claim_latency_ms=claim_latency_ms,
+            recovery_times_ms=(workflow_recovery_ms, delivery_recovery_ms),
+            lock_wait_ms=lock_wait_ms,
+            observed_throughput_per_second=workflow_count / workflow_drain_seconds,
             elapsed_ms=round((time.monotonic() - started_at) * 1000),
         )
 
 
+@bounded_evidence
 def run_process_release(
     *,
     repository_root: Path,
     working_directory: Path,
     output: Path,
     timeout_seconds: int = 120,
-) -> DeterministicArtifact:
+) -> ProcessArtifact:
     """Record one canonical process-loss and backpressure evidence artifact."""
     command = (
         "openmagic-evidence",
@@ -253,15 +395,20 @@ def run_process_release(
         expected_trials=1,
         observed_trials=1,
         seeds=(0,),
-        correlations=Correlations(
-            instance_ids=(report.lost_attempt.instance_id,),
-            step_ids=(report.lost_attempt.step_id,),
-            attempt_ids=(report.lost_attempt.attempt_id,),
-            thread_ids=(report.lost_delivery.thread_id,),
-            delivery_ids=(report.lost_delivery.delivery_id,),
-            delivery_attempt_ids=(report.lost_delivery.delivery_attempt_id,),
-            worker_ids=(report.lost_attempt.worker_id, report.lost_delivery.worker_id),
-            process_ids=process_ids,
+        correlations=merge_correlations(
+            (
+                report.workload_correlations,
+                Correlations(
+                    instance_ids=(report.lost_attempt.instance_id,),
+                    step_ids=(report.lost_attempt.step_id,),
+                    attempt_ids=(report.lost_attempt.attempt_id,),
+                    thread_ids=(report.lost_delivery.thread_id,),
+                    delivery_ids=(report.lost_delivery.delivery_id,),
+                    delivery_attempt_ids=(report.lost_delivery.delivery_attempt_id,),
+                    worker_ids=(report.lost_attempt.worker_id, report.lost_delivery.worker_id),
+                    process_ids=process_ids,
+                ),
+            )
         ),
         observation_digests=(digest,),
         verdict=CaseVerdict(status="passed", invariant_violations=()),
@@ -281,6 +428,10 @@ def run_process_release(
             fresh_interpreters=True,
             postgresql_only_reconstruction=True,
             elapsed_ms=report.elapsed_ms,
+            claim_latency_ms=_distribution((report.claim_latency_ms,)),
+            recovery_time_ms=_distribution(report.recovery_times_ms),
+            lock_wait_ms=_distribution((report.lock_wait_ms,)),
+            observed_throughput_per_second=report.observed_throughput_per_second,
         ),
     )
     corpus_digest = (
@@ -289,7 +440,7 @@ def run_process_release(
             b"process.loss-backpressure-recovery:12:api=1:workflow=1->3:delivery=1->2"
         ).hexdigest()
     )
-    artifact = DeterministicArtifact(
+    artifact = ProcessArtifact(
         reproducibility=reproducibility_pin(
             repository_root.resolve(),
             command=command,

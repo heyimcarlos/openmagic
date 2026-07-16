@@ -7,13 +7,14 @@ from dataclasses import dataclass
 from typing import Any
 
 _SENSITIVE_KEYS = re.compile(
-    r"(^|_)(authorization|password|prompt|raw_content|raw_message|secret|token|verification_code)($|_)",
+    r"(^|_)(api_key|authorization|credential|password|prompt|raw_content|raw_message|secret|token|verification_code)($|_)",
     re.IGNORECASE,
 )
 _SENSITIVE_VALUES = (
     re.compile(r"postgres(?:ql)?://[^\s:/]+:[^\s@]+@", re.IGNORECASE),
     re.compile(r"\bBearer\s+\S+", re.IGNORECASE),
-    re.compile(r"\b(?:sk|gh[opusr])_[A-Za-z0-9_-]{12,}\b"),
+    re.compile(r"\bsk-(?:proj-)?[A-Za-z0-9_-]{12,}\b"),
+    re.compile(r"\bgh[opusr]_[A-Za-z0-9_-]{12,}\b"),
 )
 
 

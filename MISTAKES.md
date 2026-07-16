@@ -9,3 +9,6 @@
 - A Wayfinder map update escaped replacement newlines twice, leaving literal `\\n` text around a
   decision pointer. Tracker-body mutations must be read back after every update and checked for
   rendered structure, not only command success.
+- A multiprocessing diagnostic was launched from standard input, so spawned Agent processes could
+  not reload a real main-module path. Diagnostics that exercise fresh interpreters must run from an
+  installed entry point, a test node, or a real script file.

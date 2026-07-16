@@ -9,11 +9,12 @@ import subprocess
 import sys
 import tempfile
 from datetime import UTC, datetime
-from importlib.metadata import version
+from importlib.metadata import distribution, version
 from pathlib import Path
 from typing import Any
 
 import psycopg
+from example_insurance.migrations import apply_migrations
 from example_insurance.renewal_definition import RENEWAL_DEFINITION
 from example_insurance.verification_definition import VERIFICATION_DEFINITION
 from openmagic_runtime.evidence import content_fingerprint
@@ -27,10 +28,12 @@ from openmagic_evals.evidence.contracts import (
     Correlations,
     DeterministicArtifact,
     DeterministicSummary,
+    RaceArtifact,
     RaceTrialEvidence,
     ReproducibilityPin,
     merge_correlations,
 )
+from openmagic_evals.evidence.deadline import bounded_evidence
 from openmagic_evals.evidence.matrix import (
     DETERMINISTIC_RELEASE_MATRIX,
     RaceContract,
@@ -38,6 +41,7 @@ from openmagic_evals.evidence.matrix import (
     cardinality_one_races,
 )
 from openmagic_evals.evidence.race_models import RaceCorpus
+from openmagic_evals.evidence.race_transitions import transition_race_definitions
 from openmagic_evals.evidence.races import run_all_races
 from openmagic_evals.harness._postgres import POSTGRES_IMAGE, postgres_container
 
@@ -47,10 +51,6 @@ _DISTRIBUTIONS = (
     "openmagic-evals",
     "openmagic-runtime",
 )
-_MIGRATION_HEADS = {
-    "example_insurance": "0004_deterministic_verification",
-    "openmagic_runtime": "0003_fenced_effect_kernel",
-}
 
 
 def _sha256(value: bytes) -> str:
@@ -75,7 +75,22 @@ def _build_pin(root: Path) -> BuildPin:
         checkout_clean=not status,
         lock_digest=_sha256((root / "uv.lock").read_bytes()),
         distributions={name: version(name) for name in _DISTRIBUTIONS},
+        distribution_digests={name: _distribution_digest(name) for name in _DISTRIBUTIONS},
     )
+
+
+def _distribution_digest(name: str) -> str:
+    item = distribution(name)
+    content = hashlib.sha256()
+    for file in sorted(item.files or (), key=str):
+        path = Path(str(item.locate_file(file)))
+        if not path.is_file():
+            continue
+        content.update(str(file).encode())
+        content.update(b"\0")
+        content.update(path.read_bytes())
+        content.update(b"\0")
+    return "sha256:" + content.hexdigest()
 
 
 def reproducibility_pin(
@@ -92,8 +107,16 @@ def reproducibility_pin(
         "example_insurance.verification_delivery:1": "sha256:"
         + content_fingerprint(VERIFICATION_DEFINITION),
     }
+    definitions.update(
+        {
+            f"{definition.identity.key}:{definition.identity.version}": "sha256:"
+            + content_fingerprint(definition)
+            for definition in transition_race_definitions()
+        }
+    )
     with postgres_container(database_name="openmagic_test_evidence_pin") as postgres:
         database_url = postgres.get_connection_url(driver=None)
+        apply_migrations(database_url)
         with psycopg.connect(database_url) as connection:
             row = connection.execute(
                 "SELECT current_setting('server_version'), "
@@ -102,8 +125,22 @@ def reproducibility_pin(
                 "current_setting('TimeZone'), "
                 "current_setting('max_connections')"
             ).fetchone()
+            application_head = connection.execute(
+                "SELECT version FROM example_insurance.migration_history "
+                "ORDER BY version DESC LIMIT 1"
+            ).fetchone()
+            runtime_head = connection.execute(
+                "SELECT version FROM openmagic_runtime.migration_history "
+                "ORDER BY version DESC LIMIT 1"
+            ).fetchone()
     if row is None:
         raise RuntimeError("PostgreSQL did not return its observed configuration")
+    if application_head is None or runtime_head is None:
+        raise RuntimeError("PostgreSQL did not return its observed migration heads")
+    migration_heads = {
+        "example_insurance": str(application_head[0]),
+        "openmagic_runtime": str(runtime_head[0]),
+    }
     postgres_configuration = {
         "max_connections": str(row[4]),
         "synchronous_commit": str(row[2]),
@@ -125,7 +162,7 @@ def reproducibility_pin(
         postgres_image=POSTGRES_IMAGE,
         postgres_configuration=postgres_configuration,
         postgres_configuration_digest=_sha256(configuration_document),
-        migration_heads=_MIGRATION_HEADS,
+        migration_heads=migration_heads,
         definition_digests=definitions,
         case_corpus_digest=case_corpus_digest,
         sandbox_digest=_sha256(POSTGRES_IMAGE.encode()),
@@ -188,6 +225,75 @@ def _release_case(case: ReleaseCase, tests: dict[str, dict[str, Any]]) -> Artifa
     )
 
 
+def _trace_completeness_case(
+    root: Path,
+    case: ReleaseCase,
+    tests: dict[str, dict[str, Any]],
+) -> ArtifactCase:
+    from openmagic_evals.evidence.demos import run_renewal_demo, run_verification_demo
+
+    contract = _release_case(case, tests)
+    if contract.verdict.status != "passed":
+        return contract
+    with tempfile.TemporaryDirectory(prefix="openmagic-trace-coverage-") as directory:
+        output_root = Path(directory)
+        renewal = run_renewal_demo(
+            repository_root=root,
+            working_directory=output_root / "renewal-provider",
+            output=output_root / "renewal.json",
+        )
+        verification = run_verification_demo(
+            repository_root=root,
+            output=output_root / "verification.json",
+        )
+    correlations = merge_correlations(
+        case.correlations for artifact in (renewal, verification) for case in artifact.cases
+    )
+    required_identity_groups = (
+        correlations.command_ids,
+        correlations.workflow_ids,
+        correlations.instance_ids,
+        correlations.step_ids,
+        correlations.attempt_ids,
+        correlations.wait_ids,
+        correlations.signal_ids,
+        correlations.trace_event_ids,
+        correlations.thread_ids,
+        correlations.message_ids,
+        correlations.agent_run_ids,
+        correlations.domain_event_ids,
+        correlations.delivery_ids,
+        correlations.delivery_attempt_ids,
+        correlations.external_effect_ids,
+        correlations.approval_grant_ids,
+        correlations.verification_challenge_ids,
+        correlations.verification_session_ids,
+        correlations.worker_ids,
+        correlations.process_ids,
+        correlations.provider_request_ids,
+    )
+    if not all(required_identity_groups):
+        raise AssertionError("trace completeness omitted an accepted durable identity")
+    return contract.model_copy(
+        update={
+            "correlations": correlations,
+            "observation_digests": (
+                _sha256(
+                    json.dumps(
+                        {
+                            "contract": contract.observation_digests,
+                            "renewal": renewal.cases[0].observation_digests,
+                            "verification": verification.cases[0].observation_digests,
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode()
+                ),
+            ),
+        }
+    )
+
+
 def _race_case(case: RaceContract, corpus: RaceCorpus) -> ArtifactCase:
     if (
         corpus.case_id != case.case_id
@@ -198,7 +304,11 @@ def _race_case(case: RaceContract, corpus: RaceCorpus) -> ArtifactCase:
         raise ValueError(f"race corpus metadata differs from its contract: {case.case_id}")
     if tuple(result.seed for result in corpus.results) != case.seeds:
         raise ValueError(f"race corpus is missing its predeclared seeds: {case.case_id}")
-    passed = all(result.constraint_rows == 1 for result in corpus.results)
+    passed = all(
+        result.constraint_rows == 1
+        and tuple(sorted(result.public_outcomes)) == tuple(sorted(corpus.expected_public_outcomes))
+        for result in corpus.results
+    )
     violations = () if passed else ("cardinality-one constraint disagreed with public outcomes",)
     trials = tuple(
         RaceTrialEvidence(
@@ -227,6 +337,7 @@ def _race_case(case: RaceContract, corpus: RaceCorpus) -> ArtifactCase:
     )
 
 
+@bounded_evidence
 def run_deterministic_release(
     *,
     repository_root: Path,
@@ -298,7 +409,12 @@ def run_deterministic_release(
             raise RuntimeError("pytest did not produce its explicit evidence result file")
         test_document = json.loads(result_path.read_text(encoding="utf-8"))
     tests = dict(test_document["tests"])
-    cases = tuple(_release_case(case, tests) for case in selected_release_cases)
+    cases = tuple(
+        _trace_completeness_case(root, case, tests)
+        if case.family == "trace_completeness"
+        else _release_case(case, tests)
+        for case in selected_release_cases
+    )
     corpora = {corpus.case_id: corpus for corpus in run_all_races()}
     race_cases = tuple(_race_case(case, corpora[case.case_id]) for case in selected_race_contracts)
     finished_at = datetime.now(UTC)
@@ -338,12 +454,13 @@ def run_deterministic_release(
     return artifact
 
 
+@bounded_evidence
 def run_race_release(
     *,
     repository_root: Path,
     output: Path,
     timeout_seconds: int = 900,
-) -> DeterministicArtifact:
+) -> RaceArtifact:
     """Run only the predeclared 700-trial cardinality-one corpus."""
     root = repository_root.resolve()
     contracts = cardinality_one_races()
@@ -371,7 +488,7 @@ def run_race_release(
     statuses = tuple(case.verdict.status for case in cases)
     violations = sum(len(case.verdict.invariant_violations) for case in cases)
     strict_pass = all(status == "passed" for status in statuses) and violations == 0
-    artifact = DeterministicArtifact(
+    artifact = RaceArtifact(
         reproducibility=reproducibility_pin(
             root,
             command=command,

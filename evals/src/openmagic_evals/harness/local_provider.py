@@ -120,6 +120,11 @@ class LocalEmailProvider:
             value = json.load(response)
         return tuple(value["requests"])
 
+    def request_count(self) -> int:
+        with urlopen(f"{self.url}/request-count", timeout=2) as response:
+            value = json.load(response)
+        return int(value["request_count"])
+
     def reconciliations(self) -> tuple[dict[str, object], ...]:
         with urlopen(f"{self.url}/reconciliations", timeout=2) as response:
             value = json.load(response)

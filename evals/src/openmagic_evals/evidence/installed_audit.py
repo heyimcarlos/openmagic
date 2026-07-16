@@ -43,11 +43,11 @@ def _requirement_name(requirement: str) -> str:
     return _normalized(re.split(r"[ ;(<>=!~\[]", requirement, maxsplit=1)[0])
 
 
-def _package_files(item: Distribution, package: str) -> tuple[Path, ...]:
+def _distribution_files(item: Distribution) -> tuple[Path, ...]:
     return tuple(
         Path(str(item.locate_file(file)))
         for file in (item.files or ())
-        if file.parts and file.parts[0] == package and file.suffix in {".py", ".sql"}
+        if file.parts and file.suffix in {".py", ".sql"}
     )
 
 
@@ -67,8 +67,13 @@ def _imports(paths: tuple[Path, ...]) -> set[str]:
 
 def audit_installed_environment() -> InstalledSurfaceAudit:
     installed = {name: distribution(name) for name in _DISTRIBUTIONS}
-    files = {name: _package_files(item, _DISTRIBUTIONS[name]) for name, item in installed.items()}
+    files = {name: _distribution_files(item) for name, item in installed.items()}
     violations: list[str] = []
+    for name, paths in files.items():
+        expected_package = _DISTRIBUTIONS[name]
+        unexpected = tuple(path for path in paths if expected_package not in path.parts)
+        if unexpected:
+            violations.append(f"installed distribution contains an unexpected package: {name}")
     internal = set(_DISTRIBUTIONS)
     edges = tuple(
         sorted(
@@ -95,6 +100,10 @@ def audit_installed_environment() -> InstalledSurfaceAudit:
         violations.append("installed application imports an outward distribution")
     if any(name.startswith(("openmagic_evals", "openmagic_playground")) for name in api_imports):
         violations.append("installed API imports evidence or demonstration code")
+    if any(name.startswith("openmagic_runtime._persistence") for name in application_imports):
+        violations.append("installed application imports private runtime persistence")
+    if any("._persistence" in name for name in api_imports):
+        violations.append("installed API imports private persistence")
 
     runtime = importlib.import_module("openmagic_runtime")
     if getattr(runtime, "__all__", None) != ["__version__"]:

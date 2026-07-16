@@ -161,6 +161,7 @@ def run_claim_races(
             uses_overlap_barrier=True,
             varied_jitter=True,
             database_constraint="one_leased_attempt_per_step",
+            expected_public_outcomes=("claimed", "not_claimed"),
             results=tuple(step_results),
         ),
         RaceCorpus(
@@ -168,6 +169,7 @@ def run_claim_races(
             uses_overlap_barrier=True,
             varied_jitter=True,
             database_constraint="one_running_delivery_attempt",
+            expected_public_outcomes=("claimed", "not_claimed"),
             results=tuple(delivery_results),
         ),
     )

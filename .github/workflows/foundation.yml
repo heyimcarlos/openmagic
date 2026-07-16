@@ -16,7 +16,7 @@ concurrency:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
         with:
@@ -51,6 +51,11 @@ jobs:
           --output .artifacts/issue71/processes.json
           --timeout-seconds 120
       - run: >-
+          uv run openmagic-evidence races
+          --repository-root .
+          --output .artifacts/issue71/races.json
+          --timeout-seconds 900
+      - run: >-
           uv run openmagic-evidence playground
           --repository-root .
           --working-directory .artifacts/issue71/playground
@@ -62,14 +67,26 @@ jobs:
           --provider openai-responses
           --model unavailable
           --endpoint https://api.openai.com/v1/responses
-          --configuration-digest sha256:0000000000000000000000000000000000000000000000000000000000000000
           --synthetic-case-id live.synthetic.unavailable
           --output .artifacts/issue71/live-smoke.json
           --timeout-seconds 10
+      - run: >-
+          uv run openmagic-evidence demo-renewal
+          --repository-root .
+          --working-directory .artifacts/issue71/renewal-demo
+          --output .artifacts/issue71/renewal-demo.json
+      - run: >-
+          uv run openmagic-evidence demo-verification
+          --repository-root .
+          --output .artifacts/issue71/verification-demo.json
       - run: >-
           uv run openmagic-evidence claim-report
           --deterministic .artifacts/issue71/deterministic-release.json
           --agent-quality .artifacts/issue71/agent-quality.json
           --live-smoke .artifacts/issue71/live-smoke.json
           --playground .artifacts/issue71/playground.json
+          --processes .artifacts/issue71/processes.json
+          --races .artifacts/issue71/races.json
+          --renewal-demo .artifacts/issue71/renewal-demo.json
+          --verification-demo .artifacts/issue71/verification-demo.json
           --output .artifacts/issue71/claim-report.md

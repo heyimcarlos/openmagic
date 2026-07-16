@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import replace
 from threading import Barrier
 from uuid import UUID, uuid4
 
@@ -163,14 +162,18 @@ def _signal_definition() -> WorkflowDefinition:
     )
 
 
+def transition_race_definitions() -> tuple[WorkflowDefinition, WorkflowDefinition]:
+    return _transition_definition(), _signal_definition()
+
+
 def run_transition_races(
     database_url: str,
     *,
     seeds: tuple[int, ...] = tuple(range(100)),
 ) -> tuple[RaceCorpus, RaceCorpus, RaceCorpus]:
     catalog = DefinitionCatalog(database_url=database_url)
-    catalog.register(_transition_definition())
-    catalog.register(_signal_definition())
+    for definition in transition_race_definitions():
+        catalog.register(definition)
     inspection = EvidenceInspection(database_url)
     signal_results: list[RaceSeedResult] = []
     attempt_results: list[RaceSeedResult] = []
@@ -187,6 +190,7 @@ def run_transition_races(
             uses_overlap_barrier=True,
             varied_jitter=True,
             database_constraint="openmagic_runtime.signals(wait_id)",
+            expected_public_outcomes=("accepted", "conflict"),
             results=tuple(signal_results),
         ),
         RaceCorpus(
@@ -194,6 +198,7 @@ def run_transition_races(
             uses_overlap_barrier=True,
             varied_jitter=True,
             database_constraint="one accepted result per Attempt",
+            expected_public_outcomes=("accepted", "replayed"),
             results=tuple(attempt_results),
         ),
         RaceCorpus(
@@ -201,6 +206,10 @@ def run_transition_races(
             uses_overlap_barrier=True,
             varied_jitter=True,
             database_constraint="one materialized output per Route slot",
+            expected_public_outcomes=(
+                "value_identical_receipt",
+                "value_identical_receipt",
+            ),
             results=tuple(route_results),
         ),
     )
@@ -350,29 +359,59 @@ def _attempt_and_route_trial(
         ),
         observation_digest=race_digest(attempt_document),
     )
+    with psycopg.connect(database_url) as connection, connection.transaction():
+        KernelControl(connection).succeed(
+            next(item for item in dispositions if not item.replayed),
+            output=observation,
+            outcome_route="finish_after_origin",
+            route_input=observation,
+        )
 
+    route_started = start_instance(
+        database_url=database_url,
+        request=StartInstance(
+            command_id=uuid4(),
+            definition_key="eval.issue71_transition_race",
+            definition_version=1,
+            instance_input={"value": f"route-{seed}"},
+            route_input={"value": f"route-{seed}"},
+        ),
+    )
+    route_claim = claim_once(
+        database_url=database_url,
+        request=ClaimWork(uuid4(), f"route-result-{seed}", ("eval.issue71_origin.v1",)),
+    )
+    if route_claim is None:
+        raise AssertionError("Route race setup did not claim its origin Step")
+    route_observation = {"value": f"route-{seed}"}
     route_barrier = Barrier(2)
     route_jitters = jitter_pair(seed, 600_000)
-    route_dispositions = tuple(
-        replace(dispositions[0], consumed=False, replayed=False) for _ in range(2)
-    )
 
-    def activate_route(index: int) -> tuple[dict[str, UUID], dict[str, UUID]]:
+    def activate_route(index: int) -> tuple[dict[str, UUID], dict[str, UUID], bool]:
         route_barrier.wait()
         time.sleep(route_jitters[index] / 1_000_000)
         with psycopg.connect(database_url) as connection, connection.transaction():
-            steps, waits = KernelControl(connection).succeed(
-                route_dispositions[index],
-                output=observation,
-                outcome_route="finish_after_origin",
-                route_input=observation,
+            required = KernelWork(connection).accept_result(
+                route_claim,
+                worker_id=f"route-result-{seed}",
+                observation=route_observation,
             )
-        return dict(steps), dict(waits)
+            steps, waits = KernelControl(connection).succeed(
+                required,
+                output=route_observation,
+                outcome_route="finish_after_origin",
+                route_input=route_observation,
+            )
+        return dict(steps), dict(waits), required.replayed
 
     route_outcomes = tuple(executor.map(activate_route, range(2)))
-    route_count = inspection.materialized_steps(started.instance_id, "finish")
-    route_public = tuple("activated" if item[0] else "replayed" for item in route_outcomes)
-    if route_count != 1 or route_outcomes[0] != route_outcomes[1]:
+    route_count = inspection.materialized_steps(route_started.instance_id, "finish")
+    route_public = ("value_identical_receipt", "value_identical_receipt")
+    if (
+        route_count != 1
+        or route_outcomes[0][:2] != route_outcomes[1][:2]
+        or sorted(item[2] for item in route_outcomes) != [False, True]
+    ):
         raise AssertionError(f"Route activation constraint disagreed for seed {seed}")
     finish_step_ids = tuple(route_outcomes[0][0].values())
     route_document = {
@@ -388,13 +427,13 @@ def _attempt_and_route_trial(
         public_outcomes=route_public,
         constraint_rows=route_count,
         correlations=Correlations(
-            instance_ids=(started.instance_id,),
-            step_ids=(claim.step_id, *finish_step_ids),
-            attempt_ids=(claim.attempt_id,),
+            instance_ids=(route_started.instance_id,),
+            step_ids=(route_claim.step_id, *finish_step_ids),
+            attempt_ids=(route_claim.attempt_id,),
         ),
         observation_digest=race_digest(route_document),
     )
     return attempt_result, route_result
 
 
-__all__ = ["run_transition_races"]
+__all__ = ["run_transition_races", "transition_race_definitions"]

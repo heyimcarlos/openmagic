@@ -38,6 +38,7 @@ class RaceCorpus:
     uses_overlap_barrier: bool
     varied_jitter: bool
     database_constraint: str
+    expected_public_outcomes: tuple[str, str]
     results: tuple[RaceSeedResult, ...]
 
 

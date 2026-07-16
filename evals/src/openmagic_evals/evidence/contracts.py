@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from collections.abc import Iterable
 from datetime import datetime
@@ -36,6 +37,7 @@ class BuildPin(EvidenceModel):
     checkout_clean: bool
     lock_digest: str
     distributions: dict[str, str]
+    distribution_digests: dict[str, str]
 
     @model_validator(mode="after")
     def validate_build(self) -> BuildPin:
@@ -46,6 +48,10 @@ class BuildPin(EvidenceModel):
         _require_digest(self.lock_digest, "lock_digest")
         if not self.distributions:
             raise ValueError("distribution versions must be pinned")
+        if set(self.distribution_digests) != set(self.distributions):
+            raise ValueError("every installed distribution must have one content digest")
+        for digest in self.distribution_digests.values():
+            _require_digest(digest, "distribution digest")
         return self
 
 
@@ -162,6 +168,15 @@ class QueueDepth(EvidenceModel):
     pending_deliveries: int = Field(ge=0)
 
 
+class DistributionSummary(EvidenceModel):
+    count: int = Field(gt=0)
+    mean: float = Field(ge=0)
+    median: float = Field(ge=0)
+    sample_standard_deviation: float = Field(ge=0)
+    minimum: int = Field(ge=0)
+    maximum: int = Field(ge=0)
+
+
 class ProcessMetrics(EvidenceModel):
     queued_workflows: int = Field(gt=0)
     initial_queue: QueueDepth
@@ -172,6 +187,10 @@ class ProcessMetrics(EvidenceModel):
     fresh_interpreters: Literal[True]
     postgresql_only_reconstruction: Literal[True]
     elapsed_ms: int = Field(ge=0)
+    claim_latency_ms: DistributionSummary
+    recovery_time_ms: DistributionSummary
+    lock_wait_ms: DistributionSummary
+    observed_throughput_per_second: float = Field(gt=0)
 
     @model_validator(mode="after")
     def validate_process_evidence(self) -> ProcessMetrics:
@@ -222,13 +241,20 @@ class RaceTrialEvidence(EvidenceModel):
         return self
 
 
-class DistributionSummary(EvidenceModel):
-    count: int = Field(gt=0)
-    mean: float = Field(ge=0)
-    median: float = Field(ge=0)
-    sample_standard_deviation: float = Field(ge=0)
-    minimum: int = Field(ge=0)
-    maximum: int = Field(ge=0)
+class AgentTrialEvidence(EvidenceModel):
+    seed: int = Field(ge=0)
+    outcome_passed: bool
+    prohibited_actions: tuple[str, ...]
+    latency_ms: int = Field(ge=0)
+    trajectory_digest: str
+    correlations: Correlations
+
+    @model_validator(mode="after")
+    def validate_trial(self) -> AgentTrialEvidence:
+        _require_digest(self.trajectory_digest, "Agent trajectory digest")
+        if not any(self.correlations.model_dump(mode="python").values()):
+            raise ValueError("Agent trial must retain durable correlations")
+        return self
 
 
 class ArtifactCase(EvidenceModel):
@@ -243,6 +269,7 @@ class ArtifactCase(EvidenceModel):
     verdict: CaseVerdict
     process_metrics: ProcessMetrics | None = None
     race_trials: tuple[RaceTrialEvidence, ...] = ()
+    agent_trials: tuple[AgentTrialEvidence, ...] = ()
     pass_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
     passed_trials: int | None = Field(default=None, ge=0)
     prohibited_actions: int = Field(default=0, ge=0)
@@ -266,6 +293,13 @@ class ArtifactCase(EvidenceModel):
                 self.observation_digests
             ):
                 raise ValueError("race trials must own every recorded observation digest")
+        if self.agent_trials:
+            if tuple(trial.seed for trial in self.agent_trials) != self.seeds:
+                raise ValueError("Agent trials must follow the predeclared seed corpus")
+            if tuple(trial.trajectory_digest for trial in self.agent_trials) != (
+                self.observation_digests
+            ):
+                raise ValueError("Agent trials must own every recorded trajectory digest")
         agent_fields = (self.pass_threshold, self.passed_trials)
         if any(value is not None for value in agent_fields):
             if any(value is None for value in agent_fields):
@@ -378,6 +412,10 @@ class DeterministicArtifact(EvidenceModel):
 
     @model_validator(mode="after")
     def validate_release(self) -> DeterministicArtifact:
+        if self.artifact_kind == "deterministic_release" and any(
+            case.agent_trials or case.process_metrics is not None for case in self.cases
+        ):
+            raise ValueError("deterministic release cases cannot contain another lane")
         statuses = [case.verdict.status for case in self.cases]
         violations = sum(len(case.verdict.invariant_violations) for case in self.cases)
         expected = len(self.cases)
@@ -404,6 +442,26 @@ class DeterministicArtifact(EvidenceModel):
         return self
 
 
+class RaceArtifact(DeterministicArtifact):
+    artifact_kind: Literal["race_corpus"] = "race_corpus"
+
+    @model_validator(mode="after")
+    def validate_race_lane(self) -> RaceArtifact:
+        if any(not case.race_trials for case in self.cases):
+            raise ValueError("race artifacts require per-seed race evidence")
+        return self
+
+
+class ProcessArtifact(DeterministicArtifact):
+    artifact_kind: Literal["process_recovery"] = "process_recovery"
+
+    @model_validator(mode="after")
+    def validate_process_lane(self) -> ProcessArtifact:
+        if any(case.process_metrics is None or case.race_trials for case in self.cases):
+            raise ValueError("process artifacts require only typed process metrics")
+        return self
+
+
 class AgentQualityArtifact(EvidenceModel):
     schema_version: Literal["openmagic.enterprise-evidence.v1"] = SCHEMA_VERSION
     artifact_kind: Literal["agent_quality"] = "agent_quality"
@@ -418,17 +476,47 @@ class AgentQualityArtifact(EvidenceModel):
     def validate_agent_quality(self) -> AgentQualityArtifact:
         if not self.cases or any(case.split is None for case in self.cases):
             raise ValueError("Agent quality requires versioned development or held-out cases")
+        if any(case.race_trials or case.process_metrics is not None for case in self.cases):
+            raise ValueError("Agent quality cases cannot contain another lane")
+        if any(len(case.agent_trials) != case.observed_trials for case in self.cases):
+            raise ValueError("Agent quality requires every sanitized per-trial trajectory")
         expected = sum(case.expected_trials for case in self.cases)
         observed = sum(case.observed_trials for case in self.cases)
         passed = sum(case.passed_trials or 0 for case in self.cases)
         prohibited = sum(case.prohibited_actions for case in self.cases)
-        threshold_passed = all(case.verdict.status == "passed" for case in self.cases)
+        threshold_passed = all(
+            case.verdict.status == "passed"
+            and case.pass_threshold is not None
+            and case.passed_trials is not None
+            and case.passed_trials / case.observed_trials >= case.pass_threshold
+            and case.prohibited_actions == 0
+            for case in self.cases
+        )
+        development = sum(case.split == "development" for case in self.cases)
+        held_out = sum(case.split == "held_out" for case in self.cases)
+        pass_rate = passed / observed
+        z = 1.96
+        denominator = 1 + z * z / observed
+        centre = (pass_rate + z * z / (2 * observed)) / denominator
+        margin = (
+            z
+            * math.sqrt(pass_rate * (1 - pass_rate) / observed + z * z / (4 * observed * observed))
+            / denominator
+        )
+        wilson_lower = max(0.0, centre - margin)
+        wilson_upper = 1.0 if passed == observed else min(1.0, centre + margin)
         if (
             self.summary.expected_trials != expected
             or self.summary.observed_trials != observed
             or self.summary.passed_trials != passed
             or self.summary.prohibited_actions != prohibited
             or self.summary.threshold_passed != threshold_passed
+            or self.summary.development_cases != development
+            or self.summary.held_out_cases != held_out
+            or self.summary.latency_ms.count != observed
+            or not math.isclose(self.summary.pass_rate, pass_rate)
+            or not math.isclose(self.summary.wilson_lower, wilson_lower)
+            or not math.isclose(self.summary.wilson_upper, wilson_upper)
         ):
             raise ValueError("Agent summary contradicts its complete case evidence")
         return self
@@ -444,6 +532,24 @@ class LiveSmokeArtifact(EvidenceModel):
     summary: AvailabilitySummary
     limitations: tuple[str, ...]
 
+    @model_validator(mode="after")
+    def validate_live_lane(self) -> LiveSmokeArtifact:
+        if len(self.cases) != 1 or any(
+            case.agent_trials or case.race_trials or case.process_metrics is not None
+            for case in self.cases
+        ):
+            raise ValueError("live availability requires one isolated live case")
+        expected_status = (
+            "passed"
+            if self.summary.available
+            else "infrastructure_error"
+            if self.summary.attempted
+            else "unavailable"
+        )
+        if self.cases[0].verdict.status != expected_status:
+            raise ValueError("live summary contradicts its case outcome")
+        return self
+
 
 class PlaygroundArtifact(EvidenceModel):
     schema_version: Literal["openmagic.enterprise-evidence.v1"] = SCHEMA_VERSION
@@ -454,9 +560,26 @@ class PlaygroundArtifact(EvidenceModel):
     summary: PlaygroundSummary
     limitations: tuple[str, ...]
 
+    @model_validator(mode="after")
+    def validate_demonstration_lane(self) -> PlaygroundArtifact:
+        if not self.cases or any(
+            case.verdict.status != "passed"
+            or case.agent_trials
+            or case.race_trials
+            or case.process_metrics is not None
+            for case in self.cases
+        ):
+            raise ValueError("demonstration artifacts require isolated passing cases")
+        return self
+
 
 Artifact = Annotated[
-    DeterministicArtifact | AgentQualityArtifact | LiveSmokeArtifact | PlaygroundArtifact,
+    DeterministicArtifact
+    | RaceArtifact
+    | ProcessArtifact
+    | AgentQualityArtifact
+    | LiveSmokeArtifact
+    | PlaygroundArtifact,
     Field(discriminator="artifact_kind"),
 ]
 _ARTIFACT_ADAPTER = TypeAdapter(Artifact)
@@ -486,6 +609,7 @@ __all__ = [
     "AgentConfigurationPin",
     "AgentQualityArtifact",
     "AgentQualitySummary",
+    "AgentTrialEvidence",
     "Artifact",
     "ArtifactCase",
     "AvailabilitySummary",
@@ -499,8 +623,10 @@ __all__ = [
     "LiveSmokeArtifact",
     "PlaygroundArtifact",
     "PlaygroundSummary",
+    "ProcessArtifact",
     "ProcessMetrics",
     "QueueDepth",
+    "RaceArtifact",
     "RaceTrialEvidence",
     "ReproducibilityPin",
     "artifact_json_schema",

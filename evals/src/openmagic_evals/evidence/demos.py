@@ -121,6 +121,7 @@ def run_renewal_demo(
         postgres_container(database_name=f"openmagic_test_{uuid4().hex}") as postgres,
     ):
         provider.configure(behaviors=("success",))
+        provider_request_baseline = provider.request_count()
         database_url = postgres.get_connection_url(driver=None)
         apply_migrations(database_url)
         application = ExampleInsurance(database_url=database_url, email_provider_url=provider.url)
@@ -168,7 +169,7 @@ def run_renewal_demo(
             "workflow_lifecycle": outcomes["workflow_lifecycle"],
             "instance_state": outcomes["instance_state"],
             "completion_event_count": outcomes["completion_event_count"],
-            "provider_request_count": len(provider.requests()),
+            "provider_request_count": provider.request_count() - provider_request_baseline,
         }
     if observation != {
         "workflow_lifecycle": "completed",
@@ -176,7 +177,10 @@ def run_renewal_demo(
         "completion_event_count": 1,
         "provider_request_count": 1,
     }:
-        raise AssertionError("renewal demonstration did not reach its accepted terminal outcome")
+        raise AssertionError(
+            "renewal demonstration did not reach its accepted terminal outcome: "
+            f"{json.dumps(observation, sort_keys=True)}"
+        )
     return _demo_artifact(
         repository_root=repository_root,
         output=output,

@@ -10,6 +10,7 @@ from openmagic_evals.evidence.contracts import (
     AgentConfigurationPin,
     AgentQualityArtifact,
     AgentQualitySummary,
+    AgentTrialEvidence,
     ArtifactCase,
     BuildPin,
     CaseVerdict,
@@ -20,6 +21,7 @@ from openmagic_evals.evidence.contracts import (
     ReproducibilityPin,
     canonical_artifact_json,
 )
+from openmagic_evals.evidence.matrix import DETERMINISTIC_RELEASE_MATRIX, cardinality_one_races
 
 
 def _pin(git_sha: str) -> ReproducibilityPin:
@@ -29,6 +31,7 @@ def _pin(git_sha: str) -> ReproducibilityPin:
             checkout_clean=True,
             lock_digest="sha256:" + "1" * 64,
             distributions={"openmagic-evals": "0.1.0"},
+            distribution_digests={"openmagic-evals": "sha256:" + "0" * 64},
         ),
         suite_version="issue-71.v1",
         command=("openmagic-evidence", "test"),
@@ -47,30 +50,52 @@ def _pin(git_sha: str) -> ReproducibilityPin:
     )
 
 
-def _case(*, agent: bool = False) -> ArtifactCase:
+def _case(*, agent: bool = False, case_id: str = "release.test") -> ArtifactCase:
+    correlations = Correlations(command_ids=("018f2f00-0000-7000-8000-000000000001",))
     return ArtifactCase(
-        case_id="agent.development.test" if agent else "release.test",
+        case_id="agent.development.test" if agent else case_id,
         case_schema_version=1,
         split="development" if agent else None,
         expected_trials=1,
         observed_trials=1,
         seeds=(0,),
-        correlations=Correlations(),
+        correlations=correlations,
         observation_digests=("sha256:" + "7" * 64,),
         pass_threshold=1.0 if agent else None,
         passed_trials=1 if agent else None,
+        agent_trials=(
+            (
+                AgentTrialEvidence(
+                    seed=0,
+                    outcome_passed=True,
+                    prohibited_actions=(),
+                    latency_ms=1,
+                    trajectory_digest="sha256:" + "7" * 64,
+                    correlations=correlations,
+                ),
+            )
+            if agent
+            else ()
+        ),
         verdict=CaseVerdict(status="passed", invariant_violations=()),
     )
 
 
 def test_claim_report_rejects_artifacts_from_different_builds(tmp_path: Path) -> None:
+    release_cases = tuple(
+        _case(case_id=case_id)
+        for case_id in (
+            *(case.case_id for case in DETERMINISTIC_RELEASE_MATRIX),
+            *(case.case_id for case in cardinality_one_races()),
+        )
+    )
     deterministic = DeterministicArtifact(
         reproducibility=_pin("1" * 40),
-        cases=(_case(),),
+        cases=release_cases,
         summary=DeterministicSummary(
-            expected_cases=1,
-            observed_cases=1,
-            passed_cases=1,
+            expected_cases=len(release_cases),
+            observed_cases=len(release_cases),
+            passed_cases=len(release_cases),
             failed_cases=0,
             infrastructure_errors=0,
             invariant_violations=0,
@@ -102,7 +127,7 @@ def test_claim_report_rejects_artifacts_from_different_builds(tmp_path: Path) ->
             prohibited_actions=0,
             threshold_passed=True,
             pass_rate=1,
-            wilson_lower=0.2,
+            wilson_lower=0.20654329147389294,
             wilson_upper=1,
             latency_ms=DistributionSummary(
                 count=1,

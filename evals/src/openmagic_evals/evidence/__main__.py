@@ -57,7 +57,7 @@ def _parser() -> argparse.ArgumentParser:
             command.add_argument("--provider", required=True)
             command.add_argument("--model", required=True)
             command.add_argument("--endpoint", required=True)
-            command.add_argument("--configuration-digest", required=True)
+            command.add_argument("--configuration-digest")
             command.add_argument("--synthetic-case-id", required=True)
             command.add_argument("--credential-file", type=Path)
             command.add_argument("--allow-live", action="store_true")
@@ -72,6 +72,10 @@ def _parser() -> argparse.ArgumentParser:
             command.add_argument("--agent-quality", type=Path)
             command.add_argument("--live-smoke", type=Path)
             command.add_argument("--playground", type=Path)
+            command.add_argument("--processes", type=Path)
+            command.add_argument("--races", type=Path)
+            command.add_argument("--renewal-demo", type=Path)
+            command.add_argument("--verification-demo", type=Path)
             command.add_argument("--output", type=Path, required=True)
         elif name == "demo-renewal":
             command.add_argument("--repository-root", type=Path, required=True)
@@ -186,6 +190,10 @@ def main() -> None:
             agent_path=arguments.agent_quality,
             live_path=arguments.live_smoke,
             playground_path=arguments.playground,
+            process_path=arguments.processes,
+            race_path=arguments.races,
+            renewal_demo_path=arguments.renewal_demo,
+            verification_demo_path=arguments.verification_demo,
             output=arguments.output,
         )
         print(json.dumps({"claim_report": str(arguments.output.resolve())}, sort_keys=True))

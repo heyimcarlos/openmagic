@@ -64,6 +64,19 @@ _EXPECTED_TABLES = {
         "workflow_definitions",
     },
 }
+_EXPECTED_MIGRATIONS = {
+    "example_insurance": (
+        "0001_example_insurance_baseline",
+        "0002_renewal_drafting_application",
+        "0003_renewal_approval_effect",
+        "0004_deterministic_verification",
+    ),
+    "openmagic_runtime": (
+        "0001_runtime_baseline",
+        "0002_renewal_drafting_runtime",
+        "0003_fenced_effect_kernel",
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -129,8 +142,6 @@ def audit_repository(root: Path) -> RepositoryAudit:
     runtime_root = root / "packages/openmagic-runtime/src/openmagic_runtime"
     application_root = root / "reference-apps/example-insurance/src/example_insurance"
     api_root = root / "apps/api/src/openmagic_api"
-    production_roots = (runtime_root, application_root, api_root)
-
     runtime_imports = _imports(runtime_root)
     application_imports = _imports(application_root)
     api_imports = _imports(api_root)
@@ -171,10 +182,16 @@ def audit_repository(root: Path) -> RepositoryAudit:
         elif exports & FORBIDDEN_EXPORTS:
             violations.append(f"runtime public module exports persistence details: {relative}")
 
-    scan_roots = (*production_roots, root / "evals")
+    scan_roots = (
+        root / "packages/openmagic-runtime",
+        root / "reference-apps/example-insurance",
+        root / "apps/api",
+        root / "apps/playground",
+        root / "evals",
+    )
     for source_root in scan_roots:
         for path in source_root.rglob("*"):
-            if path.suffix not in {".py", ".sql"} or "__pycache__" in path.parts:
+            if path.suffix not in {".py", ".sql", ".toml"} or "__pycache__" in path.parts:
                 continue
             source = path.read_text(encoding="utf-8")
             for identifier in DELETED_IDENTIFIERS:
@@ -230,14 +247,16 @@ def audit_cold_schema(database_url: str) -> ColdSchemaAudit:
             for schema in schemas
         }
         heads: dict[str, str] = {}
+        histories: dict[str, tuple[str, ...]] = {}
         for schema in ("example_insurance", "openmagic_runtime"):
-            row = connection.execute(
-                sql.SQL(
-                    "SELECT version FROM {}.migration_history ORDER BY version DESC LIMIT 1"
-                ).format(sql.Identifier(schema))
-            ).fetchone()
-            if row is not None:
-                heads[schema] = str(row[0])
+            rows = connection.execute(
+                sql.SQL("SELECT version FROM {}.migration_history ORDER BY version").format(
+                    sql.Identifier(schema)
+                )
+            ).fetchall()
+            histories[schema] = tuple(str(row[0]) for row in rows)
+            if rows:
+                heads[schema] = str(rows[-1][0])
 
     if set(schemas) != set(_EXPECTED_TABLES):
         violations.append("cold database does not contain exactly the owned schemas")
@@ -245,6 +264,9 @@ def audit_cold_schema(database_url: str) -> ColdSchemaAudit:
         actual = set(tables.get(schema, ()))
         if actual != expected:
             violations.append(f"cold schema table set differs from baseline: {schema}")
+    for schema, expected in _EXPECTED_MIGRATIONS.items():
+        if histories.get(schema) != expected:
+            violations.append(f"cold schema migration history differs from baseline: {schema}")
     legacy = tuple(
         sorted(
             f"{schema}.{table}"

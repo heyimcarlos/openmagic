@@ -9,6 +9,7 @@ from openmagic_evals.evidence.contracts import (
     AgentConfigurationPin,
     AgentQualityArtifact,
     AgentQualitySummary,
+    AgentTrialEvidence,
     ArtifactCase,
     BuildPin,
     CaseVerdict,
@@ -37,6 +38,12 @@ def _pin() -> ReproducibilityPin:
                 "openmagic-api": "0.1.0",
                 "openmagic-evals": "0.1.0",
                 "openmagic-runtime": "0.1.0",
+            },
+            distribution_digests={
+                "example-insurance": "sha256:" + "0" * 64,
+                "openmagic-api": "sha256:" + "1" * 64,
+                "openmagic-evals": "sha256:" + "2" * 64,
+                "openmagic-runtime": "sha256:" + "3" * 64,
             },
         ),
         suite_version="issue-71.v1",
@@ -87,6 +94,7 @@ def _agent_configuration() -> AgentConfigurationPin:
 
 
 def _agent_case() -> ArtifactCase:
+    correlations = Correlations(command_ids=("018f2f00-0000-7000-8000-000000000001",))
     return ArtifactCase(
         case_id="agent.development.tool-choice",
         case_schema_version=1,
@@ -94,8 +102,18 @@ def _agent_case() -> ArtifactCase:
         expected_trials=1,
         observed_trials=1,
         seeds=(0,),
-        correlations=Correlations(),
+        correlations=correlations,
         observation_digests=("sha256:" + "9" * 64,),
+        agent_trials=(
+            AgentTrialEvidence(
+                seed=0,
+                outcome_passed=True,
+                prohibited_actions=(),
+                latency_ms=1,
+                trajectory_digest="sha256:" + "9" * 64,
+                correlations=correlations,
+            ),
+        ),
         pass_threshold=0.75,
         passed_trials=1,
         prohibited_actions=0,
@@ -241,6 +259,31 @@ def test_process_metrics_require_independent_roles_losses_and_drained_queues() -
         fresh_interpreters=True,
         postgresql_only_reconstruction=True,
         elapsed_ms=250,
+        claim_latency_ms=DistributionSummary(
+            count=1,
+            mean=10,
+            median=10,
+            sample_standard_deviation=0,
+            minimum=10,
+            maximum=10,
+        ),
+        recovery_time_ms=DistributionSummary(
+            count=1,
+            mean=20,
+            median=20,
+            sample_standard_deviation=0,
+            minimum=20,
+            maximum=20,
+        ),
+        lock_wait_ms=DistributionSummary(
+            count=1,
+            mean=5,
+            median=5,
+            sample_standard_deviation=0,
+            minimum=5,
+            maximum=5,
+        ),
+        observed_throughput_per_second=4.0,
     )
 
     assert metrics.initial_queue.pending_steps == metrics.queued_workflows
@@ -263,6 +306,9 @@ def test_process_metrics_require_independent_roles_losses_and_drained_queues() -
         {"raw_message_content": "A real customer renewal request"},
         {"authorization": "Bearer credential"},
         {"verification_code": "123456"},
+        {"api_key": "configured-elsewhere"},
+        {"credential": "configured-elsewhere"},
+        {"value": "sk-proj-abcdefghijklmnopqrstuvwxyz"},
     ],
 )
 def test_redaction_audit_rejects_secret_and_sensitive_raw_content(payload: object) -> None:
