@@ -9,6 +9,7 @@ from openmagic_runtime.delivery import ClaimedDelivery
 from openmagic_runtime.kernel.work import ClaimedAttempt
 from openmagic_runtime.threads import ThreadStore
 
+from openmagic_evals.evidence._definition_correlations import renewal_instance_definition
 from openmagic_evals.evidence.contracts import (
     ApplicationCorrelations,
     Correlations,
@@ -89,6 +90,9 @@ def run_claim_races(
                         command_ids=(command.command_id,),
                         workflow_ids=(command.input.workflow_id,),
                         instance_ids=(receipt.result.instance_id,),
+                        instance_definitions=(
+                            renewal_instance_definition(receipt.result.instance_id),
+                        ),
                         step_ids=(step_winner.step_id,),
                         attempt_ids=(step_winner.attempt_id,),
                     ),

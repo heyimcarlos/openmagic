@@ -118,7 +118,7 @@ def test_fresh_agent_executor_returns_only_its_typed_candidate() -> None:
         timeout_seconds=1,
     )
 
-    observation = executor.execute(_execution(), CancellationToken())
+    observation = executor.run(_execution(), CancellationToken())
 
     assert observation.value == {"value": "candidate"}
 
@@ -132,7 +132,7 @@ def test_fresh_agent_executor_rejects_malformed_candidate_type() -> None:
     )
 
     with pytest.raises(AgentExecutionFailure, match="outside its typed contract") as raised:
-        executor.execute(_execution(), CancellationToken())
+        executor.run(_execution(), CancellationToken())
     assert raised.value.reason == "malformed_result"
 
 
@@ -145,7 +145,7 @@ def test_fresh_agent_executor_preserves_typed_child_failure() -> None:
     )
 
     with pytest.raises(AgentExecutionFailure, match="synthetic child failure") as raised:
-        executor.execute(_execution(), CancellationToken())
+        executor.run(_execution(), CancellationToken())
     assert raised.value.reason == "child_process_failure"
 
 
@@ -160,7 +160,7 @@ def test_fresh_agent_executor_terminates_work_after_timeout(tmp_path: Path) -> N
     )
 
     with pytest.raises(AgentExecutionFailure, match="bounded timeout") as raised:
-        executor.execute(_execution(), CancellationToken())
+        executor.run(_execution(), CancellationToken())
     assert raised.value.reason == "bounded_timeout"
     time.sleep(0.7)
 
@@ -177,7 +177,7 @@ def test_fresh_agent_executor_kills_and_reaps_term_resistant_child(tmp_path: Pat
     )
 
     with pytest.raises(AgentExecutionFailure) as raised:
-        executor.execute(_execution(), CancellationToken())
+        executor.run(_execution(), CancellationToken())
     assert raised.value.reason == "bounded_timeout"
     process_ids = tuple(int(value) for value in pid_file.read_text(encoding="utf-8").split())
     for process_id in process_ids:
@@ -206,7 +206,7 @@ def test_fresh_agent_executor_cancellation_reaps_ready_session_tree(tmp_path: Pa
     canceller = Thread(target=cancel_when_candidate_starts)
     canceller.start()
     with pytest.raises(AgentExecutionFailure) as raised:
-        executor.execute(_execution(), cancellation)
+        executor.run(_execution(), cancellation)
     canceller.join(timeout=1)
 
     assert raised.value.reason == "cancelled"
@@ -233,6 +233,6 @@ def test_fresh_agent_executor_cleans_scope_when_spawn_cannot_start() -> None:
     )
 
     with pytest.raises((AttributeError, TypeError), match=r"local object|pickle"):
-        executor.execute(_execution(), CancellationToken())
+        executor.run(_execution(), CancellationToken())
 
     assert {child.pid for child in active_children()} <= existing_children

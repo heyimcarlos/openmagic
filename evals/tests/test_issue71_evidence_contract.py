@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from datetime import UTC, datetime
 from typing import Literal, cast
 from uuid import UUID
@@ -9,11 +10,13 @@ from uuid import UUID
 import pytest
 from openmagic_evals.evidence.contracts import (
     REQUIRED_NEGATIVE_CLAIMS,
+    AgentAggregate,
     AgentCaseEvidence,
     AgentConfigurationPin,
     AgentCorpusPin,
     AgentQualityArtifact,
     AgentQualitySummary,
+    AgentSplitSummary,
     AgentTrialEvidence,
     ArtifactCase,
     AttemptAuthorityEvidence,
@@ -27,7 +30,10 @@ from openmagic_evals.evidence.contracts import (
     DeterministicScenarioEvidence,
     DeterministicSummary,
     DistributionSummary,
+    EnvironmentVariablePin,
+    ExecutablePin,
     ForcedProcessLoss,
+    InstanceDefinitionCorrelation,
     PostgresDeploymentPin,
     ProcessCase,
     ProcessContract,
@@ -38,6 +44,7 @@ from openmagic_evals.evidence.contracts import (
     RaceTrialEvidence,
     RepositorySurfaceEvidence,
     ReproducibilityPin,
+    RuntimeCorrelations,
     SanitizedAgentEvent,
     SanitizedObservation,
     WheelArchivePin,
@@ -48,6 +55,10 @@ from openmagic_evals.evidence.contracts import (
     race_trial_digest,
 )
 from openmagic_evals.evidence.redaction import RedactionViolation, audit_redaction
+from openmagic_evals.evidence.reproducibility import (
+    fixed_executable_path,
+    fixed_execution_environment,
+)
 from pydantic import JsonValue
 
 
@@ -105,7 +116,32 @@ def _pin() -> ReproducibilityPin:
         ),
         suite_version="issue-71.v1",
         command=("uv", "run", "openmagic-evidence", "deterministic"),
-        environment_allowlist=("PATH", "PYTHONNOUSERSITE"),
+        environment={
+            "GIT_CONFIG_GLOBAL": EnvironmentVariablePin(
+                value=os.devnull, digest=canonical_digest(os.devnull)
+            ),
+            "GIT_CONFIG_NOSYSTEM": EnvironmentVariablePin(value="1", digest=canonical_digest("1")),
+            "LANG": EnvironmentVariablePin(value="C.UTF-8", digest=canonical_digest("C.UTF-8")),
+            "LC_ALL": EnvironmentVariablePin(value="C.UTF-8", digest=canonical_digest("C.UTF-8")),
+            "PATH": EnvironmentVariablePin(
+                value="/bin:/usr/bin", digest=canonical_digest("/bin:/usr/bin")
+            ),
+            "PYTHONNOUSERSITE": EnvironmentVariablePin(value="1", digest=canonical_digest("1")),
+        },
+        executables={
+            name: ExecutablePin(path=f"/fixture/{name}", content_digest="sha256:" + "e" * 64)
+            for name in (
+                "docker",
+                "git",
+                "openmagic-api",
+                "openmagic-delivery-worker",
+                "openmagic-evidence",
+                "openmagic-local-email-provider",
+                "openmagic-playground",
+                "openmagic-workflow-worker",
+                "python",
+            )
+        },
         started_at=datetime(2026, 7, 15, 20, 0, tzinfo=UTC),
         finished_at=datetime(2026, 7, 15, 20, 1, tzinfo=UTC),
         timeout_seconds=900,
@@ -130,7 +166,7 @@ def _pin() -> ReproducibilityPin:
                 },
             ),
         ),
-        definition_digests={"example_insurance.renewal": "sha256:" + "c" * 64},
+        definition_digests={"example_insurance.renewal:1": "sha256:" + "c" * 64},
     )
 
 
@@ -197,6 +233,137 @@ def test_postgres_provenance_is_fail_closed() -> None:
                     )
                 }
             ).model_dump()
+        )
+
+
+def test_execution_provenance_pins_environment_values_and_executable_content() -> None:
+    pin = _pin()
+
+    assert pin.environment["PATH"].value
+    assert pin.environment["PATH"].digest == canonical_digest(pin.environment["PATH"].value)
+    assert pin.executables["python"].path.startswith("/")
+
+    with pytest.raises(ValueError, match="environment value digest"):
+        EnvironmentVariablePin(value="/bin", digest="sha256:" + "0" * 64)
+    with pytest.raises(ValueError, match="absolute path"):
+        ExecutablePin(path="bin/python", content_digest="sha256:" + "0" * 64)
+
+    assert fixed_execution_environment() == {
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+        "PATH": os.defpath,
+        "PYTHONNOUSERSITE": "1",
+    }
+    assert fixed_executable_path("git").is_absolute()
+    assert fixed_executable_path("docker").is_absolute()
+
+
+def test_runtime_correlations_reject_instance_without_exact_definition() -> None:
+    instance_id = UUID("018f2f00-0000-7000-8000-000000000001")
+
+    with pytest.raises(ValueError, match="every observed Instance"):
+        RuntimeCorrelations(instance_ids=(instance_id,))
+    with pytest.raises(ValueError, match="every observed Instance"):
+        RuntimeCorrelations(
+            instance_definitions=(
+                InstanceDefinitionCorrelation(
+                    instance_id=instance_id,
+                    definition_key="example.workflow",
+                    definition_version=1,
+                ),
+            )
+        )
+
+    mapping = InstanceDefinitionCorrelation(
+        instance_id=instance_id,
+        definition_key="example.workflow",
+        definition_version=1,
+    )
+    with pytest.raises(ValueError, match="Instance identities must be unique"):
+        RuntimeCorrelations(
+            instance_ids=(instance_id, instance_id),
+            instance_definitions=(mapping,),
+        )
+    with pytest.raises(ValueError, match="only one Definition"):
+        RuntimeCorrelations(
+            instance_ids=(instance_id,),
+            instance_definitions=(
+                mapping,
+                mapping.model_copy(update={"definition_version": 2}),
+            ),
+        )
+
+    with pytest.raises(ValueError, match="stable key grammar"):
+        InstanceDefinitionCorrelation(
+            instance_id=instance_id,
+            definition_key="Invalid Definition",
+            definition_version=1,
+        )
+
+
+def test_reproducibility_rejects_malformed_definition_pins() -> None:
+    document = _pin().model_dump(mode="python")
+    document["definition_digests"] = {"invalid": "sha256:" + "c" * 64}
+    with pytest.raises(ValueError, match="stable key and positive version"):
+        ReproducibilityPin.model_validate(document)
+
+    document["definition_digests"] = {"example.workflow:1": "not-a-digest"}
+    with pytest.raises(ValueError, match="Definition digest"):
+        ReproducibilityPin.model_validate(document)
+
+
+def test_artifact_rejects_instance_definition_missing_from_reproducibility_pin() -> None:
+    instance_id = UUID("018f2f00-0000-7000-8000-000000000001")
+    correlations = Correlations(
+        runtime=RuntimeCorrelations(
+            instance_ids=(instance_id,),
+            instance_definitions=(
+                InstanceDefinitionCorrelation(
+                    instance_id=instance_id,
+                    definition_key="unregistered.workflow",
+                    definition_version=7,
+                ),
+            ),
+        )
+    )
+    observation = {"connected": True}
+    scenario = DeterministicScenarioEvidence(
+        scenario_id="definition-pin",
+        correlations=correlations,
+        observation=observation,
+        observation_digest=canonical_digest(observation),
+    )
+    case = ArtifactCase(
+        case_id="definition.pin",
+        case_schema_version=1,
+        expected_trials=1,
+        observed_trials=1,
+        seeds=(0,),
+        correlations=correlations,
+        observation_digests=(deterministic_observation_digest((scenario,), {}),),
+        scenarios=(scenario,),
+        test_results={},
+        verdict=CaseVerdict(status="passed", invariant_violations=()),
+    )
+
+    with pytest.raises(ValueError, match="unpinned Definitions"):
+        DeterministicArtifact(
+            reproducibility=_pin(),
+            cases=(case,),
+            summary=DeterministicSummary(
+                expected_cases=1,
+                observed_cases=1,
+                passed_cases=1,
+                failed_cases=0,
+                infrastructure_errors=0,
+                invariant_violations=0,
+                strict_pass=True,
+                runner_exit_code=0,
+            ),
+            limitations=("fixture",),
+            negative_claims=REQUIRED_NEGATIVE_CLAIMS,
         )
 
 
@@ -425,22 +592,66 @@ def test_race_trial_requires_cardinality_one_and_durable_correlations() -> None:
             agent_configurations=(_agent_configuration(),),
             cases=(_agent_case(),),
             summary=AgentQualitySummary(
-                development_cases=1,
-                held_out_cases=0,
-                expected_trials=1,
-                observed_trials=1,
-                passed_trials=1,
-                prohibited_actions=0,
+                development=AgentSplitSummary(
+                    case_count=1,
+                    expected_trials=1,
+                    aggregate=AgentAggregate(
+                        observed_trials=1,
+                        passed_trials=1,
+                        prohibited_actions=0,
+                        pass_rate=1,
+                        wilson_lower=0.20654329147389294,
+                        wilson_upper=1,
+                        latency_ms=DistributionSummary(
+                            count=1,
+                            mean=1,
+                            median=1,
+                            sample_standard_deviation=0,
+                            minimum=1,
+                            maximum=1,
+                        ),
+                    ),
+                    threshold_passed=True,
+                ),
+                held_out=AgentSplitSummary(
+                    case_count=1,
+                    expected_trials=1,
+                    aggregate=AgentAggregate(
+                        observed_trials=1,
+                        passed_trials=1,
+                        prohibited_actions=0,
+                        pass_rate=1,
+                        wilson_lower=0.20654329147389294,
+                        wilson_upper=1,
+                        latency_ms=DistributionSummary(
+                            count=1,
+                            mean=1,
+                            median=1,
+                            sample_standard_deviation=0,
+                            minimum=1,
+                            maximum=1,
+                        ),
+                    ),
+                    threshold_passed=True,
+                ),
+                combined=AgentAggregate(
+                    observed_trials=2,
+                    passed_trials=2,
+                    prohibited_actions=0,
+                    pass_rate=1,
+                    wilson_lower=0.34237195288961925,
+                    wilson_upper=1,
+                    latency_ms=DistributionSummary(
+                        count=2,
+                        mean=1,
+                        median=1,
+                        sample_standard_deviation=0,
+                        minimum=1,
+                        maximum=1,
+                    ),
+                ),
                 threshold_passed=True,
                 deterministic_release_pass=True,
-                latency_ms=DistributionSummary(
-                    count=1,
-                    mean=1,
-                    median=1,
-                    sample_standard_deviation=0,
-                    minimum=1,
-                    maximum=1,
-                ),
             ),
             limitations=("local scripted Agent only",),
         )
@@ -575,6 +786,11 @@ def _process_case() -> ProcessCase:
         ),
         lost_attempt=AttemptAuthorityEvidence(
             instance_id=UUID(int=1),
+            instance_definition=InstanceDefinitionCorrelation(
+                instance_id=UUID(int=1),
+                definition_key="example_insurance.renewal_outreach",
+                definition_version=2,
+            ),
             step_id=UUID(int=2),
             attempt_id=UUID(int=3),
             worker_id="workflow-lost",
@@ -633,6 +849,13 @@ def _process_case() -> ProcessCase:
     correlations = Correlations(
         runtime={
             "instance_ids": (UUID(int=1),),
+            "instance_definitions": (
+                InstanceDefinitionCorrelation(
+                    instance_id=UUID(int=1),
+                    definition_key="example_insurance.renewal_outreach",
+                    definition_version=2,
+                ),
+            ),
             "step_ids": (UUID(int=2),),
             "attempt_ids": (UUID(int=3),),
         },

@@ -28,6 +28,7 @@ from openmagic_runtime.kernel.work import ClaimWork, DispositionRequired, claim_
 
 from openmagic_evals.evidence.contracts import (
     Correlations,
+    InstanceDefinitionCorrelation,
     ProcessCorrelations,
     RuntimeCorrelations,
 )
@@ -176,8 +177,12 @@ def _signal_definition() -> WorkflowDefinition:
     )
 
 
+_TRANSITION_RACE_DEFINITION = _transition_definition()
+_SIGNAL_RACE_DEFINITION = _signal_definition()
+
+
 def transition_race_definitions() -> tuple[WorkflowDefinition, WorkflowDefinition]:
-    return _transition_definition(), _signal_definition()
+    return _TRANSITION_RACE_DEFINITION, _SIGNAL_RACE_DEFINITION
 
 
 def run_transition_races(
@@ -237,8 +242,8 @@ def _signal_trial(
         database_url=database_url,
         request=StartInstance(
             command_id=uuid4(),
-            definition_key="eval.issue71_signal_race",
-            definition_version=1,
+            definition_key=_SIGNAL_RACE_DEFINITION.identity.key,
+            definition_version=_SIGNAL_RACE_DEFINITION.identity.version,
             instance_input={"value": f"signal-{seed}"},
             route_input={"value": f"signal-{seed}"},
         ),
@@ -323,6 +328,12 @@ def _signal_trial(
         correlations=Correlations(
             runtime=RuntimeCorrelations(
                 instance_ids=(started.instance_id,),
+                instance_definitions=(
+                    InstanceDefinitionCorrelation.from_identity(
+                        started.instance_id,
+                        _SIGNAL_RACE_DEFINITION.identity,
+                    ),
+                ),
                 step_ids=tuple(winner.steps.values()),
                 wait_ids=(wait_id,),
                 signal_ids=(winner.signal_id,),
@@ -345,8 +356,8 @@ def _attempt_and_route_trial(
         database_url=database_url,
         request=StartInstance(
             command_id=uuid4(),
-            definition_key="eval.issue71_transition_race",
-            definition_version=1,
+            definition_key=_TRANSITION_RACE_DEFINITION.identity.key,
+            definition_version=_TRANSITION_RACE_DEFINITION.identity.version,
             instance_input={"value": f"transition-{seed}"},
             route_input={"value": f"transition-{seed}"},
         ),
@@ -394,6 +405,12 @@ def _attempt_and_route_trial(
         correlations=Correlations(
             runtime=RuntimeCorrelations(
                 instance_ids=(claim.instance_id,),
+                instance_definitions=(
+                    InstanceDefinitionCorrelation.from_identity(
+                        claim.instance_id,
+                        _TRANSITION_RACE_DEFINITION.identity,
+                    ),
+                ),
                 step_ids=(claim.step_id,),
                 attempt_ids=(claim.attempt_id,),
                 trace_event_ids=(started.trace_event_id,),
@@ -419,8 +436,8 @@ def _attempt_and_route_trial(
         database_url=database_url,
         request=StartInstance(
             command_id=uuid4(),
-            definition_key="eval.issue71_transition_race",
-            definition_version=1,
+            definition_key=_TRANSITION_RACE_DEFINITION.identity.key,
+            definition_version=_TRANSITION_RACE_DEFINITION.identity.version,
             instance_input={"value": f"route-{seed}"},
             route_input={"value": f"route-{seed}"},
         ),
@@ -482,6 +499,12 @@ def _attempt_and_route_trial(
         correlations=Correlations(
             runtime=RuntimeCorrelations(
                 instance_ids=(route_started.instance_id,),
+                instance_definitions=(
+                    InstanceDefinitionCorrelation.from_identity(
+                        route_started.instance_id,
+                        _TRANSITION_RACE_DEFINITION.identity,
+                    ),
+                ),
                 step_ids=(route_claim.step_id, *finish_step_ids),
                 attempt_ids=(route_claim.attempt_id,),
             ),

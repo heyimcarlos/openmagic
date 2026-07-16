@@ -22,6 +22,7 @@ from openmagic_playground.renewal_observation import RenewalProjection, decode_r
 from openmagic_runtime.commands import Actor, Cause, CommandReceipt
 from openmagic_runtime.threads import AppendMessage, CreateThread, MessageView, ThreadStore
 
+from openmagic_evals.evidence._definition_correlations import renewal_instance_definition
 from openmagic_evals.evidence.agent_boundary_trials import (
     boundary_configuration_document,
     execute_boundary_trial,
@@ -347,6 +348,9 @@ def _assemble_renewal_trial(
                 command_ids=(setup.command.command_id,),
                 workflow_ids=(setup.command.input.workflow_id,),
                 instance_ids=(execution.receipt.result.instance_id,),
+                instance_definitions=(
+                    renewal_instance_definition(execution.receipt.result.instance_id),
+                ),
                 step_ids=verification.step_ids,
                 attempt_ids=verification.attempt_ids,
                 wait_ids=verification.wait_ids,

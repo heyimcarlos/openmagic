@@ -16,6 +16,10 @@ from openmagic_playground.renewal_observation import decode_renewal_projection
 from openmagic_runtime.commands import Cause
 from openmagic_runtime.threads import ThreadStore
 
+from openmagic_evals.evidence._definition_correlations import (
+    renewal_instance_definition,
+    verification_instance_definition,
+)
 from openmagic_evals.evidence.contracts import (
     AgentCorrelations,
     ApplicationCorrelations,
@@ -80,6 +84,7 @@ def collect_renewal_observation(working_directory: Path) -> DeterministicObserva
                 command_ids=(values.command_id,),
                 workflow_ids=(values.workflow_id,),
                 instance_ids=(values.instance_id,),
+                instance_definitions=(renewal_instance_definition(values.instance_id),),
                 step_ids=values.step_ids,
                 attempt_ids=values.attempt_ids,
                 wait_ids=outcomes.approval_wait_ids,
@@ -159,6 +164,7 @@ def collect_verification_observation() -> DeterministicObservation:
                 command_ids=(scenario.protected_command.command_id, receipt.command_id),
                 workflow_ids=(scenario.renewal.input.workflow_id, verification.workflow_id),
                 instance_ids=(verification.instance_id,),
+                instance_definitions=(verification_instance_definition(verification.instance_id),),
                 step_ids=tuple(step_id for step_id, _ in verification.step_attempt_ids),
                 attempt_ids=tuple(attempt_id for _, attempt_id in verification.step_attempt_ids),
             ),

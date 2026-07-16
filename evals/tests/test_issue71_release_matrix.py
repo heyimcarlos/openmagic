@@ -111,7 +111,7 @@ def test_executor_case_records_typed_boundary_scenarios(tmp_path: Path) -> None:
         result_class=_BoundaryCandidate,
         encoder=lambda candidate: {"value": candidate.value},
         timeout_seconds=1,
-    ).execute(_boundary_execution(), CancellationToken())
+    ).run(_boundary_execution(), CancellationToken())
     assert happy.value == {"value": "candidate"}
     record_case_observation(
         case_id="executor.typed-malformed-timeout",
@@ -132,7 +132,7 @@ def test_executor_case_records_typed_boundary_scenarios(tmp_path: Path) -> None:
             timeout_seconds=1,
         )
         with pytest.raises((RuntimeError, ValueError), match=match):
-            executor.execute(_boundary_execution(), CancellationToken())
+            executor.run(_boundary_execution(), CancellationToken())
         record_case_observation(
             case_id="executor.typed-malformed-timeout",
             scenario_id=scenario_id,
@@ -148,7 +148,7 @@ def test_executor_case_records_typed_boundary_scenarios(tmp_path: Path) -> None:
         timeout_seconds=1,
     )
     with pytest.raises(RuntimeError, match="bounded timeout"):
-        timeout_executor.execute(_boundary_execution(), CancellationToken())
+        timeout_executor.run(_boundary_execution(), CancellationToken())
     time.sleep(0.7)
     assert not marker.exists()
     record_case_observation(

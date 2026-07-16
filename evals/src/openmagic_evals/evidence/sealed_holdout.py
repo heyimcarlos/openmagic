@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import hashlib
-import subprocess
 from dataclasses import asdict
 from importlib.resources import files
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
 
+from openmagic_evals.evidence._execution_config import (
+    fixed_executable_path,
+    fixed_execution_environment,
+)
+from openmagic_evals.evidence._owned_command import OwnedCommandResult, capture_owned_command
 from openmagic_evals.evidence._sealed_agent_corpus import HELD_OUT_CASES
 from openmagic_evals.evidence.core_models import canonical_digest
 
@@ -55,13 +59,12 @@ TUNING_LOCKED_BLOBS = {"source_snapshot": _SEAL.locked_source_digest}
 TUNING_LOCKED_SOURCE_DIGEST = _SEAL.locked_source_digest
 
 
-def _git(repository_root: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ("git", *arguments),
-        cwd=repository_root,
-        check=False,
-        capture_output=True,
-        text=True,
+def _git(repository_root: Path, *arguments: str) -> OwnedCommandResult:
+    return capture_owned_command(
+        (str(fixed_executable_path("git")), *arguments),
+        working_directory=repository_root,
+        environment=fixed_execution_environment(),
+        timeout_seconds=30,
     )
 
 

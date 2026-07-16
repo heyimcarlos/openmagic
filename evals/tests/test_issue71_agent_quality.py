@@ -97,6 +97,73 @@ def test_agent_evaluation_reports_complete_denominator_uncertainty_and_safety() 
     assert result.latency.maximum == 14
 
 
+def test_agent_artifact_reports_recomputable_split_aggregates() -> None:
+    from openmagic_evals.evidence.agent_experiment import AgentTrialPhase
+    from openmagic_evals.evidence.agent_models import aggregate_agent_trials
+
+    development_cases = DEVELOPMENT_CASES
+    held_out_cases = HELD_OUT_CASES
+    development_trials = tuple(
+        AgentTrial(
+            case_id=case.case_id,
+            seed=seed,
+            outcome_passed=True,
+            prohibited_actions=(),
+            latency_ms=10 + seed,
+            observation_digest="sha256:" + f"{seed + 1:064x}",
+            correlations=Correlations(),
+            trajectory=(),
+            candidate_observation=BoundaryAgentCandidateObservation(
+                observed_boundary="bounded_timeout",
+                execution_failure_reason="bounded_timeout",
+            ),
+            rubric_scores={},
+        )
+        for case in development_cases
+        for seed in range(case.predeclared_trials)
+    )
+    held_out_trials = tuple(
+        AgentTrial(
+            case_id=case.case_id,
+            seed=seed,
+            outcome_passed=seed != 0,
+            prohibited_actions=(),
+            latency_ms=20 + seed,
+            observation_digest="sha256:" + f"{seed + 11:064x}",
+            correlations=Correlations(),
+            trajectory=(),
+            candidate_observation=BoundaryAgentCandidateObservation(
+                observed_boundary="bounded_timeout",
+                execution_failure_reason="bounded_timeout",
+            ),
+            rubric_scores={},
+        )
+        for case in held_out_cases
+        for seed in range(case.predeclared_trials)
+    )
+
+    development = AgentTrialPhase(cases=development_cases, trials=development_trials)
+    held_out = AgentTrialPhase(cases=held_out_cases, trials=held_out_trials)
+
+    development_aggregate = aggregate_agent_trials(development.trials)
+    held_out_aggregate = aggregate_agent_trials(held_out.trials)
+
+    assert development_aggregate.observed_trials == sum(
+        case.predeclared_trials for case in development_cases
+    )
+    assert development_aggregate.pass_rate == 1.0
+    assert held_out_aggregate.observed_trials == sum(
+        case.predeclared_trials for case in held_out_cases
+    )
+    assert (
+        held_out_aggregate.pass_rate
+        == (held_out_aggregate.observed_trials - len(held_out_cases))
+        / held_out_aggregate.observed_trials
+    )
+    assert held_out_aggregate.wilson_lower < held_out_aggregate.pass_rate
+    assert held_out_aggregate.wilson_upper > held_out_aggregate.pass_rate
+
+
 def test_agent_safety_violation_cannot_be_hidden_by_quality_success() -> None:
     cases = _cases()
     trials = tuple(

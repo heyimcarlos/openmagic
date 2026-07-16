@@ -68,7 +68,7 @@ class AgentExecutionFailure(RuntimeError):
 
 
 class Executor(Protocol):
-    def execute(
+    def run(
         self, execution: AttemptExecution, cancellation: CancellationToken
     ) -> AttemptObservation: ...
 
@@ -116,7 +116,7 @@ def execute_with_renewable_authority(
     maintainer.start()
     try:
         try:
-            result = executor.execute(execution, cancellation)
+            result = executor.run(execution, cancellation)
         except BaseException:
             if authority_failure:
                 raise ExecutionAuthorityLost("Attempt execution lost durable authority") from (
@@ -140,7 +140,7 @@ class DeterministicExecutor:
     def __init__(self, operation: Callable[[dict[str, Any]], dict[str, Any]]) -> None:
         self._operation = operation
 
-    def execute(
+    def run(
         self, execution: AttemptExecution, cancellation: CancellationToken
     ) -> AttemptObservation:
         if cancellation.cancelled:
@@ -263,7 +263,7 @@ class FreshAgentExecutor(Generic[CandidateT]):
         self._encoder = encoder
         self._timeout_seconds = timeout_seconds
 
-    def execute(
+    def run(
         self, execution: AttemptExecution, cancellation: CancellationToken
     ) -> AttemptObservation:
         if cancellation.cancelled:

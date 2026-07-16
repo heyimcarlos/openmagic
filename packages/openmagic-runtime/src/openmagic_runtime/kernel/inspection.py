@@ -5,10 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from uuid import UUID
 
-import psycopg
 from psycopg import Connection
 
-from openmagic_runtime.kernel._inspection_records import read_instance_inspection
+from openmagic_runtime.kernel._inspection_records import read_kernel_snapshot
 from openmagic_runtime.kernel._records import (
     steps_for_instance,
     waits_for_instance,
@@ -55,13 +54,10 @@ class KernelInspection:
         self._database_url = database_url
 
     def snapshot(self, instance_id: UUID) -> InstanceSnapshot:
-        with psycopg.connect(self._database_url) as connection, connection.transaction():
-            connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
-            instance = read_instance_inspection(connection, instance_id)
-            if instance is None:
-                raise KeyError(f"Instance not found: {instance_id}")
-            steps = steps_for_instance(connection, instance_id)
-            waits = waits_for_instance(connection, instance_id)
+        records = read_kernel_snapshot(self._database_url, instance_id)
+        if records is None:
+            raise KeyError(f"Instance not found: {instance_id}")
+        instance, steps, waits = records
         return InstanceSnapshot(
             instance_id=instance_id,
             definition_key=instance.definition_key,

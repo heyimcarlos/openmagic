@@ -9,10 +9,16 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from openmagic_evals.evidence._execution_config import (
+    CONFIGURED_EXECUTABLES,
+    FIXED_ENVIRONMENT,
+)
 from openmagic_evals.evidence.core_models import canonical_digest
 
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}")
 _GIT_SHA = re.compile(r"[0-9a-f]{40}")
+_DEFINITION_DIGEST_KEY = re.compile(r"[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+:[1-9][0-9]*")
+REQUIRED_EXECUTABLES = CONFIGURED_EXECUTABLES
 
 
 class _PinModel(BaseModel):
@@ -37,6 +43,30 @@ class WheelArchivePin(_PinModel):
         _require_digest(self.archive_digest, "wheel archive digest")
         _require_digest(self.record_digest, "wheel RECORD digest")
         _require_digest(self.metadata_digest, "wheel metadata digest")
+        return self
+
+
+class EnvironmentVariablePin(_PinModel):
+    value: str
+    digest: str
+
+    @model_validator(mode="after")
+    def validate_value(self) -> EnvironmentVariablePin:
+        _require_digest(self.digest, "environment value digest")
+        if self.digest != canonical_digest(self.value):
+            raise ValueError("environment value digest does not match its pinned value")
+        return self
+
+
+class ExecutablePin(_PinModel):
+    path: str
+    content_digest: str
+
+    @model_validator(mode="after")
+    def validate_executable(self) -> ExecutablePin:
+        if not Path(self.path).is_absolute():
+            raise ValueError("executable pin requires an absolute path")
+        _require_digest(self.content_digest, "executable content digest")
         return self
 
 
@@ -102,7 +132,8 @@ class ReproducibilityPin(_PinModel):
     build: BuildPin
     suite_version: str
     command: tuple[str, ...]
-    environment_allowlist: tuple[str, ...]
+    environment: dict[str, EnvironmentVariablePin]
+    executables: dict[str, ExecutablePin]
     started_at: datetime
     finished_at: datetime
     timeout_seconds: int = Field(gt=0)
@@ -116,6 +147,10 @@ class ReproducibilityPin(_PinModel):
     def validate_reproducibility(self) -> ReproducibilityPin:
         if not self.suite_version or not self.command:
             raise ValueError("suite version and exact command are required")
+        if set(self.environment) != set(FIXED_ENVIRONMENT):
+            raise ValueError("evidence environment must pin the complete fixed environment")
+        if set(self.executables) != REQUIRED_EXECUTABLES:
+            raise ValueError("evidence executables must pin every configured helper")
         if self.finished_at < self.started_at:
             raise ValueError("finished_at cannot precede started_at")
         deployment_ids = tuple(item.deployment_id for item in self.postgres_deployments)
@@ -134,7 +169,19 @@ class ReproducibilityPin(_PinModel):
             _require_digest(self.sandbox_digest, "sandbox_digest")
         if not self.definition_digests:
             raise ValueError("Definition digests are required")
+        if any(_DEFINITION_DIGEST_KEY.fullmatch(key) is None for key in self.definition_digests):
+            raise ValueError("Definition digest keys must pin a stable key and positive version")
+        for digest in self.definition_digests.values():
+            _require_digest(digest, "Definition digest")
         return self
 
 
-__all__ = ["BuildPin", "PostgresDeploymentPin", "ReproducibilityPin", "WheelArchivePin"]
+__all__ = [
+    "REQUIRED_EXECUTABLES",
+    "BuildPin",
+    "EnvironmentVariablePin",
+    "ExecutablePin",
+    "PostgresDeploymentPin",
+    "ReproducibilityPin",
+    "WheelArchivePin",
+]

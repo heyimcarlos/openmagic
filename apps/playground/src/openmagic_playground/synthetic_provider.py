@@ -21,8 +21,7 @@ from urllib.request import urlopen
 from openmagic_runtime.processes import OwnedProcess, finish_owned_cleanup
 
 from openmagic_playground.process_launching import (
-    ProcessLauncher,
-    SubprocessLauncher,
+    ProcessCommand,
     launch_owned_process,
 )
 
@@ -121,13 +120,18 @@ class SyntheticEmailProvider:
         behavior: ProviderBehavior = "success",
         readiness_timeout: float = 10,
         shutdown_timeout: float = 5,
-        process_launcher: ProcessLauncher | None = None,
+        process_command_override: ProcessCommand | None = None,
     ) -> None:
         self.working_directory = working_directory.resolve()
         self.behavior = behavior
         self.readiness_timeout = readiness_timeout
         self.shutdown_timeout = shutdown_timeout
-        self._process_launcher = process_launcher or SubprocessLauncher()
+        if (
+            process_command_override is not None
+            and type(process_command_override) is not ProcessCommand
+        ):
+            raise TypeError("Process command override must be immutable ProcessCommand data")
+        self._process_command_override = process_command_override
         self.port = _free_port()
         self.url = f"http://127.0.0.1:{self.port}"
         self.request_log = self.working_directory / "requests.jsonl"
@@ -166,7 +170,6 @@ class SyntheticEmailProvider:
         self._log = (self.working_directory / "provider.log").open("ab")
         try:
             acquired = launch_owned_process(
-                self._process_launcher,
                 [
                     sys.executable,
                     "-m",
@@ -179,6 +182,7 @@ class SyntheticEmailProvider:
                     "--request-log",
                     str(self.request_log),
                 ],
+                command_override=self._process_command_override,
                 working_directory=self.working_directory,
                 environment={
                     "PATH": os.defpath,

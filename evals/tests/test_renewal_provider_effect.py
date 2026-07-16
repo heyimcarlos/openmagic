@@ -492,7 +492,7 @@ def test_email_provider_client_dispatches_typed_permit_without_database(tmp_path
             effect=effect,
         )
 
-        observation = EmailProviderClient(provider_url=provider.url).execute(
+        observation = EmailProviderClient(provider_url=provider.url).dispatch(
             permit,
             CancellationToken(),
         )
@@ -559,7 +559,7 @@ def test_provider_executor_rejects_mismatched_permit_bound_input(tmp_path) -> No
                 AuthorizedEmailEffectExecutor(
                     database_url=database_url,
                     client=EmailProviderClient(provider_url=provider.url),
-                ).execute(
+                ).run(
                     replace(execution, input={**execution.input, **mismatch}),
                     CancellationToken(),
                 )
@@ -599,7 +599,7 @@ def test_dispatch_and_provider_evidence_commands_return_exact_replay_receipts(tm
         observation = AuthorizedEmailEffectExecutor(
             database_url=database_url,
             client=EmailProviderClient(provider_url=provider.url),
-        ).execute(
+        ).run(
             AttemptExecution(
                 instance_id=attempt.instance_id,
                 step_id=attempt.step_id,

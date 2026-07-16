@@ -6,7 +6,7 @@ from typing import Literal
 
 from pydantic import model_validator
 
-from openmagic_evals.evidence.core_models import EvidenceModel
+from openmagic_evals.evidence.core_models import EvidenceModel, validate_correlated_definitions
 from openmagic_evals.evidence.deterministic_models import ArtifactCase
 from openmagic_evals.evidence.pins import ReproducibilityPin
 from openmagic_evals.evidence.release_models import SCHEMA_VERSION
@@ -37,6 +37,10 @@ class PlaygroundArtifact(EvidenceModel):
     def validate_demonstration_lane(self) -> PlaygroundArtifact:
         if not self.cases or any(case.verdict.status != "passed" for case in self.cases):
             raise ValueError("demonstration artifacts require isolated passing cases")
+        validate_correlated_definitions(
+            (case.correlations for case in self.cases),
+            self.reproducibility.definition_digests,
+        )
         return self
 
 

@@ -77,7 +77,7 @@ class EmailProviderClient:
         self._provider_url = provider_url.rstrip("/")
         self._timeout_seconds = timeout_seconds
 
-    def execute(
+    def dispatch(
         self, permit: ExternalEffectPermit, cancellation: CancellationToken
     ) -> AttemptObservation:
         if cancellation.cancelled:
@@ -120,7 +120,7 @@ class AuthorizedEmailEffectExecutor:
         self._database_url = database_url
         self._client = client
 
-    def execute(
+    def run(
         self, execution: AttemptExecution, cancellation: CancellationToken
     ) -> AttemptObservation:
         command_id, result_digest = _permit_reference(execution)
@@ -132,7 +132,7 @@ class AuthorizedEmailEffectExecutor:
                 result_digest=result_digest,
             )
         _validate_permit(execution, permit)
-        return self._client.execute(permit, cancellation)
+        return self._client.dispatch(permit, cancellation)
 
 
 class EmailReconciliationExecutor:
@@ -140,7 +140,7 @@ class EmailReconciliationExecutor:
         self._provider_url = provider_url.rstrip("/")
         self._timeout_seconds = timeout_seconds
 
-    def execute(
+    def run(
         self, execution: AttemptExecution, cancellation: CancellationToken
     ) -> AttemptObservation:
         if cancellation.cancelled:

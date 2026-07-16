@@ -16,6 +16,7 @@ from openmagic_runtime.kernel._transition_records import (
     lock_disposition_source,
     read_instance_definition,
 )
+from openmagic_runtime.kernel._work_contracts import DispositionRequired
 from openmagic_runtime.kernel.definitions import (
     Route,
     WorkflowDefinition,
@@ -26,7 +27,6 @@ from openmagic_runtime.kernel.inspection_types import (
     AttemptState,
     InstanceState,
 )
-from openmagic_runtime.kernel.work import DispositionRequired
 
 
 def validate_disposition(

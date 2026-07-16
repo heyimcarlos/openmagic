@@ -71,6 +71,8 @@ def _common_reproducibility_pin(artifact: Artifact) -> tuple[object, ...]:
     return (
         pin.build,
         pin.suite_version,
+        pin.environment,
+        pin.executables,
         pin.definition_digests,
         pin.sandbox_digest,
     )

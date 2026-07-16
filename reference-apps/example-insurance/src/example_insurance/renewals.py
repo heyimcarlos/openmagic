@@ -337,7 +337,7 @@ class ExampleInsurance:
     def provision_verification_authority(
         self, command: ProvisionVerificationAuthority
     ) -> CommandReceipt[ProvisionVerificationAuthorityResult]:
-        return self._dispatcher.execute(
+        return self._dispatcher.dispatch(
             command_type="verification.provision_authority",
             schema_version=1,
             command=command,
@@ -346,7 +346,7 @@ class ExampleInsurance:
     def request_protected_renewal_details(
         self, command: RequestProtectedRenewalDetails
     ) -> CommandReceipt[RequestProtectedRenewalDetailsResult]:
-        return self._dispatcher.execute(
+        return self._dispatcher.dispatch(
             command_type="renewal.read_approved_details",
             schema_version=1,
             command=command,
@@ -355,7 +355,7 @@ class ExampleInsurance:
     def revoke_verification_authority(
         self, command: RevokeVerificationAuthority
     ) -> CommandReceipt[RevokeVerificationAuthorityResult]:
-        return self._dispatcher.execute(
+        return self._dispatcher.dispatch(
             command_type="verification.revoke_authority",
             schema_version=1,
             command=command,
@@ -364,7 +364,7 @@ class ExampleInsurance:
     def submit_verification_code(
         self, command: SubmitVerificationCode
     ) -> CommandReceipt[SubmitVerificationCodeResult]:
-        return self._dispatcher.execute(
+        return self._dispatcher.dispatch(
             command_type="verification.submit_code",
             schema_version=1,
             command=command,
@@ -378,7 +378,7 @@ class ExampleInsurance:
     def approve_renewal_draft(
         self, command: ApproveRenewalDraft
     ) -> CommandReceipt[ApproveRenewalDraftResult]:
-        return self._dispatcher.execute(
+        return self._dispatcher.dispatch(
             command_type="renewal.approve_draft",
             schema_version=1,
             command=command,
@@ -387,7 +387,7 @@ class ExampleInsurance:
     def request_renewal_revision(
         self, command: RequestRenewalRevision
     ) -> CommandReceipt[RequestRenewalRevisionResult]:
-        return self._dispatcher.execute(
+        return self._dispatcher.dispatch(
             command_type="renewal.request_revision",
             schema_version=1,
             command=command,
@@ -396,7 +396,7 @@ class ExampleInsurance:
     def revoke_renewal_authority(
         self, command: RevokeRenewalAuthority
     ) -> CommandReceipt[RevokeRenewalAuthorityResult]:
-        return self._dispatcher.execute(
+        return self._dispatcher.dispatch(
             command_type="renewal.revoke_approval_authority",
             schema_version=1,
             command=command,
@@ -405,7 +405,7 @@ class ExampleInsurance:
     def cancel_renewal_outreach(
         self, command: CancelRenewalOutreach
     ) -> CommandReceipt[CancelRenewalOutreachResult]:
-        return self._dispatcher.execute(
+        return self._dispatcher.dispatch(
             command_type="renewal.cancel_outreach",
             schema_version=1,
             command=command,
@@ -414,7 +414,7 @@ class ExampleInsurance:
     def authorize_email_dispatch(
         self, *, attempt: ClaimedAttempt, worker_id: str
     ) -> CommandReceipt[ExternalEffectPermit]:
-        return self._dispatcher.execute(
+        return self._dispatcher.dispatch(
             command_type="renewal.authorize_email_dispatch",
             schema_version=1,
             command=AuthorizeRenewalEmailDispatch(
@@ -429,7 +429,7 @@ class ExampleInsurance:
         self,
         command: AcceptRenewalEffectObservation,
     ) -> CommandReceipt[WorkflowAttemptResult]:
-        return self._dispatcher.execute(
+        return self._dispatcher.dispatch(
             command_type="renewal.accept_effect_observation",
             schema_version=1,
             command=command,

@@ -15,6 +15,7 @@ from uuid import UUID, uuid4
 from example_insurance.renewals import ExampleInsurance
 from openmagic_playground.renewal_observation import decode_renewal_projection
 
+from openmagic_evals.evidence._definition_correlations import renewal_instance_definition
 from openmagic_evals.evidence.contracts import (
     AgentCorrelations,
     ApplicationCorrelations,
@@ -71,6 +72,7 @@ def record_renewal_case(
                 command_ids=tuple(dict.fromkeys((values.command_id, *additional_command_ids))),
                 workflow_ids=(values.workflow_id,),
                 instance_ids=(instance_id,),
+                instance_definitions=(renewal_instance_definition(instance_id),),
                 step_ids=values.step_ids,
                 attempt_ids=values.attempt_ids,
                 wait_ids=outcomes.approval_wait_ids,
@@ -119,6 +121,7 @@ def record_complete_durable_chain(
             command_ids=chain.command_ids,
             workflow_ids=chain.workflow_ids,
             instance_ids=chain.instance_ids,
+            instance_definitions=chain.instance_definitions,
             step_ids=chain.step_ids,
             attempt_ids=chain.attempt_ids,
             wait_ids=chain.wait_ids,
@@ -148,6 +151,9 @@ def record_complete_durable_chain(
         document={
             "connected": True,
             "relationship_checks": chain.relationship_checks,
+            "instance_definitions": [
+                item.model_dump(mode="json") for item in chain.instance_definitions
+            ],
             "provider_process_relationship": {
                 "process_id": process_id,
                 "provider_request_id": provider_request_id,

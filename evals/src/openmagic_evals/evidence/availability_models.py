@@ -6,7 +6,11 @@ from typing import Literal
 
 from pydantic import model_validator
 
-from openmagic_evals.evidence.core_models import EvidenceModel, require_digest
+from openmagic_evals.evidence.core_models import (
+    EvidenceModel,
+    require_digest,
+    validate_correlated_definitions,
+)
 from openmagic_evals.evidence.deterministic_models import ArtifactCase
 from openmagic_evals.evidence.pins import ReproducibilityPin
 from openmagic_evals.evidence.release_models import SCHEMA_VERSION
@@ -64,6 +68,10 @@ class LiveSmokeArtifact(EvidenceModel):
         )
         if self.cases[0].verdict.status != expected_status:
             raise ValueError("live summary contradicts its case outcome")
+        validate_correlated_definitions(
+            (case.correlations for case in self.cases),
+            self.reproducibility.definition_digests,
+        )
         return self
 
 

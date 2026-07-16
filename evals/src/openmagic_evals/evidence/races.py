@@ -14,6 +14,7 @@ from example_insurance.renewals import (
 from openmagic_runtime.commands import Cause
 from openmagic_runtime.threads import ThreadStore
 
+from openmagic_evals.evidence._definition_correlations import renewal_instance_definition
 from openmagic_evals.evidence.contracts import (
     ApplicationCorrelations,
     Correlations,
@@ -90,6 +91,9 @@ def run_command_receipt_races(
                         command_ids=(command.command_id,),
                         workflow_ids=(command.input.workflow_id,),
                         instance_ids=(receipt.result.instance_id,),
+                        instance_definitions=(
+                            renewal_instance_definition(receipt.result.instance_id),
+                        ),
                     ),
                     process=ProcessCorrelations(process_ids=contenders.process_ids),
                 ),

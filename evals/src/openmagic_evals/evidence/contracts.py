@@ -14,6 +14,7 @@ from openmagic_evals.evidence.agent_models import (
     AgentCorpusPin,
     AgentQualityArtifact,
     AgentQualitySummary,
+    AgentSplitSummary,
     AgentTrialEvidence,
     SanitizedAgentEvent,
     aggregate_agent_trials,
@@ -38,6 +39,7 @@ from openmagic_evals.evidence.core_models import (
     CaseVerdict,
     Correlations,
     DistributionSummary,
+    InstanceDefinitionCorrelation,
     ProcessCorrelations,
     ProviderCorrelations,
     RuntimeCorrelations,
@@ -45,6 +47,7 @@ from openmagic_evals.evidence.core_models import (
     canonical_digest,
     has_correlations,
     merge_correlations,
+    validate_correlated_definitions,
 )
 from openmagic_evals.evidence.deterministic_models import (
     REQUIRED_NEGATIVE_CLAIMS,
@@ -57,6 +60,8 @@ from openmagic_evals.evidence.deterministic_models import (
 )
 from openmagic_evals.evidence.pins import (
     BuildPin,
+    EnvironmentVariablePin,
+    ExecutablePin,
     PostgresDeploymentPin,
     ReproducibilityPin,
     WheelArchivePin,
@@ -126,6 +131,7 @@ __all__ = [
     "AgentQualityArtifact",
     "AgentQualitySummary",
     "AgentScorerContract",
+    "AgentSplitSummary",
     "AgentTrialEvidence",
     "ApplicationCorrelations",
     "Artifact",
@@ -143,8 +149,11 @@ __all__ = [
     "DeterministicScenarioEvidence",
     "DeterministicSummary",
     "DistributionSummary",
+    "EnvironmentVariablePin",
+    "ExecutablePin",
     "ForcedProcessLoss",
     "InstalledSurfaceEvidence",
+    "InstanceDefinitionCorrelation",
     "LiveProviderPin",
     "LiveSmokeArtifact",
     "PlaygroundArtifact",
@@ -182,4 +191,5 @@ __all__ = [
     "merge_correlations",
     "parse_artifact",
     "race_trial_digest",
+    "validate_correlated_definitions",
 ]

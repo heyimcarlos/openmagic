@@ -12,8 +12,7 @@ from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 from openmagic_playground.process_launching import (
-    ProcessLauncher,
-    SubprocessLauncher,
+    ProcessCommand,
     launch_owned_process,
 )
 from openmagic_runtime.processes import OwnedProcess, finish_owned_cleanup
@@ -28,14 +27,19 @@ class LocalEmailProvider:
         working_directory: Path,
         readiness_timeout: float = 10.0,
         shutdown_timeout: float = 5.0,
-        process_launcher: ProcessLauncher | None = None,
+        process_command_override: ProcessCommand | None = None,
     ) -> None:
         if readiness_timeout <= 0 or shutdown_timeout <= 0:
             raise ValueError("Provider process timeouts must be positive")
         self.working_directory = working_directory.resolve()
         self.readiness_timeout = readiness_timeout
         self.shutdown_timeout = shutdown_timeout
-        self._process_launcher = process_launcher or SubprocessLauncher()
+        if (
+            process_command_override is not None
+            and type(process_command_override) is not ProcessCommand
+        ):
+            raise TypeError("Process command override must be immutable ProcessCommand data")
+        self._process_command_override = process_command_override
         self.state_path = self.working_directory / "email-provider.sqlite3"
         self._port = free_port()
         self.url = f"http://127.0.0.1:{self._port}"
@@ -76,7 +80,6 @@ class LocalEmailProvider:
         self._log_handle = (self.working_directory / "email-provider.log").open("ab")
         try:
             acquired = launch_owned_process(
-                self._process_launcher,
                 [
                     str(script),
                     "--host",
@@ -86,6 +89,7 @@ class LocalEmailProvider:
                     "--state-path",
                     str(self.state_path),
                 ],
+                command_override=self._process_command_override,
                 working_directory=self.working_directory,
                 environment={
                     "PATH": os.defpath,

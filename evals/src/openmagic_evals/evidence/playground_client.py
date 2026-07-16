@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-import subprocess
 import sys
 from pathlib import Path
 from typing import TypeVar
 
 from pydantic import BaseModel
+
+from openmagic_evals.evidence._owned_command import capture_owned_command
+from openmagic_evals.evidence.reproducibility import fixed_execution_environment
 
 ResponseT = TypeVar("ResponseT", bound=BaseModel)
 
@@ -26,12 +28,11 @@ def invoke_playground(
     executable = Path(sys.executable).parent / "openmagic-playground"
     if not executable.is_file():
         raise RuntimeError("installed playground entry point is missing")
-    completed = subprocess.run(
-        [str(executable), *arguments],
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=timeout_seconds,
+    completed = capture_owned_command(
+        (str(executable), *arguments),
+        working_directory=Path.cwd(),
+        environment=fixed_execution_environment(),
+        timeout_seconds=timeout_seconds,
     )
     if completed.returncode != 0:
         raise RuntimeError(

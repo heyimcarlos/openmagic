@@ -87,6 +87,22 @@ def test_agent_and_deterministic_workflows_share_runtime_attempt_evidence(
             assert chain.provider_request_ids == (provider_request_id,)
             assert chain.worker_ids == ("trace-email",)
             assert "approval-grant-to-external-effect" in chain.relationship_checks
+            assert {
+                (item.instance_id, item.definition_key, item.definition_version)
+                for item in chain.instance_definitions
+            } == {
+                (
+                    chain.instance_ids[0],
+                    "example_insurance.renewal_outreach",
+                    2,
+                ),
+                (
+                    chain.instance_ids[1],
+                    "example_insurance.verification_delivery",
+                    1,
+                ),
+            }
+            assert "runtime-instance-to-registered-definition" in chain.relationship_checks
             assert (
                 "external-effect-to-attempt-worker-and-provider-request"
                 in chain.relationship_checks

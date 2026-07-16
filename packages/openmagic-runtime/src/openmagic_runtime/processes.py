@@ -6,11 +6,11 @@ import os
 import signal
 import subprocess as subprocess_module
 import time
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import BinaryIO, Protocol
 
 
 class Closeable(Protocol):
@@ -107,6 +107,21 @@ def _is_session_leader(process_id: int) -> bool:
         return False
 
 
+def _process_group_exists(
+    process_group_id: int,
+    *,
+    group_member_enumerator: Callable[[int], tuple[int, ...] | None],
+) -> bool:
+    try:
+        os.killpg(process_group_id, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    members = group_member_enumerator(process_group_id)
+    return True if members is None else bool(members)
+
+
 class OwnedProcess:
     """Own one session leader, its complete process group, and closeable resources."""
 
@@ -118,6 +133,7 @@ class OwnedProcess:
         signal_process: Callable[[signal.Signals], object] | None = None,
         close_process: Callable[[], object] | None = None,
         resources: Iterable[Closeable] = (),
+        group_member_enumerator: Callable[[int], tuple[int, ...] | None] = _live_group_members,
     ) -> None:
         if process_id <= 0:
             raise ValueError("Owned process identity must be positive")
@@ -126,6 +142,7 @@ class OwnedProcess:
         self._signal_process = signal_process
         self._close_process = close_process
         self._resources = tuple(resources)
+        self._group_member_enumerator = group_member_enumerator
 
     @classmethod
     def _subprocess_owner(
@@ -141,11 +158,15 @@ class OwnedProcess:
                 return False
             return process.poll() is not None
 
+        process_resources: list[Closeable] = list(resources)
+        for stream in (process.stdin, process.stdout, process.stderr):
+            if stream is not None and all(stream is not item for item in process_resources):
+                process_resources.append(stream)
         return cls(
             process_id=process.pid,
             wait_for_exit=wait_for_exit,
             signal_process=process.send_signal,
-            resources=resources,
+            resources=process_resources,
         )
 
     @classmethod
@@ -162,14 +183,19 @@ class OwnedProcess:
         return cls._subprocess_owner(process, resources=resources)
 
     @classmethod
-    def acquire_subprocess(
+    def launch_subprocess(
         cls,
-        launch: Callable[[], subprocess_module.Popen[bytes]],
+        command: Sequence[str],
         *,
+        working_directory: Path,
+        environment: Mapping[str, str],
+        stdin: int | BinaryIO | None = subprocess_module.DEVNULL,
+        stdout: int | BinaryIO | None = None,
+        stderr: int | BinaryIO | None = None,
         resources: Iterable[Closeable] = (),
         timeout_seconds: float,
     ) -> tuple[subprocess_module.Popen[bytes], OwnedProcess]:
-        """Launch and own one new session, reaping every partial acquisition."""
+        """Create and own one new session without exposing an unowned launch seam."""
 
         if timeout_seconds <= 0:
             raise ValueError("Process acquisition timeout must be positive")
@@ -177,15 +203,31 @@ class OwnedProcess:
         process: subprocess_module.Popen[bytes] | None = None
         owner: OwnedProcess | None = None
         try:
-            process = launch()
+            process = subprocess_module.Popen(
+                tuple(command),
+                cwd=working_directory,
+                env=dict(environment),
+                stdin=stdin,
+                stdout=stdout,
+                stderr=stderr,
+                start_new_session=True,
+            )
             owner = cls._subprocess_owner(process, resources=owned_resources)
             if process.poll() is None and not _is_session_leader(process.pid):
                 raise ValueError("Owned subprocess must be an observed session leader")
-            return process, owner
         except BaseException as acquisition_error:
             cleanup_errors: list[BaseException] = []
-            if owner is not None:
-                cleanup_errors.extend(owner.reap(timeout_seconds=timeout_seconds).errors)
+            if process is not None:
+                try:
+                    partial_owner = owner or cls._subprocess_owner(
+                        process,
+                        resources=owned_resources,
+                    )
+                    cleanup_errors.extend(
+                        partial_owner.reap(timeout_seconds=timeout_seconds).errors
+                    )
+                except BaseException as error:
+                    cleanup_errors.append(error)
             else:
                 for resource in owned_resources:
                     try:
@@ -198,6 +240,9 @@ class OwnedProcess:
                     [acquisition_error, *cleanup_errors],
                 ) from acquisition_error
             raise
+        if process is None or owner is None:
+            raise AssertionError("subprocess acquisition omitted its owned process")
+        return process, owner
 
     @classmethod
     def _multiprocessing_owner(
@@ -205,6 +250,7 @@ class OwnedProcess:
         process: _MultiprocessingProcess,
         *,
         resources: Iterable[Closeable] = (),
+        group_member_enumerator: Callable[[int], tuple[int, ...] | None] = _live_group_members,
     ) -> OwnedProcess:
         process_id = getattr(process, "pid", None)
         if not isinstance(process_id, int):
@@ -222,6 +268,7 @@ class OwnedProcess:
             ),
             close_process=process.close,
             resources=resources,
+            group_member_enumerator=group_member_enumerator,
         )
 
     @classmethod
@@ -245,17 +292,25 @@ class OwnedProcess:
         *,
         resources: Iterable[Closeable] = (),
         timeout_seconds: float,
+        group_member_enumerator: Callable[[int], tuple[int, ...] | None] = _live_group_members,
     ) -> ProcessCleanup:
         """Clean a partially acquired child without assuming session ownership."""
         if timeout_seconds <= 0:
             raise ValueError("Process cleanup timeout must be positive")
         owned_resources = tuple(resources)
         process_id = getattr(process, "pid", None)
-        group_members = _live_group_members(process_id) if isinstance(process_id, int) else None
-        if isinstance(process_id, int) and (_is_session_leader(process_id) or bool(group_members)):
-            return cls._multiprocessing_owner(process, resources=owned_resources).reap(
-                timeout_seconds=timeout_seconds
+        if isinstance(process_id, int) and (
+            _is_session_leader(process_id)
+            or _process_group_exists(
+                process_id,
+                group_member_enumerator=group_member_enumerator,
             )
+        ):
+            return cls._multiprocessing_owner(
+                process,
+                resources=owned_resources,
+                group_member_enumerator=group_member_enumerator,
+            ).reap(timeout_seconds=timeout_seconds)
 
         errors: list[BaseException] = []
         leader_exited = not isinstance(process_id, int)
@@ -312,18 +367,22 @@ class OwnedProcess:
             raise ValueError("Process cleanup timeout must be positive")
         errors: list[BaseException] = []
 
-        def group_exists() -> bool:
-            members = _live_group_members(self.process_id)
-            if members is not None:
-                return bool(members)
+        def enumerate_group_members(process_group_id: int) -> tuple[int, ...] | None:
             try:
-                os.killpg(self.process_id, 0)
-            except ProcessLookupError:
-                return False
+                return self._group_member_enumerator(process_group_id)
+            except BaseException as error:
+                errors.append(error)
+                return None
+
+        def group_exists() -> bool:
+            try:
+                return _process_group_exists(
+                    self.process_id,
+                    group_member_enumerator=enumerate_group_members,
+                )
             except BaseException as error:
                 errors.append(error)
                 return True
-            return True
 
         def signal_group(sig: signal.Signals) -> None:
             try:
@@ -344,15 +403,8 @@ class OwnedProcess:
         try:
             owned_group_observed = group_exists()
             if owned_group_observed:
-                signal_group(signal.SIGKILL if forced_loss else signal.SIGTERM)
-                disappeared = wait_for_group()
-                if not disappeared and not forced_loss:
-                    signal_group(signal.SIGKILL)
-                    disappeared = wait_for_group()
-                if not disappeared:
-                    errors.append(
-                        RuntimeError(f"owned process group {self.process_id} survived cleanup")
-                    )
+                initial_signal = signal.SIGKILL if forced_loss else signal.SIGTERM
+                signal_group(initial_signal)
             elif self._signal_process is not None:
                 try:
                     self._signal_process(signal.SIGKILL if forced_loss else signal.SIGTERM)
@@ -365,7 +417,21 @@ class OwnedProcess:
             except BaseException as error:
                 errors.append(error)
                 leader_exited = False
-            if not leader_exited and not forced_loss and not owned_group_observed:
+            if owned_group_observed:
+                disappeared = wait_for_group()
+                if not disappeared and not forced_loss:
+                    signal_group(signal.SIGKILL)
+                    if not leader_exited:
+                        try:
+                            leader_exited = self._wait_for_exit(timeout_seconds)
+                        except BaseException as error:
+                            errors.append(error)
+                    disappeared = wait_for_group()
+                if not disappeared:
+                    errors.append(
+                        RuntimeError(f"owned process group {self.process_id} survived cleanup")
+                    )
+            elif not leader_exited and not forced_loss:
                 if self._signal_process is not None:
                     try:
                         self._signal_process(signal.SIGKILL)
@@ -382,7 +448,7 @@ class OwnedProcess:
                 errors.append(
                     RuntimeError(f"process-group leader {self.process_id} survived cleanup")
                 )
-            members = _live_group_members(self.process_id)
+            members = enumerate_group_members(self.process_id)
             if members:
                 errors.append(
                     RuntimeError(

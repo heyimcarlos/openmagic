@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from uuid import UUID, uuid5
 
 from example_insurance.migrations import apply_migrations
+from example_insurance.renewal_definition import RENEWAL_DEFINITION
 from example_insurance.renewals import (
     ApproveRenewalDraft,
     ApproveRenewalDraftInput,
@@ -28,6 +29,7 @@ from openmagic_playground.responses import (
     PlaygroundAgentCorrelations,
     PlaygroundApplicationCorrelations,
     PlaygroundCorrelations,
+    PlaygroundInstanceDefinitionCorrelation,
     PlaygroundProcessCorrelations,
     PlaygroundProviderCorrelations,
     PlaygroundRuntimeCorrelations,
@@ -181,6 +183,13 @@ def observe_safe_renewal(fixture: RenewalFixture) -> SafeRenewalPhase:
                 command_ids=(values.command_id,),
                 workflow_ids=(values.workflow_id,),
                 instance_ids=(values.instance_id,),
+                instance_definitions=(
+                    PlaygroundInstanceDefinitionCorrelation(
+                        instance_id=values.instance_id,
+                        definition_key=RENEWAL_DEFINITION.identity.key,
+                        definition_version=RENEWAL_DEFINITION.identity.version,
+                    ),
+                ),
                 step_ids=values.step_ids,
                 attempt_ids=values.attempt_ids,
                 wait_ids=outcomes.approval_wait_ids,
@@ -217,6 +226,13 @@ def projection_correlations(
             command_ids=(values.command_id,),
             workflow_ids=(values.workflow_id,),
             instance_ids=(values.instance_id,),
+            instance_definitions=(
+                PlaygroundInstanceDefinitionCorrelation(
+                    instance_id=values.instance_id,
+                    definition_key=RENEWAL_DEFINITION.identity.key,
+                    definition_version=RENEWAL_DEFINITION.identity.version,
+                ),
+            ),
             step_ids=values.step_ids,
             attempt_ids=values.attempt_ids,
             wait_ids=outcomes.approval_wait_ids,

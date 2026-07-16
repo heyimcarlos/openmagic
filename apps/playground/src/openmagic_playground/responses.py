@@ -20,6 +20,12 @@ def _unique(values: Iterable[CorrelationValue]) -> tuple[CorrelationValue, ...]:
     return tuple(dict.fromkeys(values))
 
 
+class PlaygroundInstanceDefinitionCorrelation(_ResponseModel):
+    instance_id: UUID
+    definition_key: str = Field(min_length=1)
+    definition_version: PositiveInt
+
+
 class PlaygroundRuntimeCorrelations(_ResponseModel):
     command_ids: tuple[UUID, ...] = ()
     workflow_ids: tuple[UUID, ...] = Field(min_length=1)
@@ -29,6 +35,18 @@ class PlaygroundRuntimeCorrelations(_ResponseModel):
     wait_ids: tuple[UUID, ...] = ()
     signal_ids: tuple[UUID, ...] = ()
     trace_event_ids: tuple[UUID, ...] = ()
+    instance_definitions: tuple[PlaygroundInstanceDefinitionCorrelation, ...] = ()
+
+    @model_validator(mode="after")
+    def retain_instance_definitions(self) -> PlaygroundRuntimeCorrelations:
+        mapped_ids = tuple(item.instance_id for item in self.instance_definitions)
+        if len(self.instance_ids) != len(set(self.instance_ids)):
+            raise ValueError("playground Instance identities must be unique")
+        if len(mapped_ids) != len(set(mapped_ids)):
+            raise ValueError("a playground Instance can retain only one Definition identity")
+        if set(mapped_ids) != set(self.instance_ids):
+            raise ValueError("every playground Instance must retain its Definition identity")
+        return self
 
 
 class PlaygroundApplicationCorrelations(_ResponseModel):
@@ -83,6 +101,9 @@ class PlaygroundCorrelations(_ResponseModel):
                 signal_ids=_unique(value for item in items for value in item.runtime.signal_ids),
                 trace_event_ids=_unique(
                     value for item in items for value in item.runtime.trace_event_ids
+                ),
+                instance_definitions=_unique(
+                    value for item in items for value in item.runtime.instance_definitions
                 ),
             ),
             application=PlaygroundApplicationCorrelations(
@@ -236,6 +257,7 @@ __all__ = [
     "PlaygroundAgentCorrelations",
     "PlaygroundApplicationCorrelations",
     "PlaygroundCorrelations",
+    "PlaygroundInstanceDefinitionCorrelation",
     "PlaygroundProcessCorrelations",
     "PlaygroundProviderCorrelations",
     "PlaygroundRuntimeCorrelations",

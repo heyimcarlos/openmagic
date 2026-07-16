@@ -8,10 +8,8 @@ from datetime import date
 from typing import Any, Literal, cast
 from uuid import UUID
 
-import psycopg
-from psycopg.types.json import Jsonb
-
 from openmagic_runtime._canonical import canonical_digest, canonical_value
+from openmagic_runtime._persistence.definition_records import register_definition
 
 ValueType = Literal["string", "integer", "uuid", "date"]
 
@@ -320,26 +318,15 @@ class DefinitionCatalog:
         validate_definition(definition)
         manifest = definition_manifest(definition)
         digest = canonical_digest(manifest)
-        with psycopg.connect(self._database_url) as connection, connection.transaction():
-            inserted = connection.execute(
-                "INSERT INTO openmagic_runtime.workflow_definitions "
-                "(definition_key, definition_version, manifest, manifest_digest) "
-                "VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING RETURNING manifest_digest",
-                (
-                    definition.identity.key,
-                    definition.identity.version,
-                    Jsonb(manifest),
-                    digest,
-                ),
-            ).fetchone()
-            if inserted is None:
-                existing = connection.execute(
-                    "SELECT manifest_digest FROM openmagic_runtime.workflow_definitions "
-                    "WHERE definition_key = %s AND definition_version = %s FOR UPDATE",
-                    (definition.identity.key, definition.identity.version),
-                ).fetchone()
-                if existing is None or existing[0] != digest:
-                    raise DefinitionConflict("Definition identity has different registered content")
+        stored_digest = register_definition(
+            self._database_url,
+            definition_key=definition.identity.key,
+            definition_version=definition.identity.version,
+            manifest=manifest,
+            manifest_digest=digest,
+        )
+        if stored_digest != digest:
+            raise DefinitionConflict("Definition identity has different registered content")
         return digest
 
 

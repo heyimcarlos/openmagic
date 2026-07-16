@@ -5,14 +5,16 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import Literal, TypeVar
 from uuid import UUID
 
+from openmagic_runtime.kernel.definitions import DefinitionIdentity
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
 CorrelationValue = TypeVar("CorrelationValue")
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}")
+_STABLE_DEFINITION_KEY = re.compile(r"^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$")
 
 
 class EvidenceModel(BaseModel):
@@ -40,6 +42,36 @@ class SanitizedObservation(EvidenceModel):
         return self
 
 
+class InstanceDefinitionCorrelation(EvidenceModel):
+    """One durable Instance pinned to its exact registered Definition identity."""
+
+    instance_id: UUID
+    definition_key: str = Field(min_length=1)
+    definition_version: int = Field(gt=0)
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> InstanceDefinitionCorrelation:
+        if _STABLE_DEFINITION_KEY.fullmatch(self.definition_key) is None:
+            raise ValueError("Definition correlation key must use the stable key grammar")
+        return self
+
+    @classmethod
+    def from_identity(
+        cls,
+        instance_id: UUID,
+        identity: DefinitionIdentity,
+    ) -> InstanceDefinitionCorrelation:
+        return cls(
+            instance_id=instance_id,
+            definition_key=identity.key,
+            definition_version=identity.version,
+        )
+
+    @property
+    def digest_key(self) -> str:
+        return f"{self.definition_key}:{self.definition_version}"
+
+
 class RuntimeCorrelations(EvidenceModel):
     command_ids: tuple[UUID, ...] = ()
     workflow_ids: tuple[UUID, ...] = ()
@@ -49,6 +81,34 @@ class RuntimeCorrelations(EvidenceModel):
     wait_ids: tuple[UUID, ...] = ()
     signal_ids: tuple[UUID, ...] = ()
     trace_event_ids: tuple[UUID, ...] = ()
+    instance_definitions: tuple[InstanceDefinitionCorrelation, ...] = ()
+
+    @model_validator(mode="after")
+    def validate_instance_definitions(self) -> RuntimeCorrelations:
+        mapped_ids = tuple(item.instance_id for item in self.instance_definitions)
+        if len(self.instance_ids) != len(set(self.instance_ids)):
+            raise ValueError("runtime Instance identities must be unique")
+        if len(mapped_ids) != len(set(mapped_ids)):
+            raise ValueError("an Instance can correlate to only one Definition identity")
+        if set(mapped_ids) != set(self.instance_ids):
+            raise ValueError("every observed Instance must retain its exact Definition identity")
+        return self
+
+
+def validate_correlated_definitions(
+    correlations: Iterable[Correlations],
+    definition_digests: Mapping[str, str],
+) -> None:
+    missing = sorted(
+        {
+            item.digest_key
+            for correlation in correlations
+            for item in correlation.runtime.instance_definitions
+            if item.digest_key not in definition_digests
+        }
+    )
+    if missing:
+        raise ValueError(f"Instance correlations reference unpinned Definitions: {missing}")
 
 
 class ApplicationCorrelations(EvidenceModel):
@@ -115,6 +175,9 @@ def merge_correlations(values: Iterable[Correlations]) -> Correlations:
             signal_ids=unique(value for item in items for value in item.runtime.signal_ids),
             trace_event_ids=unique(
                 value for item in items for value in item.runtime.trace_event_ids
+            ),
+            instance_definitions=unique(
+                value for item in items for value in item.runtime.instance_definitions
             ),
         ),
         application=ApplicationCorrelations(
@@ -211,6 +274,7 @@ __all__ = [
     "Correlations",
     "DistributionSummary",
     "EvidenceModel",
+    "InstanceDefinitionCorrelation",
     "ProcessCorrelations",
     "ProviderCorrelations",
     "RuntimeCorrelations",
@@ -219,4 +283,5 @@ __all__ = [
     "has_correlations",
     "merge_correlations",
     "require_digest",
+    "validate_correlated_definitions",
 ]

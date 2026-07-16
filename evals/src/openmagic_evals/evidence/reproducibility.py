@@ -6,7 +6,6 @@ import base64
 import csv
 import hashlib
 import io
-import subprocess
 import zipfile
 from datetime import datetime
 from importlib.metadata import distribution, version
@@ -20,8 +19,23 @@ from example_insurance.verification_definition import VERIFICATION_DEFINITION
 from openmagic_runtime.evidence import content_fingerprint
 from pydantic import JsonValue, TypeAdapter
 
-from openmagic_evals.evidence.contracts import BuildPin, ReproducibilityPin, WheelArchivePin
-from openmagic_evals.evidence.pins import PostgresDeploymentPin
+from openmagic_evals.evidence._execution_config import (
+    fixed_executable_path,
+    fixed_execution_environment,
+)
+from openmagic_evals.evidence._owned_command import capture_owned_command
+from openmagic_evals.evidence.contracts import (
+    BuildPin,
+    ReproducibilityPin,
+    WheelArchivePin,
+    canonical_digest,
+)
+from openmagic_evals.evidence.pins import (
+    REQUIRED_EXECUTABLES,
+    EnvironmentVariablePin,
+    ExecutablePin,
+    PostgresDeploymentPin,
+)
 from openmagic_evals.evidence.race_transitions import transition_race_definitions
 from openmagic_evals.harness._postgres import POSTGRES_IMAGE
 
@@ -52,10 +66,33 @@ def sha256(value: bytes) -> str:
     return "sha256:" + hashlib.sha256(value).hexdigest()
 
 
+def _execution_pins() -> dict[str, ExecutablePin]:
+    return {
+        name: ExecutablePin(
+            path=str(path),
+            content_digest=sha256(path.read_bytes()),
+        )
+        for name in sorted(REQUIRED_EXECUTABLES)
+        for path in (fixed_executable_path(name),)
+    }
+
+
+def _environment_pins() -> dict[str, EnvironmentVariablePin]:
+    return {
+        name: EnvironmentVariablePin(value=value, digest=canonical_digest(value))
+        for name, value in fixed_execution_environment().items()
+    }
+
+
 def _git(root: Path, *arguments: str) -> str:
-    completed = subprocess.run(
-        ["git", *arguments], cwd=root, check=True, capture_output=True, text=True
+    completed = capture_owned_command(
+        (str(fixed_executable_path("git")), *arguments),
+        working_directory=root,
+        environment=fixed_execution_environment(),
+        timeout_seconds=30,
     )
+    if completed.returncode != 0:
+        raise RuntimeError(f"pinned Git command failed: {completed.stderr.strip()}")
     return completed.stdout.strip()
 
 
@@ -224,22 +261,20 @@ def reproducibility_pin(
     postgres_provenance: Literal["required", "not_applicable"] = "required",
 ) -> ReproducibilityPin:
     definitions = {
-        "example_insurance.renewal_outreach:2": "sha256:" + content_fingerprint(RENEWAL_DEFINITION),
-        "example_insurance.verification_delivery:1": "sha256:"
-        + content_fingerprint(VERIFICATION_DEFINITION),
+        f"{definition.identity.key}:{definition.identity.version}": "sha256:"
+        + content_fingerprint(definition)
+        for definition in (
+            RENEWAL_DEFINITION,
+            VERIFICATION_DEFINITION,
+            *transition_race_definitions(),
+        )
     }
-    definitions.update(
-        {
-            f"{definition.identity.key}:{definition.identity.version}": "sha256:"
-            + content_fingerprint(definition)
-            for definition in transition_race_definitions()
-        }
-    )
     return ReproducibilityPin(
         build=build_pin(root),
         suite_version="issue-71.v1",
         command=command,
-        environment_allowlist=("PATH", "PYTHONNOUSERSITE"),
+        environment=_environment_pins(),
+        executables=_execution_pins(),
         started_at=started_at,
         finished_at=finished_at,
         timeout_seconds=timeout_seconds,
@@ -251,4 +286,10 @@ def reproducibility_pin(
     )
 
 
-__all__ = ["build_pin", "reproducibility_pin", "sha256"]
+__all__ = [
+    "build_pin",
+    "fixed_executable_path",
+    "fixed_execution_environment",
+    "reproducibility_pin",
+    "sha256",
+]

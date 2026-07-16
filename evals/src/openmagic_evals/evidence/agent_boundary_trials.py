@@ -37,6 +37,7 @@ from openmagic_runtime.execution import (
 from openmagic_runtime.kernel.work import ClaimedAttempt
 from openmagic_runtime.threads import CreateThread, ThreadStore
 
+from openmagic_evals.evidence._definition_correlations import renewal_instance_definition
 from openmagic_evals.evidence.agent_cases import (
     BOUNDARY_AGENT_KEY,
     BoundaryAgentCase,
@@ -222,7 +223,7 @@ def _execute_boundary(
     observed_boundary: _ObservedBoundary = "unexpected_error"
     failure_reason: AgentExecutionFailureReason | None = None
     try:
-        executor.execute(
+        executor.run(
             AttemptExecution(
                 instance_id=setup.attempt.instance_id,
                 step_id=setup.attempt.step_id,
@@ -377,6 +378,9 @@ def _assemble_boundary_trial(
                 command_ids=(setup.command.command_id,),
                 workflow_ids=(setup.command.input.workflow_id,),
                 instance_ids=(setup.receipt.result.instance_id,),
+                instance_definitions=(
+                    renewal_instance_definition(setup.receipt.result.instance_id),
+                ),
                 step_ids=(setup.attempt.step_id,),
                 attempt_ids=(setup.attempt.attempt_id,),
             ),

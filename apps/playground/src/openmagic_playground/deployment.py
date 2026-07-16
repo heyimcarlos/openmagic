@@ -24,8 +24,7 @@ from openmagic_runtime.processes import OwnedProcess, ProcessCleanup, finish_own
 from testcontainers.postgres import PostgresContainer
 
 from openmagic_playground.process_launching import (
-    ProcessLauncher,
-    SubprocessLauncher,
+    ProcessCommand,
     launch_owned_process,
 )
 from openmagic_playground.reset import mark_synthetic_deployment, reset_synthetic_deployment
@@ -88,7 +87,7 @@ class PlaygroundDeployment:
         email_provider_url: str | None = None,
         verification_code_secret: str | None = None,
         role_capacities: Mapping[ProcessRole, int] | None = None,
-        process_launcher: ProcessLauncher | None = None,
+        process_command_overrides: dict[ProcessRole, ProcessCommand] | None = None,
     ) -> None:
         self.working_directory = working_directory.resolve()
         self.readiness_timeout = readiness_timeout
@@ -109,7 +108,15 @@ class PlaygroundDeployment:
         if any(type(value) is not int or value <= 0 for value in capacities.values()):
             raise ValueError("Initial process-pool capacities must be positive integers")
         self.role_capacities = dict(capacities)
-        self._process_launcher = process_launcher or SubprocessLauncher()
+        if process_command_overrides is not None and type(process_command_overrides) is not dict:
+            raise TypeError("Process command overrides must be a concrete dictionary")
+        overrides = {} if process_command_overrides is None else process_command_overrides
+        if any(
+            type(role) is not str or role not in _SCRIPTS or type(command) is not ProcessCommand
+            for role, command in overrides.items()
+        ):
+            raise TypeError("Process command overrides must contain known roles and commands")
+        self._process_command_overrides = dict(overrides)
         self.database_url = ""
         self.database_name = ""
         self.processes: tuple[ManagedProcess, ...] = ()
@@ -312,7 +319,6 @@ class PlaygroundDeployment:
             )
         log_handle = (self.working_directory / f"{role}-{uuid4().hex}.log").open("wb")
         acquired = launch_owned_process(
-            self._process_launcher,
             [
                 str(script),
                 "--database-url",
@@ -323,6 +329,7 @@ class PlaygroundDeployment:
                 str(port),
                 *arguments,
             ],
+            command_override=self._process_command_overrides.get(role),
             working_directory=self.working_directory,
             environment={
                 "PATH": os.defpath,

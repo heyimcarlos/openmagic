@@ -10,7 +10,7 @@ from multiprocessing import get_context
 from pathlib import Path
 
 import pytest
-from openmagic_runtime.processes import OwnedProcess
+from openmagic_runtime.processes import OwnedProcess, owned_cleanup_scope
 
 
 def _ignore_terminate_without_session() -> None:
@@ -113,3 +113,103 @@ def test_partial_acquisition_reaps_descendant_after_session_leader_exits(
     assert parent.closed
     assert child.closed
     assert log.closed
+
+
+def test_partial_acquisition_reaps_descendant_without_group_member_enumeration(
+    tmp_path: Path,
+) -> None:
+    context = get_context("spawn")
+    parent, child = context.Pipe(duplex=False)
+    log = io.BytesIO()
+    pid_file = tmp_path / "portable-descendant.pid"
+    process = context.Process(target=_exit_with_term_resistant_descendant, args=(pid_file,))
+    process.start()
+    deadline = time.monotonic() + 3
+    while not pid_file.is_file() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert pid_file.is_file()
+    descendant_id = int(pid_file.read_text(encoding="utf-8"))
+    process.join(timeout=3)
+    assert not process.is_alive()
+    assert _process_is_live(descendant_id)
+
+    cleanup = OwnedProcess.cleanup_multiprocessing_start(
+        process,
+        resources=(parent, child, log),
+        timeout_seconds=0.1,
+        group_member_enumerator=lambda _process_group_id: None,
+    )
+
+    assert cleanup.reaped
+    assert cleanup.errors == ()
+    assert not _process_is_live(descendant_id)
+    assert parent.closed
+    assert child.closed
+    assert log.closed
+
+
+def test_owned_subprocess_launch_reaps_spawned_tree_when_caller_fails(
+    tmp_path: Path,
+) -> None:
+    pid_file = tmp_path / "owned-tree.pids"
+    output = (tmp_path / "owned-tree.log").open("wb")
+    process, owner = OwnedProcess.launch_subprocess(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import os,pathlib,signal,subprocess,sys,time;"
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN);"
+                "child=subprocess.Popen([sys.executable,'-c',"
+                "'import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                "time.sleep(30)']);"
+                f"pathlib.Path({str(pid_file)!r}).write_text(f'{{os.getpid()}} {{child.pid}}');"
+                "time.sleep(30)"
+            ),
+        ],
+        working_directory=tmp_path,
+        environment={"PATH": os.defpath, "PYTHONNOUSERSITE": "1"},
+        stdout=output,
+        stderr=subprocess.STDOUT,
+        resources=(output,),
+        timeout_seconds=0.1,
+    )
+    deadline = time.monotonic() + 3
+    while not pid_file.is_file() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert pid_file.is_file()
+    leader_id, descendant_id = (
+        int(value) for value in pid_file.read_text(encoding="utf-8").split()
+    )
+    assert leader_id == process.pid
+    assert _process_is_live(descendant_id)
+
+    def cleanup() -> None:
+        owner.reap(timeout_seconds=0.1).raise_errors("fixture cleanup failed")
+
+    with (
+        pytest.raises(RuntimeError, match="failure after spawn"),
+        owned_cleanup_scope(cleanup, message="spawn and cleanup failed"),
+    ):
+        raise RuntimeError("failure after spawn")
+
+    assert not _process_is_live(leader_id)
+    assert not _process_is_live(descendant_id)
+    assert output.closed
+
+
+def test_owned_subprocess_launch_failure_closes_caller_resources(tmp_path: Path) -> None:
+    output = (tmp_path / "failed-launch.log").open("wb")
+
+    with pytest.raises(FileNotFoundError):
+        OwnedProcess.launch_subprocess(
+            [str(tmp_path / "missing-executable")],
+            working_directory=tmp_path,
+            environment={"PATH": os.defpath, "PYTHONNOUSERSITE": "1"},
+            stdout=output,
+            stderr=subprocess.STDOUT,
+            resources=(output,),
+            timeout_seconds=0.1,
+        )
+
+    assert output.closed

@@ -12,6 +12,7 @@ from openmagic_evals.evidence.core_models import (
     EvidenceModel,
     canonical_digest,
     merge_correlations,
+    validate_correlated_definitions,
 )
 from openmagic_evals.evidence.pins import ReproducibilityPin
 from openmagic_evals.evidence.race_models import RaceCase
@@ -87,6 +88,10 @@ class DeterministicArtifact(EvidenceModel):
     @model_validator(mode="after")
     def validate_release(self) -> DeterministicArtifact:
         validate_deterministic_summary(self.cases, self.summary, self.negative_claims)
+        validate_correlated_definitions(
+            (case.correlations for case in self.cases),
+            self.reproducibility.definition_digests,
+        )
         return self
 
 

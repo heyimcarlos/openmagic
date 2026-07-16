@@ -916,6 +916,13 @@ def test_start_route_replay_returns_the_same_complete_occurrence_batch() -> None
                 runtime={
                     "command_ids": (command_id,),
                     "instance_ids": (first.instance_id,),
+                    "instance_definitions": (
+                        {
+                            "instance_id": first.instance_id,
+                            "definition_key": "example_insurance.renewal_outreach",
+                            "definition_version": 2,
+                        },
+                    ),
                     "step_ids": tuple(step.step_id for step in snapshot.steps),
                     "trace_event_ids": trace_event_ids,
                 }

@@ -355,6 +355,13 @@ def test_verification_code_is_single_use_replay_safe_and_serialized() -> None:
                     "command_ids": (protected.command_id, commands[winner_index].command_id),
                     "workflow_ids": (renewal.input.workflow_id, verification.workflow_id),
                     "instance_ids": (verification.instance_id,),
+                    "instance_definitions": (
+                        {
+                            "instance_id": verification.instance_id,
+                            "definition_key": "example_insurance.verification_delivery",
+                            "definition_version": 1,
+                        },
+                    ),
                     "step_ids": tuple(step_id for step_id, _ in verification.step_attempt_ids),
                     "attempt_ids": tuple(
                         attempt_id for _, attempt_id in verification.step_attempt_ids

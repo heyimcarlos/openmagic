@@ -66,6 +66,7 @@ def _observation(report: ProcessEvidence) -> ProcessObservation:
         ),
         lost_attempt=AttemptAuthorityEvidence(
             instance_id=report.lost_attempt.instance_id,
+            instance_definition=report.lost_attempt.instance_definition,
             step_id=report.lost_attempt.step_id,
             attempt_id=report.lost_attempt.attempt_id,
             worker_id=report.lost_attempt.worker_id,
@@ -128,6 +129,7 @@ def _correlations(report: ProcessEvidence) -> Correlations:
             Correlations(
                 runtime=RuntimeCorrelations(
                     instance_ids=(report.lost_attempt.instance_id,),
+                    instance_definitions=(report.lost_attempt.instance_definition,),
                     step_ids=(report.lost_attempt.step_id,),
                     attempt_ids=(report.lost_attempt.attempt_id,),
                 ),

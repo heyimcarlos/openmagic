@@ -421,8 +421,8 @@ EXPECTED_PRODUCTION_EDGES = (
 PUBLIC_SURFACE_DIGESTS = {
     "example-insurance": "sha256:d9bb55a4f39f49f8d85a1f46535ac78c86b014d1e063678f82afaa75f8339a4c",
     "openmagic-api": "sha256:b47b899d81cf0831f3fa31e984c8e342e9fa8a32adbec983739a29929d131ed3",
-    "openmagic-evals": "sha256:90e8db96a04d120d30ca0e0ce4529870771b844d79fa6ab554ec2c8366cd4d84",
-    "openmagic-playground": "sha256:ab943ef2dfaa3e0cc8177773283c90965655d5250c89de415020acbb81b15a0d",
+    "openmagic-evals": "sha256:bfeb4918ed2657f62c7f1522c41d6194122b72cc6dfa340b430dadb59eba688f",
+    "openmagic-playground": "sha256:6cc3a703f683d32707222b87865d3261bcc7759c865a572e40b342a31e54ec09",
     "openmagic-runtime": "sha256:9c9c7890845c465d87a3c7bf6d7f5882003365072ecf7f611e84b69ca901d7db",
 }
 

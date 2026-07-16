@@ -33,8 +33,8 @@ from openmagic_runtime.kernel._transitions import (
     ResolveDeferredStepReceipt,
     deferred_action,
 )
+from openmagic_runtime.kernel._work_contracts import DispositionRequired
 from openmagic_runtime.kernel.definitions import StepTemplate, validate_payload
-from openmagic_runtime.kernel.work import DispositionRequired
 
 
 def defer_step(

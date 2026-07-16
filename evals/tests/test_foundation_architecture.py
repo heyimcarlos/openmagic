@@ -114,6 +114,24 @@ def test_public_persistence_policy_rejects_record_adapter_module(tmp_path: Path)
         "connection.execute(statement)",
         "connection.cursor()",
         "sql.SQL(template)",
+        'db.execute("SELECT 1")',
+        'tx.execute("SELECT 1")',
+        'session.execute("SELECT 1")',
+        'self.db.execute("SELECT 1")',
+        'factory().connection().execute("SELECT 1")',
+        'statement = "SELECT 1"; db.execute(statement)',
+        "statement = sql.SQL(template); self.session.execute(statement)",
+        'q = "SELECT 1"; db.execute(q)',
+        'run_sql = db.execute; run_sql("SELECT 1")',
+        'q = "SELECT 1"; run_sql = self.db.execute; run_sql(q)',
+        'db.executemany("INSERT INTO target VALUES (%s)", rows)',
+        'q = f"SELECT {column} FROM target"; factory().connection().execute(q)',
+        "payload = make_statement(); db.execute(payload)",
+        'payload = "SEL" + "ECT 1"; db.execute(payload)',
+        'source = "SELECT 1"; payload = source; self.db.execute(payload)',
+        'runner = getattr(db, "execute"); runner(make_statement())',
+        'getattr(db, "execute")("SELECT 1")',
+        "q = sql.SQL(template).format(sql.Identifier(name)); db.execute(q)",
     ],
 )
 def test_sql_ownership_policy_rejects_public_application_sql(tmp_path: Path, source: str) -> None:
@@ -126,6 +144,45 @@ def test_sql_ownership_policy_rejects_public_application_sql(tmp_path: Path, sou
     assert role_sql_ownership_violations(role, (leaked,)) == (
         "example-insurance contains SQL outside approved persistence owner renewal_policy.py:1",
     )
+
+
+def test_runtime_declares_private_sql_owners_and_rejects_public_sql(tmp_path: Path) -> None:
+    role = next(role for role in PACKAGE_ROLES if role.distribution == "openmagic-runtime")
+    assert role.sql_owner_roots
+
+    package = tmp_path / "openmagic_runtime"
+    package.mkdir()
+    leaked = package / "control.py"
+    leaked.write_text('self.db.execute("LOCK TABLE authority")\n', encoding="utf-8")
+
+    assert role_sql_ownership_violations(role, (leaked,)) == (
+        "openmagic-runtime contains SQL outside approved persistence owner control.py:1",
+    )
+
+
+def test_runtime_transaction_owners_do_not_import_public_control_facades() -> None:
+    runtime = ROOT / "packages/openmagic-runtime/src/openmagic_runtime"
+    owners = (
+        runtime / "_persistence/delivery_control.py",
+        runtime / "kernel/_persistence/control_records.py",
+        runtime / "kernel/_persistence/work_records.py",
+    )
+
+    imports = python_imports(owners)
+
+    assert "openmagic_runtime.delivery" not in imports
+    assert "openmagic_runtime.kernel.control" not in imports
+    assert "openmagic_runtime.kernel.work" not in imports
+
+
+def test_sql_ownership_policy_allows_non_sql_execute_protocol(tmp_path: Path) -> None:
+    package = tmp_path / "openmagic_runtime"
+    package.mkdir()
+    execution = package / "execution.py"
+    execution.write_text("executor.run(execution, cancellation)\n", encoding="utf-8")
+    role = next(role for role in PACKAGE_ROLES if role.distribution == "openmagic-runtime")
+
+    assert role_sql_ownership_violations(role, (execution,)) == ()
 
 
 def test_public_renewal_policy_does_not_import_private_persistence_records() -> None:

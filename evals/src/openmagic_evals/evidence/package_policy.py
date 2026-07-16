@@ -30,6 +30,22 @@ PACKAGE_ROLES: tuple[PackageRole, ...] = (
         source=Path("packages/openmagic-runtime/src/openmagic_runtime"),
         allowed_internal=frozenset(),
         declared_internal_dependencies=frozenset(),
+        sql_owner_roots=(
+            Path("_persistence"),
+            Path("_delivery_records.py"),
+            Path("kernel/_attempt_guard.py"),
+            Path("kernel/_closure.py"),
+            Path("kernel/_control_support.py"),
+            Path("kernel/_deferred.py"),
+            Path("kernel/_evidence_records.py"),
+            Path("kernel/_inspection_records.py"),
+            Path("kernel/_records.py"),
+            Path("kernel/_signals.py"),
+            Path("kernel/_step_mutations.py"),
+            Path("kernel/_trace.py"),
+            Path("kernel/_transition_records.py"),
+            Path("kernel/_persistence"),
+        ),
     ),
     PackageRole(
         distribution="example-insurance",
@@ -185,8 +201,9 @@ def role_sql_ownership_violations(role: PackageRole, paths: tuple[Path, ...]) ->
         ):
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        sql_callable_names = _sql_callable_names(tree)
         for node in ast.walk(tree):
-            if isinstance(node, ast.Call) and _is_sql_boundary_call(node):
+            if isinstance(node, ast.Call) and _is_sql_boundary_call(node, sql_callable_names):
                 violations.add(
                     f"{role.distribution} contains SQL outside approved persistence owner "
                     f"{relative.as_posix()}:{node.lineno}"
@@ -194,8 +211,36 @@ def role_sql_ownership_violations(role: PackageRole, paths: tuple[Path, ...]) ->
     return tuple(sorted(violations))
 
 
-def _is_sql_boundary_call(node: ast.Call) -> bool:
+def _sql_callable_names(tree: ast.AST) -> frozenset[str]:
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)) or node.value is None:
+            continue
+        targets = node.targets if isinstance(node, ast.Assign) else (node.target,)
+        if _is_execute_callable(node.value):
+            names.update(target.id for target in targets if isinstance(target, ast.Name))
+    return frozenset(names)
+
+
+def _is_execute_callable(node: ast.expr) -> bool:
+    if isinstance(node, ast.Attribute):
+        return node.attr in {"execute", "executemany"}
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "getattr"
+        and len(node.args) >= 2
+        and isinstance(node.args[1], ast.Constant)
+        and node.args[1].value in {"execute", "executemany"}
+    )
+
+
+def _is_sql_boundary_call(node: ast.Call, sql_callable_names: frozenset[str]) -> bool:
     function = node.func
+    if isinstance(function, ast.Name):
+        return function.id in sql_callable_names
+    if _is_execute_callable(function):
+        return True
     if not isinstance(function, ast.Attribute):
         return False
     if (
@@ -206,16 +251,7 @@ def _is_sql_boundary_call(node: ast.Call) -> bool:
         return True
     if function.attr == "cursor":
         return True
-    if function.attr not in {"execute", "executemany"}:
-        return False
-    receiver = function.value
-    if isinstance(receiver, ast.Name):
-        name = receiver.id
-    elif isinstance(receiver, ast.Attribute):
-        name = receiver.attr
-    else:
-        return False
-    return name in {"connection", "cursor"} or name.endswith(("_connection", "_cursor"))
+    return function.attr in {"execute", "executemany"}
 
 
 def role_dependency_violations(role: PackageRole, dependencies: frozenset[str]) -> tuple[str, ...]:

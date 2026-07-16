@@ -7,11 +7,13 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
+import psycopg
 from psycopg import Connection
 from psycopg.rows import dict_row
 
 from openmagic_runtime.kernel._record_decoding import instance_state
-from openmagic_runtime.kernel.inspection_types import InstanceState
+from openmagic_runtime.kernel._records import steps_for_instance, waits_for_instance
+from openmagic_runtime.kernel.inspection_types import InstanceState, RuntimeStep, RuntimeWait
 
 
 @dataclass(frozen=True)
@@ -43,3 +45,21 @@ def read_instance_inspection(
             (instance_id,),
         ).fetchone()
     return RuntimeInstanceInspection.decode(record) if record is not None else None
+
+
+def read_kernel_snapshot(
+    database_url: str, instance_id: UUID
+) -> tuple[RuntimeInstanceInspection, tuple[RuntimeStep, ...], tuple[RuntimeWait, ...]] | None:
+    with psycopg.connect(database_url) as connection, connection.transaction():
+        connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        instance = read_instance_inspection(connection, instance_id)
+        if instance is None:
+            return None
+        return (
+            instance,
+            steps_for_instance(connection, instance_id),
+            waits_for_instance(connection, instance_id),
+        )
+
+
+__all__ = ["RuntimeInstanceInspection", "read_instance_inspection", "read_kernel_snapshot"]

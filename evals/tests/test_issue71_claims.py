@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, cast
@@ -14,11 +15,13 @@ from openmagic_evals.evidence.claims import (
 )
 from openmagic_evals.evidence.contracts import (
     REQUIRED_NEGATIVE_CLAIMS,
+    AgentAggregate,
     AgentCaseEvidence,
     AgentConfigurationPin,
     AgentCorpusPin,
     AgentQualityArtifact,
     AgentQualitySummary,
+    AgentSplitSummary,
     AgentTrialEvidence,
     ArtifactCase,
     BoundaryAgentCandidateObservation,
@@ -31,6 +34,8 @@ from openmagic_evals.evidence.contracts import (
     DeterministicScenarioEvidence,
     DeterministicSummary,
     DistributionSummary,
+    EnvironmentVariablePin,
+    ExecutablePin,
     InstalledSurfaceEvidence,
     PostgresDeploymentPin,
     RaceCase,
@@ -41,6 +46,7 @@ from openmagic_evals.evidence.contracts import (
     SurfaceAuditArtifact,
     SurfaceAuditSummary,
     WheelArchivePin,
+    aggregate_agent_trials,
     canonical_artifact_json,
     canonical_digest,
     deterministic_observation_digest,
@@ -73,7 +79,32 @@ def _pin(git_sha: str) -> ReproducibilityPin:
         ),
         suite_version="issue-71.v1",
         command=("openmagic-evidence", "test"),
-        environment_allowlist=("PATH",),
+        environment={
+            "GIT_CONFIG_GLOBAL": EnvironmentVariablePin(
+                value=os.devnull, digest=canonical_digest(os.devnull)
+            ),
+            "GIT_CONFIG_NOSYSTEM": EnvironmentVariablePin(value="1", digest=canonical_digest("1")),
+            "LANG": EnvironmentVariablePin(value="C.UTF-8", digest=canonical_digest("C.UTF-8")),
+            "LC_ALL": EnvironmentVariablePin(value="C.UTF-8", digest=canonical_digest("C.UTF-8")),
+            "PATH": EnvironmentVariablePin(
+                value="/bin:/usr/bin", digest=canonical_digest("/bin:/usr/bin")
+            ),
+            "PYTHONNOUSERSITE": EnvironmentVariablePin(value="1", digest=canonical_digest("1")),
+        },
+        executables={
+            name: ExecutablePin(path=f"/fixture/{name}", content_digest="sha256:" + "e" * 64)
+            for name in (
+                "docker",
+                "git",
+                "openmagic-api",
+                "openmagic-delivery-worker",
+                "openmagic-evidence",
+                "openmagic-local-email-provider",
+                "openmagic-playground",
+                "openmagic-workflow-worker",
+                "python",
+            )
+        },
         started_at=datetime(2026, 7, 15, tzinfo=UTC),
         finished_at=datetime(2026, 7, 15, 0, 1, tzinfo=UTC),
         timeout_seconds=60,
@@ -92,7 +123,7 @@ def _pin(git_sha: str) -> ReproducibilityPin:
                 },
             ),
         ),
-        definition_digests={"definition": "sha256:" + "4" * 64},
+        definition_digests={"example_insurance.renewal_outreach:2": "sha256:" + "4" * 64},
         case_corpus_digest="sha256:" + "5" * 64,
         sandbox_digest="sha256:" + "6" * 64,
     )
@@ -304,27 +335,80 @@ def test_claim_report_rejects_artifacts_from_different_builds(tmp_path: Path) ->
             ),
         ),
         summary=AgentQualitySummary(
-            development_cases=1,
-            held_out_cases=1,
-            expected_trials=2,
-            observed_trials=2,
-            passed_trials=2,
-            prohibited_actions=0,
-            threshold_passed=True,
-            pass_rate=1,
-            wilson_lower=0.34237195288961925,
-            wilson_upper=1,
-            latency_ms=DistributionSummary(
-                count=2,
-                mean=1,
-                median=1,
-                sample_standard_deviation=0,
-                minimum=1,
-                maximum=1,
+            development=AgentSplitSummary(
+                case_count=1,
+                expected_trials=1,
+                aggregate=AgentAggregate(
+                    observed_trials=1,
+                    passed_trials=1,
+                    prohibited_actions=0,
+                    pass_rate=1,
+                    wilson_lower=0.20654329147389294,
+                    wilson_upper=1,
+                    latency_ms=DistributionSummary(
+                        count=1,
+                        mean=1,
+                        median=1,
+                        sample_standard_deviation=0,
+                        minimum=1,
+                        maximum=1,
+                    ),
+                ),
+                threshold_passed=True,
             ),
+            held_out=AgentSplitSummary(
+                case_count=1,
+                expected_trials=1,
+                aggregate=AgentAggregate(
+                    observed_trials=1,
+                    passed_trials=1,
+                    prohibited_actions=0,
+                    pass_rate=1,
+                    wilson_lower=0.20654329147389294,
+                    wilson_upper=1,
+                    latency_ms=DistributionSummary(
+                        count=1,
+                        mean=1,
+                        median=1,
+                        sample_standard_deviation=0,
+                        minimum=1,
+                        maximum=1,
+                    ),
+                ),
+                threshold_passed=True,
+            ),
+            combined=AgentAggregate(
+                observed_trials=2,
+                passed_trials=2,
+                prohibited_actions=0,
+                pass_rate=1,
+                wilson_lower=0.34237195288961925,
+                wilson_upper=1,
+                latency_ms=DistributionSummary(
+                    count=2,
+                    mean=1,
+                    median=1,
+                    sample_standard_deviation=0,
+                    minimum=1,
+                    maximum=1,
+                ),
+            ),
+            threshold_passed=True,
         ),
         limitations=("test",),
     )
+    development_trials = tuple(
+        trial for case in agent.cases if case.split == "development" for trial in case.agent_trials
+    )
+    held_out_trials = tuple(
+        trial for case in agent.cases if case.split == "held_out" for trial in case.agent_trials
+    )
+    development_aggregate = aggregate_agent_trials(development_trials)
+    held_out_aggregate = aggregate_agent_trials(held_out_trials)
+    assert agent.summary.development.aggregate == development_aggregate
+    assert agent.summary.development.aggregate.observed_trials == len(development_trials)
+    assert agent.summary.held_out.aggregate == held_out_aggregate
+    assert agent.summary.held_out.aggregate.observed_trials == len(held_out_trials)
     surface = SurfaceAuditArtifact(
         reproducibility=_pin("1" * 40),
         repository=RepositorySurfaceEvidence(
@@ -371,6 +455,26 @@ def test_claim_report_rejects_artifacts_from_different_builds(tmp_path: Path) ->
                 ("deterministic", deterministic_path, deterministic),
                 ("surface-audit", surface_path, surface),
                 ("agent-quality", agent_path, agent),
+            )
+        )
+
+    changed_executables = dict(deterministic.reproducibility.executables)
+    changed_executables["docker"] = ExecutablePin(
+        path="/different/docker",
+        content_digest="sha256:" + "f" * 64,
+    )
+    changed = deterministic.model_copy(
+        update={
+            "reproducibility": deterministic.reproducibility.model_copy(
+                update={"executables": changed_executables}
+            )
+        }
+    )
+    with pytest.raises(ValueError, match="reproducibility pin"):
+        _validate_common_reproducibility(
+            (
+                ("first", deterministic_path, deterministic),
+                ("different-helper", deterministic_path, changed),
             )
         )
 

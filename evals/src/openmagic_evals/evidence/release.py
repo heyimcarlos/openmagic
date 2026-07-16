@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
-import subprocess
 import sys
 import tempfile
 from dataclasses import asdict, dataclass
@@ -12,6 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from openmagic_evals.evidence._owned_command import capture_owned_command
 from openmagic_evals.evidence.artifact_io import write_artifact
 from openmagic_evals.evidence.case_recording import (
     RecordedCaseObservation,
@@ -26,6 +25,7 @@ from openmagic_evals.evidence.contracts import (
     DeterministicArtifact,
     DeterministicScenarioEvidence,
     DeterministicSummary,
+    InstanceDefinitionCorrelation,
     RaceArtifact,
     RaceCase,
     RaceTrialEvidence,
@@ -46,7 +46,11 @@ from openmagic_evals.evidence.postgres_provenance import (
 )
 from openmagic_evals.evidence.race_models import RaceCorpus
 from openmagic_evals.evidence.races import run_all_races
-from openmagic_evals.evidence.reproducibility import reproducibility_pin, sha256
+from openmagic_evals.evidence.reproducibility import (
+    fixed_execution_environment,
+    reproducibility_pin,
+    sha256,
+)
 
 
 def _sha256(value: bytes) -> str:
@@ -185,6 +189,7 @@ def _trace_completeness_case(
         correlations.runtime.command_ids,
         correlations.runtime.workflow_ids,
         correlations.runtime.instance_ids,
+        correlations.runtime.instance_definitions,
         correlations.runtime.step_ids,
         correlations.runtime.attempt_ids,
         correlations.runtime.wait_ids,
@@ -213,12 +218,22 @@ def _trace_completeness_case(
     provider_process = (
         proof.get("provider_process_relationship") if isinstance(proof, dict) else None
     )
+    instance_definitions = proof.get("instance_definitions") if isinstance(proof, dict) else None
+    document_instance_definitions = (
+        tuple(InstanceDefinitionCorrelation.model_validate(item) for item in instance_definitions)
+        if isinstance(instance_definitions, list)
+        else ()
+    )
+    mapped_instances = {item.instance_id for item in document_instance_definitions}
     if (
         not all(required_durable_identity_groups)
         or not isinstance(proof, dict)
         or proof.get("connected") is not True
         or not isinstance(relationship_checks, list)
         or len(relationship_checks) < 9
+        or "runtime-instance-to-registered-definition" not in relationship_checks
+        or mapped_instances != set(correlations.runtime.instance_ids)
+        or document_instance_definitions != correlations.runtime.instance_definitions
         or not isinstance(provider_process, dict)
         or provider_process.get("process_id") not in correlations.process.process_ids
         or provider_process.get("provider_request_id")
@@ -329,16 +344,12 @@ def run_deterministic_release(
             "--openmagic-postgres-directory",
             str(postgres_directory),
         ]
-        environment = {
-            "PATH": os.environ.get("PATH", os.defpath),
-            "PYTHONNOUSERSITE": "1",
-        }
-        completed = subprocess.run(
+        environment = fixed_execution_environment()
+        completed = capture_owned_command(
             process_command,
-            cwd=root,
-            env=environment,
-            timeout=timeout_seconds,
-            check=False,
+            working_directory=root,
+            environment=environment,
+            timeout_seconds=timeout_seconds,
         )
         if not result_path.is_file():
             raise RuntimeError("pytest did not produce its explicit evidence result file")

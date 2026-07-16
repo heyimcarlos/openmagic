@@ -23,6 +23,7 @@ from openmagic_evals.evidence.contracts import (
     AgentCorpusPin,
     AgentQualityArtifact,
     AgentQualitySummary,
+    AgentSplitSummary,
     AgentTrialEvidence,
     CaseVerdict,
     DistributionSummary,
@@ -92,6 +93,16 @@ def evaluate_trials(
 
 def agent_corpus_digest(phases: tuple[AgentTrialPhase, AgentTrialPhase]) -> str:
     return canonical_digest([asdict(case) for phase in phases for case in phase.cases])
+
+
+def _split_summary(phase: AgentTrialPhase) -> AgentSplitSummary:
+    result = evaluate_trials(phase.cases, phase.trials)
+    return AgentSplitSummary(
+        case_count=len(phase.cases),
+        expected_trials=result.expected_trials,
+        aggregate=aggregate_agent_trials(phase.trials),
+        threshold_passed=result.threshold_passed,
+    )
 
 
 def _artifact_case(case: AgentCase, trials: tuple[AgentTrial, ...]) -> AgentCaseEvidence:
@@ -179,6 +190,8 @@ def project_agent_quality_artifact(
     cases = development.cases + held_out.cases
     trials = development.trials + held_out.trials
     result = evaluate_trials(cases, trials)
+    development_summary = _split_summary(development)
+    held_out_summary = _split_summary(held_out)
     artifact = AgentQualityArtifact(
         reproducibility=reproducibility,
         corpus=AgentCorpusPin(
@@ -195,17 +208,10 @@ def project_agent_quality_artifact(
         agent_configurations=_configurations(configuration),
         cases=tuple(_artifact_case(case, trials) for case in cases),
         summary=AgentQualitySummary(
-            development_cases=len(development.cases),
-            held_out_cases=len(held_out.cases),
-            expected_trials=result.expected_trials,
-            observed_trials=result.observed_trials,
-            passed_trials=result.passed_trials,
-            prohibited_actions=result.prohibited_actions,
+            development=development_summary,
+            held_out=held_out_summary,
+            combined=aggregate_agent_trials(trials),
             threshold_passed=result.threshold_passed,
-            pass_rate=result.pass_rate,
-            wilson_lower=result.wilson_lower,
-            wilson_upper=result.wilson_upper,
-            latency_ms=result.latency,
         ),
         limitations=(
             "The report measures only the two explicitly pinned local configurations.",

@@ -24,6 +24,7 @@ from openmagic_evals.evidence.core_models import (
     has_correlations,
     merge_correlations,
     require_digest,
+    validate_correlated_definitions,
 )
 from openmagic_evals.evidence.pins import ReproducibilityPin
 from openmagic_evals.evidence.release_models import SCHEMA_VERSION
@@ -184,28 +185,45 @@ class AgentCaseEvidence(ArtifactCaseBase):
         return self
 
 
+class AgentSplitSummary(EvidenceModel):
+    case_count: int = Field(gt=0)
+    expected_trials: int = Field(gt=0)
+    aggregate: AgentAggregate
+    threshold_passed: bool
+
+    @model_validator(mode="after")
+    def validate_split(self) -> AgentSplitSummary:
+        if self.aggregate.observed_trials != self.expected_trials:
+            raise ValueError("Agent split must report its complete trial denominator")
+        return self
+
+
 class AgentQualitySummary(EvidenceModel):
-    development_cases: int = Field(ge=0)
-    held_out_cases: int = Field(ge=0)
-    expected_trials: int = Field(ge=0)
-    observed_trials: int = Field(ge=0)
-    passed_trials: int = Field(ge=0)
-    prohibited_actions: int = Field(ge=0)
+    development: AgentSplitSummary
+    held_out: AgentSplitSummary
+    combined: AgentAggregate
     threshold_passed: bool
     deterministic_release_pass: bool | None = None
-    pass_rate: float = Field(default=0.0, ge=0.0, le=1.0)
-    wilson_lower: float = Field(default=0.0, ge=0.0, le=1.0)
-    wilson_upper: float = Field(default=1.0, ge=0.0, le=1.0)
-    latency_ms: DistributionSummary
 
     @model_validator(mode="after")
     def keep_quality_separate(self) -> AgentQualitySummary:
         if self.deterministic_release_pass is not None:
             raise ValueError("Agent quality cannot determine deterministic release correctness")
-        if self.observed_trials != self.expected_trials:
-            raise ValueError("Agent quality must report the complete trial denominator")
-        if self.passed_trials > self.observed_trials:
-            raise ValueError("passed trials cannot exceed observed trials")
+        if self.combined.observed_trials != (
+            self.development.aggregate.observed_trials + self.held_out.aggregate.observed_trials
+        ):
+            raise ValueError("combined Agent denominator must equal both split denominators")
+        if self.combined.passed_trials != (
+            self.development.aggregate.passed_trials + self.held_out.aggregate.passed_trials
+        ) or self.combined.prohibited_actions != (
+            self.development.aggregate.prohibited_actions
+            + self.held_out.aggregate.prohibited_actions
+        ):
+            raise ValueError("combined Agent aggregate must equal both split aggregates")
+        if self.threshold_passed != (
+            self.development.threshold_passed and self.held_out.threshold_passed
+        ):
+            raise ValueError("Agent threshold must derive from both split thresholds")
         return self
 
 
@@ -303,31 +321,42 @@ class AgentQualityArtifact(EvidenceModel):
                 or (case.verdict.status == "passed") != threshold_passed
             ):
                 raise ValueError("Agent case contradicts its complete per-trial evidence")
-        expected = sum(case.expected_trials for case in self.cases)
+        split_cases = {
+            split: tuple(case for case in self.cases if case.split == split)
+            for split in ("development", "held_out")
+        }
+
+        def split_summary(split: Literal["development", "held_out"]) -> AgentSplitSummary:
+            cases = split_cases[split]
+            aggregate = aggregate_agent_trials(
+                tuple(trial for case in cases for trial in case.agent_trials)
+            )
+            return AgentSplitSummary(
+                case_count=len(cases),
+                expected_trials=sum(case.expected_trials for case in cases),
+                aggregate=aggregate,
+                threshold_passed=all(case.verdict.status == "passed" for case in cases),
+            )
+
         aggregate = aggregate_agent_trials(
             tuple(trial for case in self.cases for trial in case.agent_trials)
         )
-        threshold_passed = all(
-            case.verdict.status == "passed"
-            and case.passed_trials / case.observed_trials >= case.pass_threshold
-            and case.prohibited_actions == 0
-            for case in self.cases
-        )
+        development_summary = split_summary("development")
+        held_out_summary = split_summary("held_out")
         expected_summary = AgentQualitySummary(
-            development_cases=development,
-            held_out_cases=held_out,
-            expected_trials=expected,
-            observed_trials=aggregate.observed_trials,
-            passed_trials=aggregate.passed_trials,
-            prohibited_actions=aggregate.prohibited_actions,
-            threshold_passed=threshold_passed,
-            pass_rate=aggregate.pass_rate,
-            wilson_lower=aggregate.wilson_lower,
-            wilson_upper=aggregate.wilson_upper,
-            latency_ms=aggregate.latency_ms,
+            development=development_summary,
+            held_out=held_out_summary,
+            combined=aggregate,
+            threshold_passed=(
+                development_summary.threshold_passed and held_out_summary.threshold_passed
+            ),
         )
         if self.summary != expected_summary:
             raise ValueError("Agent summary contradicts its complete case evidence")
+        validate_correlated_definitions(
+            (case.correlations for case in self.cases),
+            self.reproducibility.definition_digests,
+        )
         return self
 
 
@@ -338,6 +367,7 @@ __all__ = [
     "AgentCorpusPin",
     "AgentQualityArtifact",
     "AgentQualitySummary",
+    "AgentSplitSummary",
     "AgentTrialEvidence",
     "SanitizedAgentEvent",
     "aggregate_agent_trials",

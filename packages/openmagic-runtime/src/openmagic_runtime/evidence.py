@@ -7,10 +7,10 @@ from dataclasses import asdict, dataclass
 from typing import Any
 from uuid import UUID
 
-import psycopg
 from psycopg import Connection
 
 from openmagic_runtime._canonical import canonical_bytes, canonical_digest
+from openmagic_runtime._persistence.health_records import read_database_health
 from openmagic_runtime.delivery import RuntimeDeliveryEvidence, deliveries_for_domain_event
 from openmagic_runtime.kernel._evidence_records import (
     RuntimeAgentRunEvidence,
@@ -41,19 +41,13 @@ class RuntimeDatabaseHealth:
 def inspect_runtime_database(database_url: str) -> RuntimeDatabaseHealth:
     """Read runtime-owned deployment identity without retaining a session."""
 
-    with psycopg.connect(database_url) as connection:
-        database = connection.execute("SELECT current_database()").fetchone()
-        runtime_schema = connection.execute(
-            "SELECT to_regnamespace('openmagic_runtime') IS NOT NULL"
-        ).fetchone()
-    if database is None:
-        raise RuntimeError("PostgreSQL did not report the current database")
-    if runtime_schema is None or not runtime_schema[0]:
+    record = read_database_health(database_url)
+    if not record.runtime_schema_ready:
         raise RuntimeError("OpenMagic Runtime schema is not installed")
     return RuntimeDatabaseHealth(
         status="ready",
         pid=os.getpid(),
-        database=str(database[0]),
+        database=record.database,
         runtime_schema_ready=True,
     )
 

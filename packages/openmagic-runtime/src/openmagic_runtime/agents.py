@@ -8,8 +8,14 @@ from typing import Any, cast
 from uuid import UUID, uuid4
 
 from psycopg import Connection
-from psycopg.types.json import Jsonb
 
+from openmagic_runtime._persistence.agent_run_records import (
+    complete_agent_run,
+    find_agent_run,
+    finish_agent_run,
+    insert_agent_run,
+    read_running_input,
+)
 from openmagic_runtime.threads import ThreadAccess, ThreadContext
 
 AgentScalar = str | int
@@ -324,18 +330,14 @@ class AgentRuns:
 
     def start(self, *, attempt_id: UUID, input: AgentRunInput) -> AgentRun:
         agent_run_id = uuid4()
-        self._connection.execute(
-            "INSERT INTO openmagic_runtime.agent_runs "
-            "(agent_run_id, attempt_id, agent_key, thread_id, context_through_sequence, input, status) "
-            "VALUES (%s, %s, %s, %s, %s, %s, 'running')",
-            (
-                agent_run_id,
-                attempt_id,
-                input.configuration.agent_key,
-                input.thread_id,
-                input.context_through_sequence,
-                Jsonb(_input_value(input)),
-            ),
+        insert_agent_run(
+            self._connection,
+            agent_run_id=agent_run_id,
+            attempt_id=attempt_id,
+            agent_key=input.configuration.agent_key,
+            thread_id=input.thread_id,
+            context_through_sequence=input.context_through_sequence,
+            input_value=_input_value(input),
         )
         return AgentRun(
             agent_run_id=agent_run_id,
@@ -347,20 +349,17 @@ class AgentRuns:
         )
 
     def execution_input_for_attempt(self, attempt_id: UUID) -> AgentExecutionInput:
-        row = self._connection.execute(
-            "SELECT agent_run_id, input FROM openmagic_runtime.agent_runs "
-            "WHERE attempt_id = %s AND status = 'running'",
-            (attempt_id,),
-        ).fetchone()
-        if row is None:
+        record = read_running_input(self._connection, attempt_id)
+        if record is None:
             raise RuntimeError("Agent Attempt has no running durable Agent Run")
-        run_input = _input_from_value(dict(row[1]))
+        agent_run_id, input_value = record
+        run_input = _input_from_value(input_value)
         context = ThreadAccess(self._connection).context(
             run_input.thread_id,
             run_input.context_through_sequence,
         )
         return AgentExecutionInput(
-            agent_run_id=UUID(str(row[0])),
+            agent_run_id=agent_run_id,
             attempt_id=attempt_id,
             run_input=run_input,
             thread_context=context,
@@ -370,52 +369,43 @@ class AgentRuns:
         run = self.find_by_attempt(attempt_id)
         if run is None:
             raise RuntimeError("Agent Attempt has no durable Agent Run")
-        updated = self._connection.execute(
-            "UPDATE openmagic_runtime.agent_runs SET status = 'completed', result = %s, "
-            "completed_at = clock_timestamp() WHERE agent_run_id = %s AND attempt_id = %s "
-            "AND status = 'running' RETURNING agent_run_id",
-            (Jsonb(result), run.agent_run_id, attempt_id),
-        ).fetchone()
-        if updated is None:
-            existing = self._connection.execute(
-                "SELECT result FROM openmagic_runtime.agent_runs "
-                "WHERE attempt_id = %s AND status = 'completed'",
-                (attempt_id,),
-            ).fetchone()
-            if existing is None or dict(existing[0]) != result:
-                raise RuntimeError("Agent Run completion conflicts with durable state")
+        durable_result = complete_agent_run(
+            self._connection,
+            agent_run_id=run.agent_run_id,
+            attempt_id=attempt_id,
+            result=result,
+        )
+        if durable_result != result:
+            raise RuntimeError("Agent Run completion conflicts with durable state")
         return replace(run, status="completed")
 
     def fail_for_attempt(self, attempt_id: UUID, failure: dict[str, Any]) -> None:
-        self._connection.execute(
-            "UPDATE openmagic_runtime.agent_runs SET status = 'failed', result = %s, "
-            "completed_at = clock_timestamp() WHERE attempt_id = %s AND status = 'running'",
-            (Jsonb(failure), attempt_id),
+        finish_agent_run(
+            self._connection,
+            attempt_id=attempt_id,
+            status="failed",
+            result=failure,
         )
 
     def abandon_for_attempt(self, attempt_id: UUID) -> None:
-        self._connection.execute(
-            "UPDATE openmagic_runtime.agent_runs SET status = 'abandoned', "
-            "result = %s, completed_at = clock_timestamp() "
-            "WHERE attempt_id = %s AND status = 'running'",
-            (Jsonb({"class": "attempt_authority_expired"}), attempt_id),
+        finish_agent_run(
+            self._connection,
+            attempt_id=attempt_id,
+            status="abandoned",
+            result={"class": "attempt_authority_expired"},
         )
 
     def find_by_attempt(self, attempt_id: UUID) -> AgentRun | None:
-        row = self._connection.execute(
-            "SELECT agent_run_id, agent_key, thread_id, context_through_sequence, status "
-            "FROM openmagic_runtime.agent_runs WHERE attempt_id = %s",
-            (attempt_id,),
-        ).fetchone()
-        if row is None:
+        record = find_agent_run(self._connection, attempt_id)
+        if record is None:
             return None
         return AgentRun(
-            agent_run_id=UUID(str(row[0])),
+            agent_run_id=record.agent_run_id,
             attempt_id=attempt_id,
-            agent_key=str(row[1]),
-            thread_id=UUID(str(row[2])),
-            context_through_sequence=int(row[3]),
-            status=str(row[4]),
+            agent_key=record.agent_key,
+            thread_id=record.thread_id,
+            context_through_sequence=record.context_through_sequence,
+            status=record.status,
         )
 
 

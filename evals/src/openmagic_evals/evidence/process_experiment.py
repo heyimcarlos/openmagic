@@ -22,6 +22,7 @@ from openmagic_playground.renewal_observation import decode_renewal_projection
 from openmagic_runtime.commands import Actor, Cause
 from pydantic import JsonValue
 
+from openmagic_evals.evidence._definition_correlations import renewal_instance_definition
 from openmagic_evals.evidence.contracts import (
     AgentCorrelations,
     ApplicationCorrelations,
@@ -235,6 +236,7 @@ def _verify_workload_outcome(
             command_ids=(values.command_id,),
             workflow_ids=(values.workflow_id,),
             instance_ids=(values.instance_id,),
+            instance_definitions=(renewal_instance_definition(values.instance_id),),
             step_ids=values.step_ids,
             attempt_ids=values.attempt_ids,
             wait_ids=outcomes.approval_wait_ids,

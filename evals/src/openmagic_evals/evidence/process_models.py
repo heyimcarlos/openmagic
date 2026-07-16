@@ -13,11 +13,13 @@ from openmagic_evals.evidence.core_models import (
     Correlations,
     DistributionSummary,
     EvidenceModel,
+    InstanceDefinitionCorrelation,
     ProcessCorrelations,
     RuntimeCorrelations,
     SanitizedObservation,
     canonical_digest,
     merge_correlations,
+    validate_correlated_definitions,
 )
 from openmagic_evals.evidence.pins import ReproducibilityPin
 from openmagic_evals.evidence.release_models import (
@@ -95,6 +97,7 @@ class ForcedProcessLoss(EvidenceModel):
 
 class AttemptAuthorityEvidence(EvidenceModel):
     instance_id: UUID
+    instance_definition: InstanceDefinitionCorrelation
     step_id: UUID
     attempt_id: UUID
     worker_id: str
@@ -241,6 +244,9 @@ class ProcessCase(ArtifactCaseBase):
                 Correlations(
                     runtime=RuntimeCorrelations(
                         instance_ids=(self.process_observation.lost_attempt.instance_id,),
+                        instance_definitions=(
+                            self.process_observation.lost_attempt.instance_definition,
+                        ),
                         step_ids=(self.process_observation.lost_attempt.step_id,),
                         attempt_ids=(self.process_observation.lost_attempt.attempt_id,),
                     ),
@@ -278,6 +284,10 @@ class ProcessArtifact(EvidenceModel):
     @model_validator(mode="after")
     def validate_release(self) -> ProcessArtifact:
         validate_deterministic_summary(self.cases, self.summary, self.negative_claims)
+        validate_correlated_definitions(
+            (case.correlations for case in self.cases),
+            self.reproducibility.definition_digests,
+        )
         return self
 
 

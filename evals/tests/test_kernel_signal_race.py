@@ -195,6 +195,14 @@ def test_competing_signals_have_one_winner_in_100_seeded_real_transaction_races(
             correlations=Correlations(
                 runtime={
                     "instance_ids": tuple(instance_ids),
+                    "instance_definitions": tuple(
+                        {
+                            "instance_id": instance_id,
+                            "definition_key": "eval.signal_race",
+                            "definition_version": 1,
+                        }
+                        for instance_id in instance_ids
+                    ),
                     "step_ids": tuple(step_ids),
                     "wait_ids": tuple(wait_ids),
                     "signal_ids": tuple(signal_ids),
