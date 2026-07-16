@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -12,6 +13,7 @@ from typing import Any, Generic, Literal, Protocol, TypeVar
 from uuid import UUID
 
 from openmagic_runtime.agents import AgentExecutionInput
+from openmagic_runtime.processes import OwnedProcess
 
 
 @dataclass(frozen=True)
@@ -158,6 +160,7 @@ def _run_agent_child(
     sender: Any,
 ) -> None:
     try:
+        os.setsid()
         sender.send(("result", factory()(input_value)))
     except AgentExecutionFailure as error:
         sender.send(("failure", error.reason, str(error)))
@@ -173,48 +176,15 @@ def _run_agent_child(
         sender.close()
 
 
-def _cleanup_agent_process(
-    process: Any,
-    receiver: Any,
-    sender: Any,
-    *,
-    started: bool,
+def _close_unstarted_agent_process(
+    process: Any, receiver: Any, sender: Any
 ) -> tuple[BaseException, ...]:
     errors: list[BaseException] = []
-
-    def running() -> bool:
-        try:
-            return bool(process.is_alive())
-        except BaseException as error:
-            errors.append(error)
-            return True
-
     for endpoint in (sender, receiver):
         try:
             endpoint.close()
         except BaseException as error:
             errors.append(error)
-    if started:
-        if running():
-            try:
-                process.terminate()
-            except BaseException as error:
-                errors.append(error)
-            try:
-                process.join(timeout=1)
-            except BaseException as error:
-                errors.append(error)
-        if running():
-            try:
-                process.kill()
-            except BaseException as error:
-                errors.append(error)
-            try:
-                process.join(timeout=1)
-            except BaseException as error:
-                errors.append(error)
-        if running():
-            errors.append(RuntimeError(f"Agent process {process.pid} survived cleanup"))
     try:
         process.close()
     except BaseException as error:
@@ -224,18 +194,17 @@ def _cleanup_agent_process(
 
 @contextmanager
 def _agent_process_scope(process: Any, receiver: Any, sender: Any) -> Iterator[None]:
-    started = False
+    owner: OwnedProcess | None = None
     try:
         process.start()
-        started = True
+        owner = OwnedProcess.multiprocessing(process, resources=(sender, receiver))
         sender.close()
         yield
     except BaseException as execution_error:
-        cleanup_errors = _cleanup_agent_process(
-            process,
-            receiver,
-            sender,
-            started=started,
+        cleanup_errors = (
+            owner.reap(timeout_seconds=1).errors
+            if owner is not None
+            else _close_unstarted_agent_process(process, receiver, sender)
         )
         if cleanup_errors:
             raise BaseExceptionGroup(
@@ -244,12 +213,9 @@ def _agent_process_scope(process: Any, receiver: Any, sender: Any) -> Iterator[N
             ) from execution_error
         raise
     else:
-        cleanup_errors = _cleanup_agent_process(
-            process,
-            receiver,
-            sender,
-            started=started,
-        )
+        if owner is None:
+            raise AssertionError("started Agent process did not establish ownership")
+        cleanup_errors = owner.reap(timeout_seconds=1).errors
         if cleanup_errors:
             raise BaseExceptionGroup("Agent process cleanup failed", list(cleanup_errors))
 

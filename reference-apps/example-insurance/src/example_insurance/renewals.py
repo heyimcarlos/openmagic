@@ -42,6 +42,7 @@ from openmagic_runtime.kernel.work import (
 from openmagic_runtime.threads import ThreadAccess, ThreadStore
 from psycopg import Connection
 
+from example_insurance._persistence.renewal_fact_records import RenewalFactRecords
 from example_insurance._persistence.renewal_records import CommandEventLineage
 from example_insurance._persistence.renewal_workflow_records import (
     record_workflow,
@@ -91,7 +92,7 @@ from example_insurance.renewal_effects import (
     committed_permit_execution_input,
 )
 from example_insurance.renewal_evidence import RenewalEvidenceProjector
-from example_insurance.renewal_facts import RenewalFacts, RenewalFactSource
+from example_insurance.renewal_facts import RenewalFacts
 from example_insurance.renewal_lifecycle import RenewalLifecycleControl
 from example_insurance.renewal_registry import (
     RenewalCommandHandlers,
@@ -230,7 +231,7 @@ class ExampleInsurance:
                 submit=self._handle_verification_submission,
             ),
         )
-        self._renewal_facts = RenewalFactSource(database_url=database_url)
+        self._renewal_facts = RenewalFactRecords(database_url=database_url)
         executors: dict[str, Executor] = {
             "example_insurance.renewal_facts.v1": DeterministicExecutor(self._renewal_facts.gather),
             "example_insurance.renewal_draft_agent.v1": FreshAgentExecutor(

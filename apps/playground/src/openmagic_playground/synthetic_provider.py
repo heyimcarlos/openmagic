@@ -18,6 +18,8 @@ from typing import Literal
 from urllib.error import URLError
 from urllib.request import urlopen
 
+from openmagic_runtime.processes import OwnedProcess
+
 ProviderBehavior = Literal["success", "not_applied"]
 
 
@@ -122,6 +124,7 @@ class SyntheticEmailProvider:
         self.url = f"http://127.0.0.1:{self.port}"
         self.request_log = self.working_directory / "requests.jsonl"
         self._process: subprocess.Popen[bytes] | None = None
+        self._owner: OwnedProcess | None = None
         self._log: BufferedWriter | None = None
 
     def __enter__(self) -> SyntheticEmailProvider:
@@ -150,7 +153,7 @@ class SyntheticEmailProvider:
         self.request_log.unlink(missing_ok=True)
         self._log = (self.working_directory / "provider.log").open("ab")
         try:
-            self._process = subprocess.Popen(
+            process = subprocess.Popen(
                 [
                     sys.executable,
                     "-m",
@@ -170,6 +173,8 @@ class SyntheticEmailProvider:
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
             )
+            self._owner = OwnedProcess.subprocess(process, resources=(self._log,))
+            self._process = process
             deadline = time.monotonic() + self.readiness_timeout
             while time.monotonic() < deadline:
                 if self._process.poll() is not None:
@@ -192,56 +197,23 @@ class SyntheticEmailProvider:
             raise
 
     def stop(self) -> None:
-        errors: list[Exception] = []
+        errors: list[BaseException] = []
         process = self._process
         reaped = process is None
-
-        def running() -> bool:
-            if process is None:
-                return False
-            try:
-                return process.poll() is None
-            except Exception as error:
-                errors.append(error)
-                return True
-
         try:
-            if process is not None and running():
-                try:
-                    process.terminate()
-                except Exception as error:
-                    errors.append(error)
-                try:
-                    process.wait(timeout=self.shutdown_timeout)
-                except subprocess.TimeoutExpired:
-                    pass
-                except Exception as error:
-                    errors.append(error)
-                if running():
-                    try:
-                        process.kill()
-                    except Exception as error:
-                        errors.append(error)
-                if running():
-                    try:
-                        process.wait(timeout=self.shutdown_timeout)
-                    except Exception as error:
-                        errors.append(error)
-            reaped = not running()
-            if not reaped:
-                errors.append(RuntimeError("synthetic provider process survived cleanup"))
+            if process is not None and self._owner is not None:
+                result = self._owner.reap(timeout_seconds=self.shutdown_timeout)
+                errors.extend(result.errors)
+                reaped = result.reaped
+            elif process is not None:
+                errors.append(RuntimeError("synthetic provider lost its process ownership"))
         finally:
             if reaped:
                 self._process = None
-            if self._log is not None:
-                try:
-                    self._log.close()
-                except Exception as error:
-                    errors.append(error)
-                finally:
-                    self._log = None
+                self._owner = None
+            self._log = None
         if errors:
-            raise ExceptionGroup("synthetic provider cleanup failed", errors)
+            raise BaseExceptionGroup("synthetic provider cleanup failed", errors)
 
     def requests(self) -> tuple[SyntheticProviderRequest, ...]:
         if not self.request_log.is_file():

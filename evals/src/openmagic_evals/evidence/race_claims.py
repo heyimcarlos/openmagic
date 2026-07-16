@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from typing import cast
 from uuid import uuid4
 
 from example_insurance.renewals import ExampleInsurance
@@ -23,7 +22,11 @@ from openmagic_evals.evidence.race_models import (
     jitter_pair,
     race_observation,
 )
-from openmagic_evals.evidence.race_processes import run_process_contenders
+from openmagic_evals.evidence.race_processes import (
+    DeliveryClaimRace,
+    StepClaimRace,
+    run_process_contenders,
+)
 from openmagic_evals.harness import prepare_synthetic_renewal_start
 
 
@@ -47,15 +50,14 @@ def run_claim_races(
             case_id="race.step-claim",
             seed=seed,
             jitter_microseconds=step_jitters,
-            operation="step_claim",
-            payloads=(
-                (step_workers[0], uuid4()),
-                (step_workers[1], uuid4()),
+            requests=(
+                StepClaimRace(step_workers[0], uuid4()),
+                StepClaimRace(step_workers[1], uuid4()),
             ),
         )
-        step_claims = cast(
-            tuple[ClaimedAttempt | None, ClaimedAttempt | None],
-            tuple(result.require_value() for result in step_contenders.results),
+        step_claims: tuple[ClaimedAttempt | None, ClaimedAttempt | None] = (
+            step_contenders.results[0].require_value(),
+            step_contenders.results[1].require_value(),
         )
         step_winners = tuple(item for item in step_claims if item is not None)
         if len(step_winners) != 1:
@@ -117,15 +119,14 @@ def run_claim_races(
             case_id="race.delivery-claim",
             seed=seed,
             jitter_microseconds=delivery_jitters,
-            operation="delivery_claim",
-            payloads=(
-                (delivery_workers[0], uuid4()),
-                (delivery_workers[1], uuid4()),
+            requests=(
+                DeliveryClaimRace(delivery_workers[0], uuid4()),
+                DeliveryClaimRace(delivery_workers[1], uuid4()),
             ),
         )
-        delivery_claims = cast(
-            tuple[ClaimedDelivery | None, ClaimedDelivery | None],
-            tuple(result.require_value() for result in delivery_contenders.results),
+        delivery_claims: tuple[ClaimedDelivery | None, ClaimedDelivery | None] = (
+            delivery_contenders.results[0].require_value(),
+            delivery_contenders.results[1].require_value(),
         )
         delivery_winners = tuple(item for item in delivery_claims if item is not None)
         if len(delivery_winners) != 1:

@@ -1,0 +1,8 @@
+{
+  "corpus_blob": "12bd63dfeb37f0ba805cfdcfdc2e63a55941174b",
+  "corpus_digest": "sha256:8c6e84ad1386446e4777f692339e06e8feb6ee79d67f452f4bc791bfc3850634",
+  "corpus_introduced_at_commit": "792c9bbf165af9e423fa1986423381de6854175a",
+  "corpus_version": "issue-71.agent-heldout.v2",
+  "locked_source_digest": "sha256:pending-runner-freeze",
+  "runner_frozen_at_commit": "d31666cf7fcf329f0b451cb874c7981876ca9e54"
+}

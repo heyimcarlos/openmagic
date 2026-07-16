@@ -25,6 +25,8 @@ from openmagic_playground.responses import (
     ControlExerciseResponse,
     RenewalDemonstrationResponse,
 )
+from openmagic_playground.synthetic_provider import SyntheticEmailProvider
+from openmagic_runtime.processes import OwnedProcess
 from pydantic import ValidationError
 
 
@@ -32,26 +34,6 @@ class _FailingLog(io.BytesIO):
     def close(self) -> None:
         super().close()
         raise RuntimeError("synthetic log-close failure")
-
-
-class _SurvivingProcess:
-    pid = 710071
-
-    @staticmethod
-    def poll() -> None:
-        return None
-
-    @staticmethod
-    def terminate() -> None:
-        raise OSError("synthetic terminate failure")
-
-    @staticmethod
-    def kill() -> None:
-        raise OSError("synthetic kill failure")
-
-    @staticmethod
-    def wait(timeout: float) -> None:
-        raise subprocess.TimeoutExpired("synthetic-survivor", timeout)
 
 
 class _RetryableContainer:
@@ -64,19 +46,43 @@ class _RetryableContainer:
             raise RuntimeError("synthetic container-stop failure")
 
 
-def _term_resistant_process() -> subprocess.Popen[bytes]:
+def _term_resistant_process_group(tmp_path: Path) -> tuple[subprocess.Popen[bytes], int]:
+    child_pid_path = tmp_path / f"child-{time.monotonic_ns()}.pid"
     process = subprocess.Popen(
         [
             sys.executable,
             "-c",
-            "import signal,time; signal.signal(signal.SIGTERM, lambda *_: None); time.sleep(30)",
+            (
+                "import pathlib,signal,subprocess,sys,time;"
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN);"
+                "child=subprocess.Popen([sys.executable,'-c',"
+                "'import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)']);"
+                f"pathlib.Path({str(child_pid_path)!r}).write_text(str(child.pid));"
+                "time.sleep(30)"
+            ),
         ],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        start_new_session=True,
     )
-    time.sleep(0.1)
-    return process
+    deadline = time.monotonic() + 3
+    while not child_pid_path.is_file() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    if not child_pid_path.is_file():
+        process.kill()
+        process.wait()
+        raise RuntimeError("descendant process fixture did not become ready")
+    return process, int(child_pid_path.read_text(encoding="utf-8"))
+
+
+def _process_is_live(pid: int) -> bool:
+    try:
+        value = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return False
+    _, _, suffix = value.rpartition(")")
+    return suffix.split()[0] not in {"X", "Z"}
 
 
 def _ignore_terminate() -> None:
@@ -93,15 +99,15 @@ def _running(process: subprocess.Popen[bytes], log: object) -> _RunningProcess:
             worker_id=None,
         ),
         process=process,
-        log_handle=log,
+        owner=OwnedProcess.subprocess(process, resources=(cast(Any, log),)),
     )
 
 
 def test_stop_reaps_every_child_and_closes_every_log_before_reporting_failures(
     tmp_path: Path,
 ) -> None:
-    first = _term_resistant_process()
-    second = _term_resistant_process()
+    first, first_child = _term_resistant_process_group(tmp_path)
+    second, second_child = _term_resistant_process_group(tmp_path)
     failing_log = _FailingLog()
     surviving_log = io.BytesIO()
     deployment = PlaygroundDeployment(
@@ -113,29 +119,14 @@ def test_stop_reaps_every_child_and_closes_every_log_before_reporting_failures(
     with pytest.raises(ExceptionGroup, match="playground cleanup failed") as raised:
         deployment.stop()
 
-    process_group = raised.value.exceptions[0]
-    assert isinstance(process_group, ExceptionGroup)
-    assert str(process_group.exceptions[0]) == "synthetic log-close failure"
+    assert str(raised.value.exceptions[0]) == "synthetic log-close failure"
     assert first.poll() is not None
     assert second.poll() is not None
+    assert not _process_is_live(first_child)
+    assert not _process_is_live(second_child)
     assert failing_log.closed
     assert surviving_log.closed
     assert deployment.processes == ()
-
-
-def test_stop_retains_ownership_when_child_death_cannot_be_verified(tmp_path: Path) -> None:
-    process = cast(subprocess.Popen[bytes], _SurvivingProcess())
-    log = io.BytesIO()
-    deployment = PlaygroundDeployment(working_directory=tmp_path, shutdown_timeout=0.1)
-    running = _running(process, log)
-    deployment._running.append(running)
-
-    with pytest.raises(ExceptionGroup, match="playground cleanup failed"):
-        deployment.stop()
-
-    assert deployment._running == [running]
-    assert deployment.processes == (running.public,)
-    assert log.closed
 
 
 def test_stop_retains_postgres_ownership_when_container_stop_fails(tmp_path: Path) -> None:
@@ -262,20 +253,37 @@ def test_provider_readiness_failure_reaps_child_and_closes_log(tmp_path: Path) -
         os.kill(pid, 0)
 
 
-def test_provider_retains_child_but_closes_log_when_death_cannot_be_verified(
-    tmp_path: Path,
-) -> None:
+def test_local_provider_reaps_descendant_process_group_and_closes_log(tmp_path: Path) -> None:
     provider = LocalEmailProvider(working_directory=tmp_path, shutdown_timeout=0.1)
-    process = cast(subprocess.Popen[bytes], _SurvivingProcess())
+    process, child_pid = _term_resistant_process_group(tmp_path)
     log = (tmp_path / "survivor.log").open("ab")
     provider._process = process
+    provider._owner = OwnedProcess.subprocess(process, resources=(log,))
     provider._log_handle = log
 
-    with pytest.raises(ExceptionGroup, match="local email provider cleanup failed"):
-        provider.stop()
+    provider.stop()
 
-    assert provider._process is process
+    assert provider._process is None
+    assert not _process_is_live(child_pid)
     assert provider._log_handle is None
+    assert log.closed
+
+
+def test_synthetic_provider_reaps_descendant_process_group_and_closes_log(
+    tmp_path: Path,
+) -> None:
+    provider = SyntheticEmailProvider(working_directory=tmp_path, shutdown_timeout=0.1)
+    process, child_pid = _term_resistant_process_group(tmp_path)
+    log = (tmp_path / "synthetic-survivor.log").open("ab")
+    provider._process = process
+    provider._owner = OwnedProcess.subprocess(process, resources=(log,))
+    provider._log = log
+
+    provider.stop()
+
+    assert provider._process is None
+    assert not _process_is_live(child_pid)
+    assert provider._log is None
     assert log.closed
 
 

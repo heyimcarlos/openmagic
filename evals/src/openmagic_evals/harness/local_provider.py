@@ -11,6 +11,8 @@ from types import TracebackType
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
+from openmagic_runtime.processes import OwnedProcess
+
 from openmagic_evals.harness._network import free_port
 
 
@@ -31,6 +33,7 @@ class LocalEmailProvider:
         self._port = free_port()
         self.url = f"http://127.0.0.1:{self._port}"
         self._process: subprocess.Popen[bytes] | None = None
+        self._owner: OwnedProcess | None = None
         self._log_handle: BufferedWriter | None = None
 
     def __enter__(self) -> LocalEmailProvider:
@@ -60,7 +63,7 @@ class LocalEmailProvider:
             raise RuntimeError("installed local email provider entry point is missing")
         self._log_handle = (self.working_directory / "email-provider.log").open("ab")
         try:
-            self._process = subprocess.Popen(
+            process = subprocess.Popen(
                 [
                     str(script),
                     "--host",
@@ -77,6 +80,8 @@ class LocalEmailProvider:
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
             )
+            self._owner = OwnedProcess.subprocess(process, resources=(self._log_handle,))
+            self._process = process
             deadline = time.monotonic() + self.readiness_timeout
             while time.monotonic() < deadline:
                 if self._process.poll() is not None:
@@ -102,53 +107,23 @@ class LocalEmailProvider:
         self._reap()
 
     def _reap(self) -> None:
-        errors: list[Exception] = []
+        errors: list[BaseException] = []
         process = self._process
         exited = process is None
-
-        def has_exited() -> bool:
-            if process is None:
-                return True
-            try:
-                return process.poll() is not None
-            except Exception as error:
-                errors.append(error)
-                return False
-
         try:
-            if process is not None and not has_exited():
-                try:
-                    process.terminate()
-                    process.wait(timeout=self.shutdown_timeout)
-                except subprocess.TimeoutExpired:
-                    pass
-                except Exception as error:
-                    errors.append(error)
-                if not has_exited():
-                    try:
-                        process.kill()
-                    except Exception as error:
-                        errors.append(error)
-                if not has_exited():
-                    try:
-                        process.wait(timeout=self.shutdown_timeout)
-                    except Exception as error:
-                        errors.append(error)
-            exited = has_exited()
-            if process is not None and not exited:
-                errors.append(RuntimeError(f"local email provider {process.pid} survived cleanup"))
+            if process is not None and self._owner is not None:
+                result = self._owner.reap(timeout_seconds=self.shutdown_timeout)
+                errors.extend(result.errors)
+                exited = result.reaped
+            elif process is not None:
+                errors.append(RuntimeError("local email provider lost its process ownership"))
         finally:
             if exited:
                 self._process = None
-            if self._log_handle is not None:
-                try:
-                    self._log_handle.close()
-                except Exception as error:
-                    errors.append(error)
-                finally:
-                    self._log_handle = None
+                self._owner = None
+            self._log_handle = None
         if errors:
-            raise ExceptionGroup("local email provider cleanup failed", errors)
+            raise BaseExceptionGroup("local email provider cleanup failed", errors)
 
     def restart(self) -> None:
         self.stop()

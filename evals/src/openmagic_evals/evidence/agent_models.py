@@ -231,8 +231,9 @@ class AgentCorpusPin(EvidenceModel):
     held_out_corpus_version: str
     held_out_cases_digest: str
     held_out_sealed_at_commit: str
-    tuning_locked_paths: tuple[str, ...] = Field(min_length=1)
-    tuning_locked_blobs: dict[str, str] = Field(min_length=1)
+    runner_frozen_at_commit: str
+    tuning_locked_roots: tuple[str, ...] = Field(min_length=1)
+    tuning_locked_source_digest: str
     execution_phases: tuple[Literal["development", "held_out"], ...]
     tuning_unchanged_after_seal: Literal[True]
 
@@ -244,18 +245,16 @@ class AgentCorpusPin(EvidenceModel):
             raise ValueError("held-out corpus version is required")
         if re.fullmatch(r"[0-9a-f]{40}", self.held_out_sealed_at_commit) is None:
             raise ValueError("held-out corpus seal must be an exact Git commit")
+        if re.fullmatch(r"[0-9a-f]{40}", self.runner_frozen_at_commit) is None:
+            raise ValueError("Agent runner freeze must be an exact Git commit")
+        require_digest(self.tuning_locked_source_digest, "tuning-locked source digest")
         if self.execution_phases != ("development", "held_out"):
             raise ValueError("held-out cases must execute only after development cases")
         if any(
             Path(path).is_absolute() or ".." in Path(path).parts
-            for path in self.tuning_locked_paths
+            for path in self.tuning_locked_roots
         ):
             raise ValueError("tuning lock paths must be repository-relative")
-        if set(self.tuning_locked_blobs) != set(self.tuning_locked_paths) or any(
-            re.fullmatch(r"[0-9a-f]{40}", blob) is None
-            for blob in self.tuning_locked_blobs.values()
-        ):
-            raise ValueError("every tuning lock path requires one exact Git blob")
         return self
 
 

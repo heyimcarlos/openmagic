@@ -2,19 +2,16 @@
 
 from __future__ import annotations
 
-from typing import cast
 from uuid import uuid4
 
 from example_insurance.renewals import (
     CancelRenewalOutreach,
     CancelRenewalOutreachInput,
     ExampleInsurance,
-    StartRenewalOutreachResult,
     SubmitVerificationCode,
     SubmitVerificationCodeInput,
-    SubmitVerificationCodeResult,
 )
-from openmagic_runtime.commands import Cause, CommandReceipt
+from openmagic_runtime.commands import Cause
 from openmagic_runtime.threads import ThreadStore
 
 from openmagic_evals.evidence.contracts import (
@@ -31,7 +28,11 @@ from openmagic_evals.evidence.race_models import (
     jitter_pair,
     race_observation,
 )
-from openmagic_evals.evidence.race_processes import run_process_contenders
+from openmagic_evals.evidence.race_processes import (
+    StartRenewalOutreachRace,
+    VerificationSubmissionRace,
+    run_process_contenders,
+)
 from openmagic_evals.evidence.race_transitions import run_transition_races
 from openmagic_evals.harness import renewal_context
 from openmagic_evals.harness.renewal_scenario import prepare_synthetic_renewal_start
@@ -55,15 +56,14 @@ def run_command_receipt_races(
             case_id="race.command-receipt",
             seed=seed,
             jitter_microseconds=jitters,
-            operation="command_receipt",
-            payloads=(command, command),
+            requests=(
+                StartRenewalOutreachRace(command),
+                StartRenewalOutreachRace(command),
+            ),
         )
-        receipts = cast(
-            tuple[
-                CommandReceipt[StartRenewalOutreachResult],
-                CommandReceipt[StartRenewalOutreachResult],
-            ],
-            tuple(result.require_value() for result in contenders.results),
+        receipts = (
+            contenders.results[0].require_value(),
+            contenders.results[1].require_value(),
         )
         if receipts[0] != receipts[1]:
             raise AssertionError(f"Command replay differed for seed {seed}")
@@ -145,18 +145,14 @@ def run_verification_submission_races(
             case_id="race.verification-submission",
             seed=seed,
             jitter_microseconds=jitters,
-            operation="verification_submission",
-            payloads=(
-                (commands[0], b"synthetic-issue71-race-secret"),
-                (commands[1], b"synthetic-issue71-race-secret"),
+            requests=(
+                VerificationSubmissionRace(commands[0], b"synthetic-issue71-race-secret"),
+                VerificationSubmissionRace(commands[1], b"synthetic-issue71-race-secret"),
             ),
         )
-        receipts = cast(
-            tuple[
-                CommandReceipt[SubmitVerificationCodeResult],
-                CommandReceipt[SubmitVerificationCodeResult],
-            ],
-            tuple(result.require_value() for result in contenders.results),
+        receipts = (
+            contenders.results[0].require_value(),
+            contenders.results[1].require_value(),
         )
         outcomes = tuple(sorted(receipt.result.verification_outcome for receipt in receipts))
         if outcomes != ("already_used", "verified"):

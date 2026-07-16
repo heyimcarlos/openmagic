@@ -6,71 +6,47 @@ import hashlib
 import os
 import time
 from contextlib import suppress
-from dataclasses import dataclass
 from multiprocessing import get_context
 from multiprocessing.connection import Connection
 from multiprocessing.process import BaseProcess
-from typing import Any, Literal, cast
-from uuid import UUID
+from typing import TypeVar
 
 import psycopg
-from example_insurance.renewals import (
-    ExampleInsurance,
-    StartRenewalOutreach,
-    SubmitVerificationCode,
+
+from openmagic_evals.evidence._race_operations import (
+    AcceptSignalRace,
+    AttemptResultRace,
+    DeliveryClaimRace,
+    RaceProtocolError,
+    RaceRequest,
+    RaceRequestValue,
+    RouteActivationRace,
+    RouteActivationRaceResult,
+    StartRenewalOutreachRace,
+    StepClaimRace,
+    VerificationSubmissionRace,
+    validate_race_pair,
+    validate_race_request,
 )
-from openmagic_runtime.kernel.control import AcceptSignal, KernelControl
-from openmagic_runtime.kernel.work import ClaimedAttempt, KernelWork
+from openmagic_evals.evidence._race_transport import (
+    ProcessRaceCompleted,
+    ProcessRaceFailed,
+    ProcessRaceFailure,
+    ProcessRaceFatal,
+    ProcessRacePair,
+    ProcessRaceReady,
+    ProcessRaceResult,
+    ProcessRaceSucceeded,
+    RaceBarrierStage,
+    RaceControl,
+    RaceFailureKind,
+    RaceFailureReason,
+    decode_fatal,
+    decode_process_result,
+    decode_ready,
+)
 
-RaceOperation = Literal[
-    "accept_signal",
-    "attempt_result",
-    "command_receipt",
-    "delivery_claim",
-    "route_activation",
-    "step_claim",
-    "verification_submission",
-]
-
-
-@dataclass(frozen=True)
-class ProcessRaceFailure:
-    exception_type: type[BaseException]
-    reason: object | None
-    message: str
-
-    @classmethod
-    def capture(cls, error: BaseException) -> ProcessRaceFailure:
-        return cls(
-            exception_type=type(error),
-            reason=getattr(error, "reason", None),
-            message=str(error),
-        )
-
-
-@dataclass(frozen=True)
-class ProcessRaceResult:
-    process_id: int
-    value: object | None
-    failure: ProcessRaceFailure | None
-
-    def require_value(self) -> object:
-        if self.failure is not None:
-            raise RuntimeError(
-                "race contender failed through its public operation: "
-                f"{self.failure.exception_type.__name__}"
-            )
-        return self.value
-
-
-@dataclass(frozen=True)
-class ProcessRacePair:
-    results: tuple[ProcessRaceResult, ProcessRaceResult]
-    overlap_barrier_observed: Literal[True]
-
-    @property
-    def process_ids(self) -> tuple[int, int]:
-        return self.results[0].process_id, self.results[1].process_id
+ResultT = TypeVar("ResultT")
 
 
 def _barrier_key(case_id: str, seed: int) -> int:
@@ -78,99 +54,93 @@ def _barrier_key(case_id: str, seed: int) -> int:
     return int.from_bytes(digest[:8], signed=True)
 
 
-def _execute(database_url: str, operation: RaceOperation, payload: object) -> object:
-    if operation == "command_receipt":
-        return ExampleInsurance(database_url=database_url).start_renewal_outreach(
-            cast(StartRenewalOutreach, payload)
-        )
-    if operation == "step_claim":
-        worker_id, claim_request_id = cast(tuple[str, UUID], payload)
-        return ExampleInsurance(database_url=database_url).claim_workflow_attempt(
-            worker_id=worker_id,
-            claim_request_id=claim_request_id,
-        )
-    if operation == "delivery_claim":
-        worker_id, claim_request_id = cast(tuple[str, UUID], payload)
-        return ExampleInsurance(database_url=database_url).claim_delivery_attempt(
-            worker_id=worker_id,
-            claim_request_id=claim_request_id,
-        )
-    if operation == "verification_submission":
-        command, secret = cast(tuple[SubmitVerificationCode, bytes], payload)
-        return ExampleInsurance(
-            database_url=database_url,
-            verification_code_secret=secret,
-        ).submit_verification_code(command)
-    with psycopg.connect(database_url) as connection, connection.transaction():
-        if operation == "accept_signal":
-            return KernelControl(connection).accept_signal(cast(AcceptSignal, payload))
-        if operation == "attempt_result":
-            claim, worker_id, observation = cast(
-                tuple[ClaimedAttempt, str, dict[str, Any]], payload
-            )
-            return KernelWork(connection).accept_result(
-                claim,
-                worker_id=worker_id,
-                observation=observation,
-            )
-        if operation == "route_activation":
-            claim, worker_id, observation = cast(
-                tuple[ClaimedAttempt, str, dict[str, Any]], payload
-            )
-            required = KernelWork(connection).accept_result(
-                claim,
-                worker_id=worker_id,
-                observation=observation,
-            )
-            steps, waits = KernelControl(connection).succeed(
-                required,
-                output=observation,
-                outcome_route="finish_after_origin",
-                route_input=observation,
-            )
-            return dict(steps), dict(waits), required.replayed
-    raise AssertionError(f"unsupported race operation: {operation}")
-
-
 def _contend(
     database_url: str,
     barrier_key: int,
     jitter_microseconds: int,
-    operation: RaceOperation,
-    payload: object,
+    request: RaceRequestValue,
     control: Connection,
 ) -> None:
     process_id = os.getpid()
     try:
         with psycopg.connect(database_url, autocommit=True) as barrier:
             backend_id = barrier.info.backend_pid
-            control.send(("waiting", process_id, backend_id))
+            control.send(
+                ProcessRaceReady(
+                    stage=RaceBarrierStage.WAITING,
+                    process_id=process_id,
+                    backend_id=backend_id,
+                )
+            )
             barrier.execute("SELECT pg_advisory_lock_shared(%s)", (barrier_key,))
-            control.send(("acquired", process_id, backend_id))
-            if control.recv() != "proceed":
+            control.send(
+                ProcessRaceReady(
+                    stage=RaceBarrierStage.ACQUIRED,
+                    process_id=process_id,
+                    backend_id=backend_id,
+                )
+            )
+            if control.recv() is not RaceControl.PROCEED:
                 raise RuntimeError("race overlap gate received an invalid release")
             time.sleep(jitter_microseconds / 1_000_000)
             try:
-                value = _execute(database_url, operation, payload)
-                control.send(("result", process_id, value, None))
+                validated = validate_race_request(request)
+                value = validated.execute(database_url)
+                control.send(
+                    ProcessRaceCompleted(
+                        process_id=process_id,
+                        outcome=ProcessRaceSucceeded(value),
+                    )
+                )
             except BaseException as error:
-                control.send(("result", process_id, None, ProcessRaceFailure.capture(error)))
+                control.send(
+                    ProcessRaceCompleted(
+                        process_id=process_id,
+                        outcome=ProcessRaceFailed(ProcessRaceFailure.capture(error)),
+                    )
+                )
             finally:
                 barrier.execute("SELECT pg_advisory_unlock_shared(%s)", (barrier_key,))
     except BaseException as error:
         with suppress(BrokenPipeError, EOFError, OSError):
-            control.send(("fatal", process_id, type(error).__name__, str(error)))
+            control.send(
+                ProcessRaceFatal(
+                    process_id=process_id,
+                    failure=ProcessRaceFailure.capture(error),
+                )
+            )
     finally:
         control.close()
 
 
-def _receive(connection: Connection, expected: str, timeout: float = 15.0) -> tuple[object, ...]:
+def _receive(connection: Connection, timeout: float = 15.0) -> object:
     if not connection.poll(timeout):
-        raise TimeoutError(f"fresh race contender did not reach {expected}")
-    message = connection.recv()
-    if not isinstance(message, tuple) or not message or message[0] != expected:
-        raise RuntimeError(f"fresh race contender failed before {expected}: {message!r}")
-    return message
+        raise TimeoutError("fresh race contender did not send its protocol message")
+    return connection.recv()
+
+
+def _receive_ready(connection: Connection, expected: RaceBarrierStage) -> ProcessRaceReady:
+    message = _receive(connection)
+    if type(message) is ProcessRaceFatal:
+        failure = decode_fatal(message).failure
+        raise RuntimeError(
+            "fresh race contender failed before "
+            f"{expected.value}: {failure.kind.value}/{failure.reason.value}"
+        )
+    return decode_ready(message, expected)
+
+
+def _receive_result(
+    connection: Connection, request: RaceRequest[ResultT]
+) -> ProcessRaceResult[ResultT]:
+    message = _receive(connection, timeout=30)
+    if type(message) is ProcessRaceFatal:
+        failure = decode_fatal(message).failure
+        raise RuntimeError(
+            "fresh race contender failed before completion: "
+            f"{failure.kind.value}/{failure.reason.value}"
+        )
+    return decode_process_result(request, message)
 
 
 def _reap_processes(processes: tuple[BaseProcess, ...], *, timeout_seconds: float = 5.0) -> None:
@@ -232,11 +202,11 @@ def run_process_contenders(
     case_id: str,
     seed: int,
     jitter_microseconds: tuple[int, int],
-    operation: RaceOperation,
-    payloads: tuple[object, object],
-) -> ProcessRacePair:
+    requests: tuple[RaceRequest[ResultT], RaceRequest[ResultT]],
+) -> ProcessRacePair[ResultT]:
     """Run two fresh interpreters inside one observed PostgreSQL overlap gate."""
 
+    validate_race_pair(requests)
     key = _barrier_key(case_id, seed)
     context = get_context("spawn")
     parents: list[Connection] = []
@@ -252,8 +222,7 @@ def run_process_contenders(
                         database_url,
                         key,
                         jitter_microseconds[index],
-                        operation,
-                        payloads[index],
+                        requests[index],
                         child,
                     ),
                     name=f"openmagic-race-{case_id}-{seed}-{index}",
@@ -262,8 +231,8 @@ def run_process_contenders(
                 child.close()
                 parents.append(parent)
                 processes.append(process)
-            waiting = tuple(_receive(parent, "waiting") for parent in parents)
-            backend_ids = tuple(cast(int, message[2]) for message in waiting)
+            waiting = tuple(_receive_ready(parent, RaceBarrierStage.WAITING) for parent in parents)
+            backend_ids = tuple(message.backend_id for message in waiting)
             deadline = time.monotonic() + 10
             while time.monotonic() < deadline:
                 row = coordinator.execute(
@@ -285,8 +254,10 @@ def run_process_contenders(
                     f"PostgreSQL did not observe both race contenders waiting: {observed!r}"
                 )
             coordinator.execute("SELECT pg_advisory_unlock(%s)", (key,))
-            acquired = tuple(_receive(parent, "acquired") for parent in parents)
-            acquired_backend_ids = tuple(cast(int, message[2]) for message in acquired)
+            acquired = tuple(
+                _receive_ready(parent, RaceBarrierStage.ACQUIRED) for parent in parents
+            )
+            acquired_backend_ids = tuple(message.backend_id for message in acquired)
             row = coordinator.execute(
                 "SELECT count(*) FROM pg_locks WHERE pid = ANY(%s) "
                 "AND locktype = 'advisory' AND granted",
@@ -296,15 +267,10 @@ def run_process_contenders(
             if not overlap:
                 raise AssertionError("PostgreSQL did not grant both shared overlap locks")
             for parent in parents:
-                parent.send("proceed")
-            messages = tuple(_receive(parent, "result", timeout=30) for parent in parents)
-            results = tuple(
-                ProcessRaceResult(
-                    process_id=cast(int, message[1]),
-                    value=message[2],
-                    failure=cast(ProcessRaceFailure | None, message[3]),
-                )
-                for message in messages
+                parent.send(RaceControl.PROCEED)
+            results = (
+                _receive_result(parents[0], requests[0]),
+                _receive_result(parents[1], requests[1]),
             )
             if len({result.process_id for result in results}) != 2:
                 raise AssertionError("race contenders did not use distinct fresh interpreters")
@@ -332,9 +298,25 @@ def run_process_contenders(
 
 
 __all__ = [
+    "AcceptSignalRace",
+    "AttemptResultRace",
+    "DeliveryClaimRace",
+    "ProcessRaceCompleted",
+    "ProcessRaceFailed",
     "ProcessRaceFailure",
     "ProcessRacePair",
     "ProcessRaceResult",
-    "RaceOperation",
+    "ProcessRaceSucceeded",
+    "RaceFailureKind",
+    "RaceFailureReason",
+    "RaceProtocolError",
+    "RouteActivationRace",
+    "RouteActivationRaceResult",
+    "StartRenewalOutreachRace",
+    "StepClaimRace",
+    "VerificationSubmissionRace",
+    "decode_process_result",
     "run_process_contenders",
+    "validate_race_pair",
+    "validate_race_request",
 ]

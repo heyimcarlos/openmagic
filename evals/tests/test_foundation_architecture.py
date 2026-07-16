@@ -21,6 +21,7 @@ from openmagic_evals.evidence.package_policy import (
     role_import_violations,
     role_private_import_violations,
     role_public_persistence_violations,
+    role_sql_ownership_violations,
     source_python_files,
 )
 
@@ -33,6 +34,7 @@ RUNTIME_PUBLIC_MODULES = (
     "openmagic_runtime.kernel.inspection",
     "openmagic_runtime.commands",
     "openmagic_runtime.execution",
+    "openmagic_runtime.processes",
     "openmagic_runtime.agents",
     "openmagic_runtime.threads",
     "openmagic_runtime.delivery",
@@ -61,22 +63,29 @@ def test_production_dependency_direction_is_one_way() -> None:
         assert (
             role_public_persistence_violations(role, source_python_files(ROOT / role.source)) == ()
         )
+        assert role_sql_ownership_violations(role, source_python_files(ROOT / role.source)) == ()
 
 
-def test_private_persistence_import_policy_rejects_full_import_paths(tmp_path: Path) -> None:
+def test_cross_distribution_private_import_policy_rejects_full_paths(tmp_path: Path) -> None:
     fixture = tmp_path / "consumer.py"
     fixture.write_text(
-        "import openmagic_runtime._persistence\nfrom example_insurance import _persistence\n",
+        "import openmagic_runtime._persistence\n"
+        "import openmagic_runtime._canonical\n"
+        "from example_insurance import _persistence, _internal\n",
         encoding="utf-8",
     )
     imports = python_imports((fixture,))
     api_role = next(role for role in PACKAGE_ROLES if role.distribution == "openmagic-api")
 
     assert "openmagic_runtime._persistence" in imports
+    assert "openmagic_runtime._canonical" in imports
     assert "example_insurance._persistence" in imports
+    assert "example_insurance._internal" in imports
     assert role_private_import_violations(api_role, imports) == (
-        "openmagic-api imports private persistence package example_insurance._persistence",
-        "openmagic-api imports private persistence package openmagic_runtime._persistence",
+        "openmagic-api imports private package example_insurance._internal",
+        "openmagic-api imports private package example_insurance._persistence",
+        "openmagic-api imports private package openmagic_runtime._canonical",
+        "openmagic-api imports private package openmagic_runtime._persistence",
     )
 
 
@@ -89,6 +98,21 @@ def test_public_persistence_policy_rejects_record_adapter_module(tmp_path: Path)
 
     assert role_public_persistence_violations(role, (adapter,)) == (
         "example-insurance exposes persistence adapter leaked_records.py",
+    )
+
+
+def test_sql_ownership_policy_rejects_public_application_sql(tmp_path: Path) -> None:
+    package = tmp_path / "example_insurance"
+    package.mkdir()
+    leaked = package / "renewal_policy.py"
+    leaked.write_text(
+        'statement = "SELECT policy_id FROM example_insurance.policy_renewal_facts"\n',
+        encoding="utf-8",
+    )
+    role = next(role for role in PACKAGE_ROLES if role.distribution == "example-insurance")
+
+    assert role_sql_ownership_violations(role, (leaked,)) == (
+        "example-insurance contains SQL outside approved persistence owner renewal_policy.py:1",
     )
 
 

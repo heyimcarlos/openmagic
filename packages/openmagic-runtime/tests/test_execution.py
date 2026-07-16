@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import signal
+import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from functools import partial
@@ -59,7 +61,14 @@ def _slow_candidate_factory(marker: Path):
 def _term_resistant_candidate_factory(pid_file: Path):
     def run(_execution: AgentExecutionInput) -> Candidate:
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
-        pid_file.write_text(str(os.getpid()), encoding="utf-8")
+        descendant = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(10)",
+            ]
+        )
+        pid_file.write_text(f"{os.getpid()} {descendant.pid}", encoding="utf-8")
         time.sleep(10)
         return Candidate("late")
 
@@ -168,6 +177,9 @@ def test_fresh_agent_executor_kills_and_reaps_term_resistant_child(tmp_path: Pat
     with pytest.raises(AgentExecutionFailure) as raised:
         executor.execute(_execution(), CancellationToken())
     assert raised.value.reason == "bounded_timeout"
-    pid = int(pid_file.read_text(encoding="utf-8"))
-    with pytest.raises(ProcessLookupError):
-        os.kill(pid, 0)
+    process_ids = tuple(int(value) for value in pid_file.read_text(encoding="utf-8").split())
+    for process_id in process_ids:
+        stat = Path(f"/proc/{process_id}/stat")
+        assert not stat.exists() or stat.read_text(encoding="utf-8").rpartition(")")[2].split()[
+            0
+        ] in {"X", "Z"}

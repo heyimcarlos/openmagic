@@ -10,11 +10,12 @@ from openmagic_runtime.commands import CommandReceipt, StateConflict
 from openmagic_runtime.threads import CreateThread, ThreadAccess
 from psycopg import Connection
 
+from example_insurance._persistence.renewal_fact_records import RenewalFactRecords
 from example_insurance.renewal_commands import (
     StartRenewalOutreach,
     StartRenewalOutreachResult,
 )
-from example_insurance.renewal_facts import RenewalFacts, RenewalFactSource
+from example_insurance.renewal_facts import RenewalFacts
 from example_insurance.renewals import ExampleInsurance
 
 
@@ -30,6 +31,12 @@ class RenewalSubmission:
         value = self.command.input
         if self.thread.thread_id != value.thread_id:
             raise ValueError("Renewal submission Thread does not match the Command")
+        if self.thread.channel_kind != "email":
+            raise ValueError("Renewal submission Thread must use the email channel")
+        if self.thread.channel_reference != value.policyholder_email:
+            raise ValueError(
+                "Renewal submission Thread reference must match the policyholder email"
+            )
         asserted_facts = RenewalFacts(
             policy_id=value.policy_id,
             policy_number=value.policy_number,
@@ -48,7 +55,7 @@ class RenewalSubmissionApplication:
     def __init__(self, *, database_url: str) -> None:
         self._application = ExampleInsurance(database_url=database_url)
         self._submission_database_url = database_url
-        self._submission_facts = RenewalFactSource(database_url=database_url)
+        self._submission_facts = RenewalFactRecords(database_url=database_url)
 
     def prepare(self) -> None:
         self._application.prepare()

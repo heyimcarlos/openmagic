@@ -141,6 +141,7 @@ RUNTIME_PUBLIC_EXPORTS = {
         "StepState",
         "WaitState",
     ),
+    "processes.py": ("Closeable", "OwnedProcess", "ProcessCleanup"),
     "kernel/work.py": (
         "AttemptExecutionAuthority",
         "AttemptResultConflict",
@@ -237,7 +238,7 @@ APPLICATION_PUBLIC_EXPORTS = {
         "CompletionStepFact",
         "RenewalCompletionPolicy",
     ),
-    "renewal_decisions.py": ("decision_facts", "record_decision"),
+    "renewal_decisions.py": ("decision_facts",),
     "renewal_definition.py": ("RENEWAL_DEFINITION",),
     "renewal_effect_control.py": ("RenewalEffectControl",),
     "renewal_effect_policy.py": (
@@ -266,12 +267,7 @@ APPLICATION_PUBLIC_EXPORTS = {
         "committed_permit_execution_input",
     ),
     "renewal_evidence.py": ("RenewalEvidenceProjector",),
-    "renewal_facts.py": (
-        "DurableRenewalFacts",
-        "RenewalFactSource",
-        "RenewalFacts",
-        "StaleRenewalFacts",
-    ),
+    "renewal_facts.py": ("RenewalFacts", "StaleRenewalFacts"),
     "renewal_lifecycle.py": ("RenewalLifecycleControl",),
     "renewal_lifecycle_policy.py": (
         "CancellationFacts",
@@ -416,11 +412,11 @@ EXPECTED_PRODUCTION_EDGES = (
     "openmagic-api -> openmagic-runtime",
 )
 PUBLIC_SURFACE_DIGESTS = {
-    "example-insurance": "sha256:3dddf8837885b13136f1edc05fea77352a6e5478db4cb28b65aecaa9eff0e8c2",
+    "example-insurance": "sha256:060b82299dd2e32830bce6e762cbb403223aaae2233a233ca9435a43d1a54530",
     "openmagic-api": "sha256:b47b899d81cf0831f3fa31e984c8e342e9fa8a32adbec983739a29929d131ed3",
-    "openmagic-evals": "sha256:954ce8c7057bfca65c798d3d58f98a7bb7dbfe01c76fe1399f774f3672d784be",
+    "openmagic-evals": "sha256:f4166d515c347aacf869de6408a477c54ddfe90b513e8e0e32a1870ec47ce772",
     "openmagic-playground": "sha256:768061cad92cbab2f0775ad936f519c32837c4bb1830b2fc7e7199adcfb5afaa",
-    "openmagic-runtime": "sha256:39c7e16b26f26ee91d02a774414310712a780f76076947d79f64c17b5ecaba4c",
+    "openmagic-runtime": "sha256:53af53a0b149517213b8e893d256b9e6499f5c0e9da5486d13f00e99c97fcc7a",
 }
 
 __all__ = [

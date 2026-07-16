@@ -1,11 +1,29 @@
 from __future__ import annotations
 
 import pickle
+from uuid import uuid4
 
+import pytest
 from openmagic_evals.evidence.contracts import has_correlations
-from openmagic_evals.evidence.race_processes import ProcessRaceFailure
+from openmagic_evals.evidence.race_processes import (
+    AcceptSignalRace,
+    ProcessRaceCompleted,
+    ProcessRaceFailure,
+    ProcessRaceSucceeded,
+    RaceFailureKind,
+    RaceFailureReason,
+    RaceProtocolError,
+    StepClaimRace,
+    decode_process_result,
+    validate_race_pair,
+    validate_race_request,
+)
 from openmagic_evals.evidence.races import run_all_races
-from openmagic_runtime.kernel.control import SignalConflict, SignalConflictReason
+from openmagic_runtime.kernel.control import (
+    AcceptSignal,
+    SignalConflict,
+    SignalConflictReason,
+)
 
 
 def test_signal_conflict_type_and_reason_survive_process_transport() -> None:
@@ -15,8 +33,85 @@ def test_signal_conflict_type_and_reason_survive_process_transport() -> None:
 
     transported = pickle.loads(pickle.dumps(failure))
 
-    assert transported.exception_type is SignalConflict
-    assert transported.reason is SignalConflictReason.WAIT_ALREADY_SATISFIED
+    assert transported.kind is RaceFailureKind.SIGNAL_CONFLICT
+    assert transported.reason is RaceFailureReason.WAIT_ALREADY_SATISFIED
+
+
+def test_process_result_decoder_rejects_legacy_untyped_tuple() -> None:
+    request = AcceptSignalRace(
+        AcceptSignal(
+            uuid4(),
+            uuid4(),
+            uuid4(),
+            "eval.issue71.decision",
+            1,
+            {"value": "approve"},
+            "approve",
+        )
+    )
+
+    with pytest.raises(RaceProtocolError, match="completion envelope"):
+        decode_process_result(request, ("result", 123, None, None))
+
+
+def test_process_failure_rejects_invalid_kind_reason_combination() -> None:
+    with pytest.raises(RaceProtocolError, match="invalid failure reason"):
+        ProcessRaceFailure(
+            kind=RaceFailureKind.SIGNAL_CONFLICT,
+            reason=RaceFailureReason.UNCLASSIFIED,
+            message="invalid wire failure",
+        )
+
+
+def test_process_result_decoder_rejects_request_result_mismatch() -> None:
+    request = AcceptSignalRace(
+        AcceptSignal(
+            uuid4(),
+            uuid4(),
+            uuid4(),
+            "eval.issue71.decision",
+            1,
+            {"value": "approve"},
+            "approve",
+        )
+    )
+    message = ProcessRaceCompleted(
+        process_id=123,
+        outcome=ProcessRaceSucceeded(value=None),
+    )
+
+    with pytest.raises(RaceProtocolError, match="Signal receipt"):
+        decode_process_result(request, message)
+
+
+def test_process_pair_rejects_mixed_request_kinds() -> None:
+    signal = AcceptSignalRace(
+        AcceptSignal(
+            uuid4(),
+            uuid4(),
+            uuid4(),
+            "eval.issue71.decision",
+            1,
+            {"value": "approve"},
+            "approve",
+        )
+    )
+
+    with pytest.raises(RaceProtocolError, match="same typed operation"):
+        validate_race_pair((signal, StepClaimRace("worker-1", uuid4())))
+
+
+def test_request_decoder_rejects_unknown_operation_and_invalid_fields() -> None:
+    with pytest.raises(RaceProtocolError, match="closed protocol"):
+        validate_race_request(object())
+
+    with pytest.raises(RaceProtocolError, match="worker ID"):
+        validate_race_pair(
+            (
+                StepClaimRace("", uuid4()),
+                StepClaimRace("worker-2", uuid4()),
+            )
+        )
 
 
 def test_all_cardinality_races_record_actual_trials() -> None:

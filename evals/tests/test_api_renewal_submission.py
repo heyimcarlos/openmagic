@@ -88,6 +88,26 @@ def _api_request(submission: RenewalSubmission) -> StartRenewalRequest:
     )
 
 
+@pytest.mark.parametrize(
+    ("thread_change", "message"),
+    [
+        ({"channel_kind": "sms"}, "must use the email channel"),
+        (
+            {"channel_reference": "different@example.test"},
+            "must match the policyholder email",
+        ),
+    ],
+)
+def test_submission_rejects_thread_identity_not_bound_to_command(
+    thread_change: dict[str, str],
+    message: str,
+) -> None:
+    submission = _submission()
+
+    with pytest.raises(ValueError, match=message):
+        replace(submission, thread=replace(submission.thread, **thread_change))
+
+
 def test_api_exact_replay_does_not_change_provisioned_authority() -> None:
     with postgres_container(database_name=f"openmagic_test_{uuid4().hex}") as postgres:
         database_url = postgres.get_connection_url(driver=None)
@@ -154,6 +174,34 @@ def test_conflicting_replay_rolls_back_provisioning_changes() -> None:
         with pytest.raises(IdempotencyConflict):
             application.provision_and_start_renewal(conflicting)
 
+        assert _facts_revision(database_url, submission.facts.policy_id) == (1, "Morgan Hale")
+
+
+def test_conflicting_replay_cannot_replace_thread_channel_identity() -> None:
+    with postgres_container(database_name=f"openmagic_test_{uuid4().hex}") as postgres:
+        database_url = postgres.get_connection_url(driver=None)
+        apply_migrations(database_url)
+        application = RenewalSubmissionApplication(database_url=database_url)
+        application.prepare()
+        submission = _submission()
+        application.provision_and_start_renewal(submission)
+        changed_email = "changed@example.test"
+        conflicting = replace(
+            submission,
+            thread=replace(submission.thread, channel_reference=changed_email),
+            facts=replace(submission.facts, policyholder_email=changed_email),
+            command=replace(
+                submission.command,
+                input=replace(submission.command.input, policyholder_email=changed_email),
+            ),
+        )
+
+        with pytest.raises(IdempotencyConflict):
+            application.provision_and_start_renewal(conflicting)
+
+        thread = ThreadStore(database_url=database_url).read(submission.thread.thread_id)
+        assert thread.channel_kind == "email"
+        assert thread.channel_reference == "morgan@example.test"
         assert _facts_revision(database_url, submission.facts.policy_id) == (1, "Morgan Hale")
 
 

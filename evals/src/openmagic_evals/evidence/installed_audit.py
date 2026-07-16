@@ -17,6 +17,7 @@ from openmagic_evals.evidence.package_policy import (
     role_import_violations,
     role_private_import_violations,
     role_public_persistence_violations,
+    role_sql_ownership_violations,
 )
 from openmagic_evals.evidence.surface_contracts import (
     APPLICATION_PUBLIC_EXPORTS,
@@ -113,6 +114,7 @@ def audit_installed_environment() -> InstalledSurfaceAudit:
     for role in PACKAGE_ROLES:
         violations.extend(role_import_violations(role, imports_by_distribution[role.distribution]))
         violations.extend(role_public_persistence_violations(role, files[role.distribution]))
+        violations.extend(role_sql_ownership_violations(role, files[role.distribution]))
         violations.extend(
             role_private_import_violations(
                 role,

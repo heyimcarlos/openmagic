@@ -2,15 +2,12 @@
 
 from __future__ import annotations
 
-from typing import cast
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import psycopg
 from openmagic_runtime.kernel.control import (
     AcceptSignal,
     KernelControl,
-    SignalConflict,
-    SignalConflictReason,
     SignalReceipt,
     StartInstance,
     start_instance,
@@ -41,7 +38,14 @@ from openmagic_evals.evidence.race_models import (
     jitter_pair,
     race_observation,
 )
-from openmagic_evals.evidence.race_processes import ProcessRaceResult, run_process_contenders
+from openmagic_evals.evidence.race_processes import (
+    AcceptSignalRace,
+    AttemptResultRace,
+    RaceFailureKind,
+    RaceFailureReason,
+    RouteActivationRace,
+    run_process_contenders,
+)
 
 
 def _transition_definition() -> WorkflowDefinition:
@@ -240,7 +244,7 @@ def _signal_trial(
         ),
     )
     wait_id = started.waits["decision"]
-    requests = (
+    signal_requests = (
         AcceptSignal(
             uuid4(),
             started.instance_id,
@@ -266,30 +270,32 @@ def _signal_trial(
         case_id="race.wait-signal",
         seed=seed,
         jitter_microseconds=jitters,
-        operation="accept_signal",
-        payloads=requests,
+        requests=(
+            AcceptSignalRace(signal_requests[0]),
+            AcceptSignalRace(signal_requests[1]),
+        ),
     )
-    outcomes: tuple[ProcessRaceResult, ProcessRaceResult] = contenders.results
+    outcomes = contenders.results
     public = tuple(
         "accepted"
         if item.failure is None
         else "conflict"
-        if item.failure.exception_type is SignalConflict
-        and item.failure.reason is SignalConflictReason.WAIT_ALREADY_SATISFIED
+        if item.failure.kind is RaceFailureKind.SIGNAL_CONFLICT
+        and item.failure.reason is RaceFailureReason.WAIT_ALREADY_SATISFIED
         else "unexpected_error"
         for item in outcomes
     )
     unexpected_errors = tuple(
         (
-            item.failure.exception_type.__name__,
-            item.failure.reason,
+            item.failure.kind.value,
+            item.failure.reason.value,
             item.failure.message,
         )
         for item in outcomes
         if item.failure is not None
         and not (
-            item.failure.exception_type is SignalConflict
-            and item.failure.reason is SignalConflictReason.WAIT_ALREADY_SATISFIED
+            item.failure.kind is RaceFailureKind.SIGNAL_CONFLICT
+            and item.failure.reason is RaceFailureReason.WAIT_ALREADY_SATISFIED
         )
     )
     if unexpected_errors:
@@ -358,15 +364,14 @@ def _attempt_and_route_trial(
         case_id="race.attempt-result",
         seed=seed,
         jitter_microseconds=attempt_jitters,
-        operation="attempt_result",
-        payloads=(
-            (claim, f"attempt-result-{seed}", observation),
-            (claim, f"attempt-result-{seed}", observation),
+        requests=(
+            AttemptResultRace(claim, f"attempt-result-{seed}", observation),
+            AttemptResultRace(claim, f"attempt-result-{seed}", observation),
         ),
     )
-    dispositions = cast(
-        tuple[DispositionRequired, DispositionRequired],
-        tuple(result.require_value() for result in attempt_contenders.results),
+    dispositions: tuple[DispositionRequired, DispositionRequired] = (
+        attempt_contenders.results[0].require_value(),
+        attempt_contenders.results[1].require_value(),
     )
     attempt_public = tuple("replayed" if item.replayed else "accepted" for item in dispositions)
     attempt_count = inspection.completed_attempts(claim.attempt_id)
@@ -433,28 +438,33 @@ def _attempt_and_route_trial(
         case_id="race.route-activation",
         seed=seed,
         jitter_microseconds=route_jitters,
-        operation="route_activation",
-        payloads=(
-            (route_claim, f"route-result-{seed}", route_observation),
-            (route_claim, f"route-result-{seed}", route_observation),
+        requests=(
+            RouteActivationRace(
+                route_claim,
+                f"route-result-{seed}",
+                route_observation,
+            ),
+            RouteActivationRace(
+                route_claim,
+                f"route-result-{seed}",
+                route_observation,
+            ),
         ),
     )
-    route_outcomes = cast(
-        tuple[
-            tuple[dict[str, UUID], dict[str, UUID], bool],
-            tuple[dict[str, UUID], dict[str, UUID], bool],
-        ],
-        tuple(result.require_value() for result in route_contenders.results),
+    route_outcomes = (
+        route_contenders.results[0].require_value(),
+        route_contenders.results[1].require_value(),
     )
     route_count = inspection.materialized_steps(route_started.instance_id, "finish")
     route_public = ("value_identical_receipt", "value_identical_receipt")
     if (
         route_count != 1
-        or route_outcomes[0][:2] != route_outcomes[1][:2]
-        or sorted(item[2] for item in route_outcomes) != [False, True]
+        or route_outcomes[0].steps != route_outcomes[1].steps
+        or route_outcomes[0].waits != route_outcomes[1].waits
+        or sorted(item.replayed for item in route_outcomes) != [False, True]
     ):
         raise AssertionError(f"Route activation constraint disagreed for seed {seed}")
-    finish_step_ids = tuple(route_outcomes[0][0].values())
+    finish_step_ids = tuple(route_outcomes[0].steps.values())
     route_document = race_observation(
         {
             "seed": seed,

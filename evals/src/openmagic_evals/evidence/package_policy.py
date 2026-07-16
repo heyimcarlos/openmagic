@@ -9,6 +9,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 _NORMALIZE = re.compile(r"[-_.]+")
+_SQL_STATEMENT = re.compile(
+    r"\b(?:SELECT|INSERT\s+INTO|UPDATE|DELETE\s+FROM|CREATE\s+TABLE|"
+    r"ALTER\s+TABLE|DROP\s+TABLE)\b",
+    re.IGNORECASE,
+)
+_APPLICATION_SQL_LIFECYCLE_OWNERS = frozenset({"migrations.py", "readiness.py"})
 
 
 @dataclass(frozen=True)
@@ -79,10 +85,6 @@ PACKAGE_ROLES: tuple[PackageRole, ...] = (
         ),
     ),
 )
-PRIVATE_PERSISTENCE_OWNERS = {
-    "example_insurance._persistence": "example-insurance",
-    "openmagic_runtime._persistence": "openmagic-runtime",
-}
 
 
 def normalize_distribution(value: str) -> str:
@@ -134,18 +136,21 @@ def role_import_violations(role: PackageRole, imports: frozenset[str]) -> tuple[
 
 
 def role_private_import_violations(role: PackageRole, imports: frozenset[str]) -> tuple[str, ...]:
-    violations: list[str] = []
-    for private_package, owner in PRIVATE_PERSISTENCE_OWNERS.items():
-        if role.distribution == owner:
+    package_owners = {item.package: item.distribution for item in PACKAGE_ROLES}
+    private_packages: set[str] = set()
+    for imported in imports:
+        parts = imported.split(".")
+        owner = package_owners.get(parts[0])
+        if owner is None or owner == role.distribution:
             continue
-        if any(
-            imported == private_package or imported.startswith(private_package + ".")
-            for imported in imports
-        ):
-            violations.append(
-                f"{role.distribution} imports private persistence package {private_package}"
-            )
-    return tuple(violations)
+        for index, part in enumerate(parts[1:], start=1):
+            if part.startswith("_") and not (part.startswith("__") and part.endswith("__")):
+                private_packages.add(".".join(parts[: index + 1]))
+                break
+    return tuple(
+        f"{role.distribution} imports private package {private_package}"
+        for private_package in sorted(private_packages)
+    )
 
 
 def role_public_persistence_violations(
@@ -164,6 +169,36 @@ def role_public_persistence_violations(
             violations.append(
                 f"{role.distribution} exposes persistence adapter {relative.as_posix()}"
             )
+    return tuple(sorted(violations))
+
+
+def role_sql_ownership_violations(role: PackageRole, paths: tuple[Path, ...]) -> tuple[str, ...]:
+    """Reject Example Insurance SQL outside its canonical persistence owners."""
+
+    if role.distribution != "example-insurance":
+        return ()
+    violations: list[str] = []
+    for path in paths:
+        if path.suffix != ".py" or role.package not in path.parts:
+            continue
+        package_index = path.parts.index(role.package)
+        relative = Path(*path.parts[package_index + 1 :])
+        if (
+            "_persistence" in relative.parts
+            or relative.as_posix() in _APPLICATION_SQL_LIFECYCLE_OWNERS
+        ):
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Constant)
+                and isinstance(node.value, str)
+                and _SQL_STATEMENT.search(node.value)
+            ):
+                violations.append(
+                    f"{role.distribution} contains SQL outside approved persistence owner "
+                    f"{relative.as_posix()}:{node.lineno}"
+                )
     return tuple(sorted(violations))
 
 
@@ -187,7 +222,6 @@ def package_role(distribution: str) -> PackageRole:
 
 __all__ = [
     "PACKAGE_ROLES",
-    "PRIVATE_PERSISTENCE_OWNERS",
     "PackageRole",
     "normalize_distribution",
     "package_role",
@@ -198,5 +232,6 @@ __all__ = [
     "role_import_violations",
     "role_private_import_violations",
     "role_public_persistence_violations",
+    "role_sql_ownership_violations",
     "source_python_files",
 ]
