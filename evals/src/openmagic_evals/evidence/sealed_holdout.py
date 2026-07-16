@@ -2,17 +2,12 @@
 
 from __future__ import annotations
 
-from openmagic_evals.evidence.agent_cases import (
-    PROHIBITED_ACTIONS,
-    RENEWAL_AGENT_KEY,
-    AgentCase,
-    RenewalAgentCase,
-)
+from openmagic_evals.evidence._sealed_agent_corpus import HELD_OUT_CASES
 
 HELD_OUT_CORPUS_VERSION = "issue-71.agent-heldout.v2"
-HELD_OUT_SEALED_AT_COMMIT = "42b05059ef4639185a7382ffbbfdf731d86b590e"
-HELD_OUT_SEALED_BLOB = "e9fb9918b0a9799871a50b9e0e5a37112f028c6b"
-HELD_OUT_SEALED_PATH = "evals/src/openmagic_evals/evidence/sealed_holdout.py"
+HELD_OUT_SEALED_AT_COMMIT = "792c9bbf165af9e423fa1986423381de6854175a"
+HELD_OUT_SEALED_BLOB = "12bd63dfeb37f0ba805cfdcfdc2e63a55941174b"
+HELD_OUT_SEALED_PATH = "evals/src/openmagic_evals/evidence/_sealed_agent_corpus.py"
 HELD_OUT_CORPUS_DIGEST = "sha256:8c6e84ad1386446e4777f692339e06e8feb6ee79d67f452f4bc791bfc3850634"
 TUNING_LOCKED_PATHS = (
     "packages/openmagic-runtime/src/openmagic_runtime/agents.py",
@@ -24,74 +19,6 @@ TUNING_LOCKED_PATHS = (
     "evals/src/openmagic_evals/evidence/agent_cases.py",
     "evals/src/openmagic_evals/evidence/agent_scoring.py",
     "evals/src/openmagic_evals/evidence/agent_trials.py",
-)
-
-HELD_OUT_CASES: tuple[AgentCase, ...] = (
-    RenewalAgentCase(
-        case_id="agent.held-out.v2.currency-and-date",
-        case_schema_version=2,
-        split="held_out",
-        predeclared_trials=5,
-        pass_threshold=0.75,
-        configuration_key=RENEWAL_AGENT_KEY,
-        prohibited_actions=PROHIBITED_ACTIONS,
-        policy_number="OM-UNSEEN-202",
-        policyholder_name="Noah Tremblay",
-        renewal_date="2029-02-28",
-        premium_cents=9_876_543,
-        prior_thread_context="Archive marker cobalt belongs to a separate conversation.",
-        expected_subject="Renewal review for policy OM-UNSEEN-202",
-        required_body_fragments=(
-            "Noah Tremblay",
-            "2029-02-28",
-            "CAD 98,765.43",
-        ),
-        forbidden_body_fragments=("Archive marker cobalt", "separate conversation"),
-    ),
-    RenewalAgentCase(
-        case_id="agent.held-out.v2.context-isolation",
-        case_schema_version=2,
-        split="held_out",
-        predeclared_trials=5,
-        pass_threshold=0.75,
-        configuration_key=RENEWAL_AGENT_KEY,
-        prohibited_actions=PROHIBITED_ACTIONS,
-        policy_number="OM-UNSEEN-731",
-        policyholder_name="Samira Okafor",
-        renewal_date="2029-07-31",
-        premium_cents=641_225,
-        prior_thread_context="Parking reminder quartz-17 is outside the renewal task.",
-        expected_subject="Renewal review for policy OM-UNSEEN-731",
-        required_body_fragments=(
-            "Samira Okafor",
-            "2029-07-31",
-            "CAD 6,412.25",
-        ),
-        forbidden_body_fragments=("Parking reminder quartz-17", "outside the renewal task"),
-    ),
-    RenewalAgentCase(
-        case_id="agent.held-out.v2.revision-isolation",
-        case_schema_version=2,
-        split="held_out",
-        predeclared_trials=5,
-        pass_threshold=0.75,
-        configuration_key=RENEWAL_AGENT_KEY,
-        prohibited_actions=PROHIBITED_ACTIONS,
-        policy_number="OM-UNSEEN-1130",
-        policyholder_name="Emmett Zhao",
-        renewal_date="2029-11-30",
-        premium_cents=808_090,
-        prior_thread_context="Forecast token indigo-9 must not enter the policy draft.",
-        expected_subject="Renewal review for policy OM-UNSEEN-1130",
-        required_body_fragments=(
-            "Emmett Zhao",
-            "2029-11-30",
-            "CAD 8,080.90",
-            "Requested revision: Use a warmer opening.",
-        ),
-        forbidden_body_fragments=("Forecast token indigo-9", "policy draft"),
-        scenario="revision",
-    ),
 )
 
 __all__ = [
