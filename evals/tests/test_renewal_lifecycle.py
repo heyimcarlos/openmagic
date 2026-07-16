@@ -410,6 +410,7 @@ def test_fence_before_cancellation_makes_cancellation_too_late(tmp_path) -> None
         )
 
 
+@pytest.mark.timeout(180)
 def test_concurrent_cancellation_and_fence_serialize_to_one_valid_authority_order(
     tmp_path,
 ) -> None:
