@@ -16,6 +16,7 @@ from openmagic_evals.evidence.package_policy import (
     python_imports,
     role_dependency_violations,
     role_import_violations,
+    role_private_import_violations,
     source_python_files,
 )
 from openmagic_evals.evidence.surface_contracts import (
@@ -145,6 +146,7 @@ def audit_repository(root: Path) -> RepositoryAudit:
         imports = python_imports(source_python_files(root / role.source))
         dependencies = project_dependencies(root / role.project)
         violations.extend(role_import_violations(role, imports))
+        violations.extend(role_private_import_violations(role, imports))
         violations.extend(role_dependency_violations(role, dependencies))
         exports = _public_exports(root / role.source)
         if canonical_digest(exports) != PUBLIC_SURFACE_DIGESTS[role.distribution]:

@@ -9,6 +9,7 @@ from typing import Any
 from uuid import UUID
 
 import psycopg
+from psycopg import Connection
 from psycopg.rows import dict_row
 
 
@@ -71,28 +72,43 @@ class RenewalFactSource:
     def replace(self, facts: RenewalFacts) -> None:
         """Record the current authoritative business facts for one policy."""
         with psycopg.connect(self._database_url) as connection, connection.transaction():
-            connection.execute(
-                "INSERT INTO example_insurance.policy_renewal_facts "
-                "(policy_id, policy_number, policyholder_name, renewal_date, "
-                "expiring_premium_cents, revision, policyholder_email) "
-                "VALUES (%s, %s, %s, %s, %s, 1, %s) "
-                "ON CONFLICT (policy_id) DO UPDATE SET "
-                "policy_number = EXCLUDED.policy_number, "
-                "policyholder_name = EXCLUDED.policyholder_name, "
-                "renewal_date = EXCLUDED.renewal_date, "
-                "expiring_premium_cents = EXCLUDED.expiring_premium_cents, "
-                "policyholder_email = EXCLUDED.policyholder_email, "
-                "revision = example_insurance.policy_renewal_facts.revision + 1, "
-                "updated_at = clock_timestamp()",
-                (
-                    facts.policy_id,
-                    facts.policy_number,
-                    facts.policyholder_name,
-                    facts.renewal_date,
-                    facts.expiring_premium_cents,
-                    facts.policyholder_email,
-                ),
-            )
+            self.replace_on(connection, facts)
+
+    def replace_on(
+        self,
+        connection: Connection[tuple[Any, ...]],
+        facts: RenewalFacts,
+    ) -> None:
+        """Replace changed facts inside the caller-owned transaction."""
+        connection.execute(
+            "INSERT INTO example_insurance.policy_renewal_facts "
+            "(policy_id, policy_number, policyholder_name, renewal_date, "
+            "expiring_premium_cents, revision, policyholder_email) "
+            "VALUES (%s, %s, %s, %s, %s, 1, %s) "
+            "ON CONFLICT (policy_id) DO UPDATE SET "
+            "policy_number = EXCLUDED.policy_number, "
+            "policyholder_name = EXCLUDED.policyholder_name, "
+            "renewal_date = EXCLUDED.renewal_date, "
+            "expiring_premium_cents = EXCLUDED.expiring_premium_cents, "
+            "policyholder_email = EXCLUDED.policyholder_email, "
+            "revision = example_insurance.policy_renewal_facts.revision + 1, "
+            "updated_at = clock_timestamp() "
+            "WHERE (example_insurance.policy_renewal_facts.policy_number, "
+            "example_insurance.policy_renewal_facts.policyholder_name, "
+            "example_insurance.policy_renewal_facts.renewal_date, "
+            "example_insurance.policy_renewal_facts.expiring_premium_cents, "
+            "example_insurance.policy_renewal_facts.policyholder_email) IS DISTINCT FROM "
+            "(EXCLUDED.policy_number, EXCLUDED.policyholder_name, EXCLUDED.renewal_date, "
+            "EXCLUDED.expiring_premium_cents, EXCLUDED.policyholder_email)",
+            (
+                facts.policy_id,
+                facts.policy_number,
+                facts.policyholder_name,
+                facts.renewal_date,
+                facts.expiring_premium_cents,
+                facts.policyholder_email,
+            ),
+        )
 
     def gather(self, assertion: dict[str, Any]) -> dict[str, Any]:
         policy_id = UUID(str(assertion["policy_id"]))

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any, Literal
 from uuid import UUID
 
@@ -16,6 +17,29 @@ class AcceptSignal:
     schema_version: int
     payload: dict[str, Any]
     route_key: str
+
+
+class SignalConflictReason(StrEnum):
+    INSTANCE_NOT_FOUND = "instance_not_found"
+    WAIT_NOT_FOUND = "wait_not_found"
+    WAIT_ALREADY_SATISFIED = "wait_already_satisfied"
+    IDENTITY_REUSED = "identity_reused"
+
+
+_SIGNAL_CONFLICT_MESSAGES = {
+    SignalConflictReason.INSTANCE_NOT_FOUND: "Signal target Instance does not exist",
+    SignalConflictReason.WAIT_NOT_FOUND: "Signal target Wait does not exist",
+    SignalConflictReason.WAIT_ALREADY_SATISFIED: ("Signal target Wait is no longer unsatisfied"),
+    SignalConflictReason.IDENTITY_REUSED: ("Signal identity was reused with conflicting input"),
+}
+
+
+class SignalConflict(RuntimeError):
+    """A typed rejection caused by durable Signal state or identity."""
+
+    def __init__(self, reason: SignalConflictReason) -> None:
+        self.reason = reason
+        super().__init__(_SIGNAL_CONFLICT_MESSAGES[reason])
 
 
 @dataclass(frozen=True)
@@ -87,6 +111,8 @@ __all__ = [
     "GuardCurrentAttempt",
     "ResolveDeferredStep",
     "ResolveDeferredStepReceipt",
+    "SignalConflict",
+    "SignalConflictReason",
     "SignalReceipt",
     "deferred_action",
 ]

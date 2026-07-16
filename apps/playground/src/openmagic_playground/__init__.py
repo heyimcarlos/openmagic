@@ -4,7 +4,6 @@ from dataclasses import asdict, dataclass
 from importlib.metadata import version
 
 from openmagic_playground.demonstrations import (
-    DemonstrationResult,
     exercise_process_controls,
     run_renewal_demonstration,
     run_verification_demonstration,
@@ -16,6 +15,16 @@ from openmagic_playground.reset import (
     assess_reset,
     mark_synthetic_deployment,
     reset_synthetic_deployment,
+)
+from openmagic_playground.responses import (
+    ControlExerciseResponse,
+    ExercisedControls,
+    PlaygroundCorrelations,
+    PostgresDeploymentObservation,
+    RenewalDemonstrationObservation,
+    RenewalDemonstrationResponse,
+    VerificationDemonstrationObservation,
+    VerificationDemonstrationResponse,
 )
 
 __version__ = version("openmagic-playground")
@@ -54,14 +63,21 @@ def process_controls() -> PlaygroundProcessControls:
 
 
 __all__ = [
-    "DemonstrationResult",
+    "ControlExerciseResponse",
+    "ExercisedControls",
     "ManagedProcess",
+    "PlaygroundCorrelations",
     "PlaygroundDeployment",
     "PlaygroundProcessControls",
     "PlaygroundSafety",
+    "PostgresDeploymentObservation",
     "ProcessRole",
+    "RenewalDemonstrationObservation",
+    "RenewalDemonstrationResponse",
     "ResetAssessment",
     "ResetPreflightBlocked",
+    "VerificationDemonstrationObservation",
+    "VerificationDemonstrationResponse",
     "__version__",
     "assess_reset",
     "exercise_process_controls",

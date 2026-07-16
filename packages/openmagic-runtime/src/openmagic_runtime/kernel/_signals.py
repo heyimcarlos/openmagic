@@ -17,7 +17,12 @@ from openmagic_runtime.kernel._control_support import (
 )
 from openmagic_runtime.kernel._records import lock_instance, lock_wait
 from openmagic_runtime.kernel._trace import append_trace, read_trace_replay
-from openmagic_runtime.kernel._transitions import AcceptSignal, SignalReceipt
+from openmagic_runtime.kernel._transitions import (
+    AcceptSignal,
+    SignalConflict,
+    SignalConflictReason,
+    SignalReceipt,
+)
 from openmagic_runtime.kernel.definitions import Route, validate_payload
 
 
@@ -42,9 +47,9 @@ def _validated_route(connection: Connection[tuple[Any, ...]], request: AcceptSig
         instance_id=request.instance_id,
     )
     if wait is None:
-        raise RuntimeError("Signal target Wait does not exist")
+        raise SignalConflict(SignalConflictReason.WAIT_NOT_FOUND)
     if wait.state != "unsatisfied":
-        raise RuntimeError("Signal target Wait is no longer unsatisfied")
+        raise SignalConflict(SignalConflictReason.WAIT_ALREADY_SATISFIED)
     definition = instance_definition(connection, request.instance_id)
     wait_template = next(
         item for item in definition.wait_templates if item.key == wait.template_key
@@ -70,7 +75,7 @@ def accept_signal(connection: Connection[tuple[Any, ...]], request: AcceptSignal
     input_digest = canonical_digest(transition_input)
     instance = lock_instance(connection, request.instance_id)
     if instance is None:
-        raise RuntimeError("Instance not found")
+        raise SignalConflict(SignalConflictReason.INSTANCE_NOT_FOUND)
     lock_source_identity(
         connection,
         source_kind="signal_acceptance",
@@ -83,7 +88,7 @@ def accept_signal(connection: Connection[tuple[Any, ...]], request: AcceptSignal
     )
     if replay is not None:
         if replay.input_digest != input_digest:
-            raise ValueError("Signal identity was reused with conflicting input")
+            raise SignalConflict(SignalConflictReason.IDENTITY_REUSED)
         return _receipt(replay.receipt)
     require_open_instance(instance.state)
     route = _validated_route(connection, request)

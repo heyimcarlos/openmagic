@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 
+from openmagic_playground import ControlExerciseResponse, PlaygroundCorrelations
+
 from openmagic_evals.evidence.artifact_io import write_artifact
 from openmagic_evals.evidence.contracts import (
     AgentCorrelations,
@@ -27,13 +29,14 @@ from openmagic_evals.evidence.reproducibility import reproducibility_pin
 
 
 def playground_correlations(
-    value: dict[str, object], process_ids: tuple[int, ...] = ()
+    value: PlaygroundCorrelations, process_ids: tuple[int, ...] = ()
 ) -> Correlations:
+    serialized = value.model_dump(mode="python")
     return Correlations(
         runtime=RuntimeCorrelations.model_validate(
             {
                 key: item
-                for key, item in value.items()
+                for key, item in serialized.items()
                 if key.endswith("_ids")
                 and key
                 in {
@@ -51,7 +54,7 @@ def playground_correlations(
         application=ApplicationCorrelations.model_validate(
             {
                 key: item
-                for key, item in value.items()
+                for key, item in serialized.items()
                 if key
                 in {
                     "thread_ids",
@@ -66,7 +69,7 @@ def playground_correlations(
                 }
             }
         ),
-        agent=AgentCorrelations.model_validate({"agent_run_ids": value.get("agent_run_ids", [])}),
+        agent=AgentCorrelations(agent_run_ids=value.agent_run_ids),
         process=ProcessCorrelations(process_ids=process_ids),
     )
 
@@ -97,9 +100,10 @@ def verify_playground(
         "--working-directory",
         str((working_directory / "deployment").resolve()),
         timeout_seconds=timeout_seconds,
+        response_type=ControlExerciseResponse,
     )
     finished_at = datetime.now(UTC)
-    controls = result["controls"]
+    controls = result.controls.model_dump(mode="python")
     expected_controls = {
         "start": 3,
         "drain": 3,
@@ -110,12 +114,12 @@ def verify_playground(
     if controls != expected_controls:
         raise AssertionError("playground did not exercise every declared public control")
     process_ids = tuple(
-        int(value) for value in (*result["original_process_ids"], *result["restarted_process_ids"])
+        int(value) for value in (*result.original_process_ids, *result.restarted_process_ids)
     )
-    case_correlations = playground_correlations(result["correlations"], process_ids)
+    case_correlations = playground_correlations(result.correlations, process_ids)
     case_observation = {
         "controls": controls,
-        "fixture": result["fixture"],
+        "fixture": result.fixture.model_dump(mode="json"),
         "fixture_reproduced_after_reset": True,
         "effects_enabled": False,
     }
@@ -136,8 +140,8 @@ def verify_playground(
             timeout_seconds=timeout_seconds,
             case_corpus_digest=canonical_digest("issue-71.playground.v1"),
             postgres_deployments=tuple(
-                PostgresDeploymentPin.model_validate(value)
-                for value in result["postgres_deployments"]
+                PostgresDeploymentPin.model_validate(value.model_dump(mode="python"))
+                for value in result.postgres_deployments
             ),
         ),
         cases=(

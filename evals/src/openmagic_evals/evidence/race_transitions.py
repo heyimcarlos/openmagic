@@ -9,6 +9,8 @@ import psycopg
 from openmagic_runtime.kernel.control import (
     AcceptSignal,
     KernelControl,
+    SignalConflict,
+    SignalConflictReason,
     SignalReceipt,
     StartInstance,
     start_instance,
@@ -268,24 +270,31 @@ def _signal_trial(
         payloads=requests,
     )
     outcomes: tuple[ProcessRaceResult, ProcessRaceResult] = contenders.results
-    expected_conflict = ("RuntimeError", "Signal target Wait is no longer unsatisfied")
     public = tuple(
         "accepted"
-        if item.error_type is None
+        if item.failure is None
         else "conflict"
-        if (item.error_type, item.error_message) == expected_conflict
+        if item.failure.exception_type is SignalConflict
+        and item.failure.reason is SignalConflictReason.WAIT_ALREADY_SATISFIED
         else "unexpected_error"
         for item in outcomes
     )
     unexpected_errors = tuple(
-        (item.error_type, item.error_message)
+        (
+            item.failure.exception_type.__name__,
+            item.failure.reason,
+            item.failure.message,
+        )
         for item in outcomes
-        if item.error_type is not None
-        and (item.error_type, item.error_message) != expected_conflict
+        if item.failure is not None
+        and not (
+            item.failure.exception_type is SignalConflict
+            and item.failure.reason is SignalConflictReason.WAIT_ALREADY_SATISFIED
+        )
     )
     if unexpected_errors:
         raise RuntimeError(f"Signal race contender failed unexpectedly: {unexpected_errors}")
-    winner = next(item.require_value() for item in outcomes if item.error_type is None)
+    winner = next(item.require_value() for item in outcomes if item.failure is None)
     if not isinstance(winner, SignalReceipt):
         raise AssertionError("Signal race did not return its typed winner receipt")
     constraint_rows = inspection.accepted_signals(wait_id)

@@ -79,6 +79,10 @@ PACKAGE_ROLES: tuple[PackageRole, ...] = (
         ),
     ),
 )
+PRIVATE_PERSISTENCE_OWNERS = {
+    "example_insurance._persistence": "example-insurance",
+    "openmagic_runtime._persistence": "openmagic-runtime",
+}
 
 
 def normalize_distribution(value: str) -> str:
@@ -97,9 +101,12 @@ def python_imports(paths: tuple[Path, ...]) -> frozenset[str]:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
-                imported.update(alias.name.split(".", 1)[0] for alias in node.names)
+                imported.update(alias.name for alias in node.names)
             elif isinstance(node, ast.ImportFrom) and node.module:
-                imported.add(node.module.split(".", 1)[0])
+                imported.add(node.module)
+                imported.update(
+                    f"{node.module}.{alias.name}" for alias in node.names if alias.name != "*"
+                )
     return frozenset(imported)
 
 
@@ -116,11 +123,29 @@ def project_dependencies(project: Path) -> frozenset[str]:
 
 def role_import_violations(role: PackageRole, imports: frozenset[str]) -> tuple[str, ...]:
     internal_packages = frozenset(item.package for item in PACKAGE_ROLES)
-    forbidden = (imports & internal_packages).difference(role.allowed_internal, {role.package})
+    imported_internal = frozenset(
+        name.split(".", 1)[0] for name in imports if name.split(".", 1)[0] in internal_packages
+    )
+    forbidden = imported_internal.difference(role.allowed_internal, {role.package})
     return tuple(
         f"{role.distribution} imports forbidden internal package {package}"
         for package in sorted(forbidden)
     )
+
+
+def role_private_import_violations(role: PackageRole, imports: frozenset[str]) -> tuple[str, ...]:
+    violations: list[str] = []
+    for private_package, owner in PRIVATE_PERSISTENCE_OWNERS.items():
+        if role.distribution == owner:
+            continue
+        if any(
+            imported == private_package or imported.startswith(private_package + ".")
+            for imported in imports
+        ):
+            violations.append(
+                f"{role.distribution} imports private persistence package {private_package}"
+            )
+    return tuple(violations)
 
 
 def role_dependency_violations(role: PackageRole, dependencies: frozenset[str]) -> tuple[str, ...]:
@@ -143,6 +168,7 @@ def package_role(distribution: str) -> PackageRole:
 
 __all__ = [
     "PACKAGE_ROLES",
+    "PRIVATE_PERSISTENCE_OWNERS",
     "PackageRole",
     "normalize_distribution",
     "package_role",
@@ -151,5 +177,6 @@ __all__ = [
     "requirement_name",
     "role_dependency_violations",
     "role_import_violations",
+    "role_private_import_violations",
     "source_python_files",
 ]

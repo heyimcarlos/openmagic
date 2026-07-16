@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import asdict, dataclass
 from pathlib import Path
 from uuid import UUID, uuid5
 
@@ -29,23 +28,22 @@ from testcontainers.postgres import PostgresContainer
 from openmagic_playground.deployment import POSTGRES_IMAGE, PlaygroundDeployment
 from openmagic_playground.deployment_observation import observe_postgres
 from openmagic_playground.reset import mark_synthetic_deployment
+from openmagic_playground.responses import (
+    ControlExerciseResponse,
+    ExercisedControls,
+    PlaygroundCorrelations,
+    PostgresDeploymentObservation,
+    RenewalDemonstrationObservation,
+    RenewalDemonstrationResponse,
+    VerificationDemonstrationObservation,
+    VerificationDemonstrationResponse,
+)
 
 _DEMO_NAMESPACE = UUID("d21783e3-7912-45d6-b3b2-289549e5d3e5")
 
 
 def _id(scenario: str, role: str) -> UUID:
     return uuid5(_DEMO_NAMESPACE, f"{scenario}:{role}")
-
-
-@dataclass(frozen=True)
-class DemonstrationResult:
-    demonstration: str
-    correlations: dict[str, list[str | int]]
-    observation: dict[str, object]
-    postgres_deployments: tuple[dict[str, object], ...]
-
-    def as_dict(self) -> dict[str, object]:
-        return asdict(self)
 
 
 def _database(scenario: str) -> tuple[PostgresContainer, str]:
@@ -99,8 +97,11 @@ def _renewal_fixture(
 
 
 def _renewal_result(
-    application: ExampleInsurance, threads: ThreadStore, command: StartRenewalOutreach
-) -> DemonstrationResult:
+    application: ExampleInsurance,
+    threads: ThreadStore,
+    command: StartRenewalOutreach,
+    postgres_deployment: PostgresDeploymentObservation,
+) -> RenewalDemonstrationResponse:
     evidence = json.loads(application.renewal_evidence_json(command.input.workflow_id))
     values = evidence["correlations"]
     outcomes = evidence["outcomes"]
@@ -111,33 +112,32 @@ def _renewal_result(
         or len(messages) != 1
     ):
         raise AssertionError("synthetic playground renewal left its safe approval boundary")
-    return DemonstrationResult(
-        demonstration="renewal",
-        correlations={
-            "command_ids": [values["command_id"]],
-            "workflow_ids": [values["workflow_id"]],
-            "instance_ids": [values["instance_id"]],
-            "step_ids": values["step_ids"],
-            "attempt_ids": values["attempt_ids"],
-            "wait_ids": outcomes["approval_wait_ids"],
-            "thread_ids": [values["thread_id"]],
-            "message_ids": values["message_ids"],
-            "agent_run_ids": values["agent_run_ids"],
-            "domain_event_ids": values["domain_event_ids"],
-            "delivery_ids": values["delivery_ids"],
-        },
-        observation={
-            "approval_wait_state": outcomes["approval_wait_state"],
-            "external_email_effect_count": outcomes["external_email_effect_count"],
-            "instance_state": outcomes["instance_state"],
-            "message_count": len(messages),
-            "workflow_lifecycle": outcomes["workflow_lifecycle"],
-        },
-        postgres_deployments=(),
+    return RenewalDemonstrationResponse(
+        correlations=PlaygroundCorrelations(
+            command_ids=(values["command_id"],),
+            workflow_ids=(values["workflow_id"],),
+            instance_ids=(values["instance_id"],),
+            step_ids=values["step_ids"],
+            attempt_ids=values["attempt_ids"],
+            wait_ids=outcomes["approval_wait_ids"],
+            thread_ids=(values["thread_id"],),
+            message_ids=values["message_ids"],
+            agent_run_ids=values["agent_run_ids"],
+            domain_event_ids=values["domain_event_ids"],
+            delivery_ids=values["delivery_ids"],
+        ),
+        observation=RenewalDemonstrationObservation(
+            approval_wait_state=outcomes["approval_wait_state"],
+            external_email_effect_count=outcomes["external_email_effect_count"],
+            instance_state=outcomes["instance_state"],
+            message_count=len(messages),
+            workflow_lifecycle=outcomes["workflow_lifecycle"],
+        ),
+        postgres_deployments=(postgres_deployment,),
     )
 
 
-def run_renewal_demonstration() -> DemonstrationResult:
+def run_renewal_demonstration() -> RenewalDemonstrationResponse:
     """Run the effects-disabled renewal demonstration in an isolated database."""
 
     container, database_url = _database("renewal")
@@ -150,18 +150,17 @@ def run_renewal_demonstration() -> DemonstrationResult:
         application.prepare()
         threads = ThreadStore(database_url=database_url)
         command, _actor = _renewal_fixture(application, threads, "renewal")
-        result = _renewal_result(application, threads, command)
-        return DemonstrationResult(
-            demonstration=result.demonstration,
-            correlations=result.correlations,
-            observation=result.observation,
-            postgres_deployments=(observe_postgres(database_url),),
+        return _renewal_result(
+            application,
+            threads,
+            command,
+            PostgresDeploymentObservation.model_validate(observe_postgres(database_url)),
         )
     finally:
         container.stop()
 
 
-def run_verification_demonstration() -> DemonstrationResult:
+def run_verification_demonstration() -> VerificationDemonstrationResponse:
     """Run deterministic verification without an external provider."""
 
     container, database_url = _database("verification")
@@ -252,26 +251,29 @@ def run_verification_demonstration() -> DemonstrationResult:
         )
         if receipt.result.verification_outcome != "verified":
             raise AssertionError("verification demonstration did not verify")
-        return DemonstrationResult(
-            demonstration="verification",
-            correlations={
-                "command_ids": [str(protected.command_id), str(receipt.command_id)],
-                "workflow_ids": [str(renewal.input.workflow_id)],
-                "thread_ids": [str(renewal.input.thread_id), str(identifier_thread_id)],
-                "verification_challenge_ids": [str(challenge_id)],
-            },
-            observation={
-                "verification_outcome": receipt.result.verification_outcome,
-                "protected_outcome": receipt.result.protected_outcome,
-                "session_count": 1,
-            },
-            postgres_deployments=(observe_postgres(database_url),),
+        if receipt.result.protected_outcome != "authorized":
+            raise AssertionError("verification demonstration was not authorized")
+        return VerificationDemonstrationResponse(
+            correlations=PlaygroundCorrelations(
+                command_ids=(protected.command_id, receipt.command_id),
+                workflow_ids=(renewal.input.workflow_id,),
+                thread_ids=(renewal.input.thread_id, identifier_thread_id),
+                verification_challenge_ids=(challenge_id,),
+            ),
+            observation=VerificationDemonstrationObservation(
+                verification_outcome=receipt.result.verification_outcome,
+                protected_outcome=receipt.result.protected_outcome,
+                session_count=1,
+            ),
+            postgres_deployments=(
+                PostgresDeploymentObservation.model_validate(observe_postgres(database_url)),
+            ),
         )
     finally:
         container.stop()
 
 
-def exercise_process_controls(*, working_directory: Path) -> dict[str, object]:
+def exercise_process_controls(*, working_directory: Path) -> ControlExerciseResponse:
     """Exercise start, drain, reset, restart, and stop on one safe deployment."""
 
     deployment = PlaygroundDeployment(working_directory=working_directory)
@@ -281,6 +283,9 @@ def exercise_process_controls(*, working_directory: Path) -> dict[str, object]:
         first_application = ExampleInsurance(database_url=deployment.database_url)
         first_application.prepare()
         first_threads = ThreadStore(database_url=deployment.database_url)
+        postgres_deployment = PostgresDeploymentObservation.model_validate(
+            observe_postgres(deployment.database_url)
+        )
         first = _renewal_result(
             first_application,
             first_threads,
@@ -289,6 +294,7 @@ def exercise_process_controls(*, working_directory: Path) -> dict[str, object]:
                 first_threads,
                 "control",
             )[0],
+            postgres_deployment,
         )
         deployment.reset()
         second_application = ExampleInsurance(database_url=deployment.database_url)
@@ -302,6 +308,7 @@ def exercise_process_controls(*, working_directory: Path) -> dict[str, object]:
                 second_threads,
                 "control",
             )[0],
+            postgres_deployment,
         )
         restarted = tuple(
             process
@@ -312,27 +319,30 @@ def exercise_process_controls(*, working_directory: Path) -> dict[str, object]:
             raise AssertionError("playground reset did not reproduce its deterministic fixture")
         if {item.pid for item in original} & {item.pid for item in restarted}:
             raise AssertionError("playground restart did not use fresh interpreters")
-        result = {
-            "controls": {
-                "start": len(original),
-                "drain": len(drained),
-                "reset": True,
-                "restart": len(restarted),
-                "stop": True,
-            },
-            "correlations": first.correlations,
-            "fixture": first.observation,
-            "original_process_ids": [item.pid for item in original],
-            "restarted_process_ids": [item.pid for item in restarted],
-            "postgres_deployments": [observe_postgres(deployment.database_url)],
-        }
+        result = ControlExerciseResponse(
+            controls=ExercisedControls(
+                start=len(original),
+                drain=len(drained),
+                reset=True,
+                restart=len(restarted),
+                stop=True,
+            ),
+            correlations=first.correlations,
+            fixture=first.observation,
+            original_process_ids=tuple(item.pid for item in original),
+            restarted_process_ids=tuple(item.pid for item in restarted),
+            postgres_deployments=(
+                PostgresDeploymentObservation.model_validate(
+                    observe_postgres(deployment.database_url)
+                ),
+            ),
+        )
     finally:
         deployment.stop()
     return result
 
 
 __all__ = [
-    "DemonstrationResult",
     "exercise_process_controls",
     "run_renewal_demonstration",
     "run_verification_demonstration",

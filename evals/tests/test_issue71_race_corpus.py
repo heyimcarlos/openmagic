@@ -1,7 +1,22 @@
 from __future__ import annotations
 
+import pickle
+
 from openmagic_evals.evidence.contracts import has_correlations
+from openmagic_evals.evidence.race_processes import ProcessRaceFailure
 from openmagic_evals.evidence.races import run_all_races
+from openmagic_runtime.kernel.control import SignalConflict, SignalConflictReason
+
+
+def test_signal_conflict_type_and_reason_survive_process_transport() -> None:
+    failure = ProcessRaceFailure.capture(
+        SignalConflict(SignalConflictReason.WAIT_ALREADY_SATISFIED)
+    )
+
+    transported = pickle.loads(pickle.dumps(failure))
+
+    assert transported.exception_type is SignalConflict
+    assert transported.reason is SignalConflictReason.WAIT_ALREADY_SATISFIED
 
 
 def test_all_cardinality_races_record_actual_trials() -> None:

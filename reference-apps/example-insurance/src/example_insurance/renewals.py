@@ -313,7 +313,17 @@ class ExampleInsurance:
     def start_renewal_outreach(
         self, command: StartRenewalOutreach
     ) -> CommandReceipt[StartRenewalOutreachResult]:
-        return self._dispatcher.execute(
+        with psycopg.connect(self._database_url) as connection, connection.transaction():
+            return self.start_renewal_outreach_on(connection, command)
+
+    def start_renewal_outreach_on(
+        self,
+        connection: Connection[tuple[Any, ...]],
+        command: StartRenewalOutreach,
+    ) -> CommandReceipt[StartRenewalOutreachResult]:
+        """Start a renewal in the caller-owned PostgreSQL transaction."""
+        return self._dispatcher.execute_on(
+            connection,
             command_type="renewal.start_outreach",
             schema_version=1,
             command=command,

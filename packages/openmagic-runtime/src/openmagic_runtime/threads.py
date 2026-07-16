@@ -152,6 +152,47 @@ class ThreadAccess:
     def __init__(self, connection: Connection[tuple[Any, ...]]) -> None:
         self._connection = connection
 
+    def provision(self, request: CreateThread) -> ThreadView:
+        """Create or verify one exact Thread in the caller-owned transaction."""
+        if not request.channel_kind or not request.channel_reference:
+            raise ValueError("Channel Reference must be non-empty")
+        lock_keys = self._connection.execute(
+            "SELECT hashtextextended(%s, 1), hashtextextended(%s, 2)",
+            (
+                str(request.thread_id),
+                f"{request.channel_kind}:{request.channel_reference}",
+            ),
+        ).fetchone()
+        if lock_keys is None:
+            raise RuntimeError("Thread provision locks could not be derived")
+        for lock_key in sorted(int(value) for value in lock_keys):
+            self._connection.execute(
+                "SELECT pg_advisory_xact_lock(%s)",
+                (lock_key,),
+            )
+        self._connection.execute(
+            "INSERT INTO openmagic_runtime.threads "
+            "(thread_id, channel_kind, channel_reference) VALUES (%s, %s, %s) "
+            "ON CONFLICT DO NOTHING",
+            (request.thread_id, request.channel_kind, request.channel_reference),
+        )
+        row = self._connection.execute(
+            "SELECT channel_kind, channel_reference FROM openmagic_runtime.threads "
+            "WHERE thread_id = %s FOR UPDATE",
+            (request.thread_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError("Channel Reference was already provisioned to another Thread")
+        durable = ThreadView(request.thread_id, str(row[0]), str(row[1]))
+        expected = ThreadView(
+            request.thread_id,
+            request.channel_kind,
+            request.channel_reference,
+        )
+        if durable != expected:
+            raise ValueError("Thread ID was already provisioned with another Channel Reference")
+        return durable
+
     def require(self, thread_id: UUID) -> None:
         row = self._connection.execute(
             "SELECT 1 FROM openmagic_runtime.threads WHERE thread_id = %s",

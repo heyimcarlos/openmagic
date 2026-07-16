@@ -216,6 +216,23 @@ class CommandDispatcher:
         schema_version: int,
         command: CommandT,
     ) -> CommandReceipt[Any]:
+        with psycopg.connect(self._database_url) as connection, connection.transaction():
+            return self.execute_on(
+                connection,
+                command_type=command_type,
+                schema_version=schema_version,
+                command=command,
+            )
+
+    def execute_on(
+        self,
+        connection: Connection[tuple[Any, ...]],
+        *,
+        command_type: str,
+        schema_version: int,
+        command: CommandT,
+    ) -> CommandReceipt[Any]:
+        """Execute inside the caller-owned PostgreSQL transaction."""
         registration = self._registrations.get((command_type, schema_version))
         if registration is None:
             raise CommandUnavailable(f"unregistered Command: {command_type}:{schema_version}")
@@ -233,70 +250,69 @@ class CommandDispatcher:
         del content["command_id"]
         digest = canonical_digest(content)
 
-        with psycopg.connect(self._database_url) as connection, connection.transaction():
-            connection.execute(
-                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
-                (str(command_id),),
-            )
-            existing = connection.execute(
-                "SELECT command_type, schema_version, command_digest, result, result_digest, "
-                "committed_at FROM openmagic_runtime.command_receipts WHERE command_id = %s "
-                "FOR UPDATE",
-                (command_id,),
-            ).fetchone()
-            if existing is not None:
-                if (
-                    existing[0] != command_type
-                    or existing[1] != schema_version
-                    or existing[2] != digest
-                ):
-                    raise IdempotencyConflict("Command ID was already committed with other content")
-                decoded_result = registration.result_decoder(dict(existing[3]))
-                try:
-                    _validate_value(decoded_result, registration.result_class, "result")
-                except TypeError as error:
-                    raise InvalidCommand(str(error)) from error
-                return CommandReceipt(
-                    command_id=command_id,
-                    command_type=str(existing[0]),
-                    schema_version=int(existing[1]),
-                    command_digest=str(existing[2]),
-                    result=decoded_result,
-                    result_digest=str(existing[4]),
-                    committed_at=existing[5],
-                )
-
-            result = registration.handler(command, connection)
+        connection.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+            (str(command_id),),
+        )
+        existing = connection.execute(
+            "SELECT command_type, schema_version, command_digest, result, result_digest, "
+            "committed_at FROM openmagic_runtime.command_receipts WHERE command_id = %s "
+            "FOR UPDATE",
+            (command_id,),
+        ).fetchone()
+        if existing is not None:
+            if (
+                existing[0] != command_type
+                or existing[1] != schema_version
+                or existing[2] != digest
+            ):
+                raise IdempotencyConflict("Command ID was already committed with other content")
+            decoded_result = registration.result_decoder(dict(existing[3]))
             try:
-                _validate_value(result, registration.result_class, "result")
+                _validate_value(decoded_result, registration.result_class, "result")
             except TypeError as error:
                 raise InvalidCommand(str(error)) from error
-            result_payload = canonical_value(result)
-            result_digest = canonical_digest(result_payload)
-            committed = connection.execute(
-                "INSERT INTO openmagic_runtime.command_receipts "
-                "(command_id, command_type, schema_version, command_digest, result, result_digest) "
-                "VALUES (%s, %s, %s, %s, %s, %s) RETURNING committed_at",
-                (
-                    command_id,
-                    command_type,
-                    schema_version,
-                    digest,
-                    Jsonb(result_payload),
-                    result_digest,
-                ),
-            ).fetchone()
-            if committed is None:
-                raise RuntimeError("PostgreSQL did not return a Command commit timestamp")
             return CommandReceipt(
                 command_id=command_id,
-                command_type=command_type,
-                schema_version=schema_version,
-                command_digest=digest,
-                result=result,
-                result_digest=result_digest,
-                committed_at=committed[0],
+                command_type=str(existing[0]),
+                schema_version=int(existing[1]),
+                command_digest=str(existing[2]),
+                result=decoded_result,
+                result_digest=str(existing[4]),
+                committed_at=existing[5],
             )
+
+        result = registration.handler(command, connection)
+        try:
+            _validate_value(result, registration.result_class, "result")
+        except TypeError as error:
+            raise InvalidCommand(str(error)) from error
+        result_payload = canonical_value(result)
+        result_digest = canonical_digest(result_payload)
+        committed = connection.execute(
+            "INSERT INTO openmagic_runtime.command_receipts "
+            "(command_id, command_type, schema_version, command_digest, result, result_digest) "
+            "VALUES (%s, %s, %s, %s, %s, %s) RETURNING committed_at",
+            (
+                command_id,
+                command_type,
+                schema_version,
+                digest,
+                Jsonb(result_payload),
+                result_digest,
+            ),
+        ).fetchone()
+        if committed is None:
+            raise RuntimeError("PostgreSQL did not return a Command commit timestamp")
+        return CommandReceipt(
+            command_id=command_id,
+            command_type=command_type,
+            schema_version=schema_version,
+            command_digest=digest,
+            result=result,
+            result_digest=result_digest,
+            committed_at=committed[0],
+        )
 
 
 __all__ = [

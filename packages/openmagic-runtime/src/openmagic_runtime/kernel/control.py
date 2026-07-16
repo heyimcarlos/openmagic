@@ -39,6 +39,8 @@ from openmagic_runtime.kernel._transitions import (
     GuardCurrentAttempt,
     ResolveDeferredStep,
     ResolveDeferredStepReceipt,
+    SignalConflict,
+    SignalConflictReason,
     SignalReceipt,
 )
 from openmagic_runtime.kernel.definitions import validate_payload, verified_definition
@@ -321,6 +323,8 @@ __all__ = [
     "KernelControl",
     "ResolveDeferredStep",
     "ResolveDeferredStepReceipt",
+    "SignalConflict",
+    "SignalConflictReason",
     "SignalReceipt",
     "StartInstance",
     "StartInstanceReceipt",

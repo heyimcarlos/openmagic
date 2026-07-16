@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import time
+from io import BufferedWriter
 from pathlib import Path
 from types import TracebackType
 from urllib.error import URLError
@@ -14,12 +15,23 @@ from openmagic_evals.harness._network import free_port
 
 
 class LocalEmailProvider:
-    def __init__(self, *, working_directory: Path) -> None:
+    def __init__(
+        self,
+        *,
+        working_directory: Path,
+        readiness_timeout: float = 10.0,
+        shutdown_timeout: float = 5.0,
+    ) -> None:
+        if readiness_timeout <= 0 or shutdown_timeout <= 0:
+            raise ValueError("Provider process timeouts must be positive")
         self.working_directory = working_directory.resolve()
+        self.readiness_timeout = readiness_timeout
+        self.shutdown_timeout = shutdown_timeout
         self.state_path = self.working_directory / "email-provider.sqlite3"
         self._port = free_port()
         self.url = f"http://127.0.0.1:{self._port}"
         self._process: subprocess.Popen[bytes] | None = None
+        self._log_handle: BufferedWriter | None = None
 
     def __enter__(self) -> LocalEmailProvider:
         self.start()
@@ -46,47 +58,87 @@ class LocalEmailProvider:
         script = Path(sys.executable).parent / "openmagic-local-email-provider"
         if not script.is_file():
             raise RuntimeError("installed local email provider entry point is missing")
-        log = (self.working_directory / "email-provider.log").open("ab")
-        self._process = subprocess.Popen(
-            [
-                str(script),
-                "--host",
-                "127.0.0.1",
-                "--port",
-                str(self._port),
-                "--state-path",
-                str(self.state_path),
-            ],
-            cwd=self.working_directory,
-            env={"PATH": os.defpath, "PYTHONNOUSERSITE": "1", "PYTHONUNBUFFERED": "1"},
-            stdin=subprocess.DEVNULL,
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
-        deadline = time.monotonic() + 10
-        while time.monotonic() < deadline:
-            if self._process.poll() is not None:
-                raise RuntimeError("Local email provider exited before readiness")
+        self._log_handle = (self.working_directory / "email-provider.log").open("ab")
+        try:
+            self._process = subprocess.Popen(
+                [
+                    str(script),
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    str(self._port),
+                    "--state-path",
+                    str(self.state_path),
+                ],
+                cwd=self.working_directory,
+                env={"PATH": os.defpath, "PYTHONNOUSERSITE": "1", "PYTHONUNBUFFERED": "1"},
+                stdin=subprocess.DEVNULL,
+                stdout=self._log_handle,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+            deadline = time.monotonic() + self.readiness_timeout
+            while time.monotonic() < deadline:
+                if self._process.poll() is not None:
+                    raise RuntimeError("Local email provider exited before readiness")
+                try:
+                    with urlopen(f"{self.url}/health", timeout=0.5) as response:
+                        if json.load(response) == {"status": "ready"}:
+                            return
+                except (OSError, URLError, ValueError):
+                    time.sleep(0.02)
+            raise TimeoutError("Local email provider did not become ready")
+        except BaseException as start_error:
             try:
-                with urlopen(f"{self.url}/health", timeout=0.5) as response:
-                    if json.load(response) == {"status": "ready"}:
-                        return
-            except (OSError, URLError, ValueError):
-                time.sleep(0.02)
-        raise TimeoutError("Local email provider did not become ready")
+                self._reap()
+            except BaseException as cleanup_error:
+                raise BaseExceptionGroup(
+                    "local email provider start and cleanup failed",
+                    [start_error, cleanup_error],
+                ) from start_error
+            raise
 
     def stop(self) -> None:
-        if self._process is None:
-            return
-        if self._process.poll() is None:
-            self._process.terminate()
+        self._reap()
+
+    def _reap(self) -> None:
+        errors: list[Exception] = []
+        process = self._process
+        exited = process is None
         try:
-            self._process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            self._process.kill()
-            self._process.wait(timeout=5)
-        self._process = None
+            if process is not None and process.poll() is None:
+                try:
+                    process.terminate()
+                    process.wait(timeout=self.shutdown_timeout)
+                except subprocess.TimeoutExpired:
+                    pass
+                except Exception as error:
+                    errors.append(error)
+                if process.poll() is None:
+                    try:
+                        process.kill()
+                    except Exception as error:
+                        errors.append(error)
+                if process.poll() is None:
+                    try:
+                        process.wait(timeout=self.shutdown_timeout)
+                    except Exception as error:
+                        errors.append(error)
+            if process is not None and process.poll() is None:
+                errors.append(RuntimeError(f"local email provider {process.pid} survived cleanup"))
+            exited = process is None or process.poll() is not None
+        finally:
+            if exited:
+                self._process = None
+            if exited and self._log_handle is not None:
+                try:
+                    self._log_handle.close()
+                except Exception as error:
+                    errors.append(error)
+                finally:
+                    self._log_handle = None
+        if errors:
+            raise ExceptionGroup("local email provider cleanup failed", errors)
 
     def restart(self) -> None:
         self.stop()

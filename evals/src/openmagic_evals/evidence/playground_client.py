@@ -2,14 +2,27 @@
 
 from __future__ import annotations
 
-import json
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
+from typing import TypeVar
+
+from pydantic import BaseModel
+
+ResponseT = TypeVar("ResponseT", bound=BaseModel)
 
 
-def invoke_playground(*arguments: str, timeout_seconds: int) -> dict[str, Any]:
+def parse_playground_response(payload: str, *, response_type: type[ResponseT]) -> ResponseT:
+    """Validate the complete versioned response before eval code observes it."""
+
+    return response_type.model_validate_json(payload)
+
+
+def invoke_playground(
+    *arguments: str,
+    timeout_seconds: int,
+    response_type: type[ResponseT],
+) -> ResponseT:
     executable = Path(sys.executable).parent / "openmagic-playground"
     if not executable.is_file():
         raise RuntimeError("installed playground entry point is missing")
@@ -25,10 +38,7 @@ def invoke_playground(*arguments: str, timeout_seconds: int) -> dict[str, Any]:
             "playground command failed: "
             f"status={completed.returncode} stderr={completed.stderr.strip()}"
         )
-    value = json.loads(completed.stdout)
-    if not isinstance(value, dict):
-        raise TypeError("playground command did not return one JSON object")
-    return value
+    return parse_playground_response(completed.stdout, response_type=response_type)
 
 
-__all__ = ["invoke_playground"]
+__all__ = ["invoke_playground", "parse_playground_response"]

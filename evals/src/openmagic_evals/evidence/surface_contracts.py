@@ -85,6 +85,8 @@ RUNTIME_PUBLIC_EXPORTS = {
         "KernelControl",
         "ResolveDeferredStep",
         "ResolveDeferredStepReceipt",
+        "SignalConflict",
+        "SignalConflictReason",
         "SignalReceipt",
         "StartInstance",
         "StartInstanceReceipt",
@@ -328,6 +330,10 @@ APPLICATION_PUBLIC_EXPORTS = {
     "renewal_records.py": ("CommandEventLineage", "record_event"),
     "renewal_registry.py": ("RenewalCommandHandlers", "register_renewal_commands"),
     "renewal_review_control.py": ("RenewalReviewControl",),
+    "renewal_submission.py": (
+        "RenewalSubmission",
+        "RenewalSubmissionApplication",
+    ),
     "renewal_workflow_records.py": (
         "ActivationReceipt",
         "DurableDraft",
@@ -507,11 +513,11 @@ EXPECTED_PRODUCTION_EDGES = (
     "openmagic-api -> openmagic-runtime",
 )
 PUBLIC_SURFACE_DIGESTS = {
-    "example-insurance": "sha256:0a884d3f23b3ab3fa541efb0f106453ea5e56f20d2838241599a8f556a8db33d",
+    "example-insurance": "sha256:52079cf9f92cd1a5abcab123d2bef0148c65711b4f082d28d9ec14867c5bf4a5",
     "openmagic-api": "sha256:b47b899d81cf0831f3fa31e984c8e342e9fa8a32adbec983739a29929d131ed3",
-    "openmagic-evals": "sha256:377fee738efd8baf9e314cf876fe43a03a61f57b5052c59d9b2ee042b180293e",
-    "openmagic-playground": "sha256:5e5b39cb8af483ed5f787373f76266d13f13613e77b19ec6365afe8ba120cf9d",
-    "openmagic-runtime": "sha256:f539eca06fe59cb6cc6b19e69c5f803f61e9717768cfb8102ecca911924beb11",
+    "openmagic-evals": "sha256:025bfd6649237ccf2559863f877a13ed1fcab485dfa420bcbc8f1ad2334b23f0",
+    "openmagic-playground": "sha256:9447d28206d7a3e63db3308dae87610324ea5053c3ec6dcaf649ff8639ccdf5c",
+    "openmagic-runtime": "sha256:e31d4fe502e93b1cbbb18e2e299149c1c1b902acdb5289a5fda663e4ab61dc0b",
 }
 
 __all__ = [

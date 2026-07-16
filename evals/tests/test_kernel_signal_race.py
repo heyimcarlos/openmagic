@@ -3,11 +3,12 @@ from __future__ import annotations
 import random
 import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from threading import Barrier
-from typing import cast
 from uuid import uuid4
 
 import psycopg
+import pytest
 from example_insurance.migrations import apply_migrations
 from openmagic_evals.evidence.case_recording import record_case_observation
 from openmagic_evals.evidence.contracts import Correlations
@@ -16,6 +17,8 @@ from openmagic_runtime.kernel.control import (
     AcceptSignal,
     CloseInstance,
     KernelControl,
+    SignalConflict,
+    SignalConflictReason,
     SignalReceipt,
     StartInstance,
     start_instance,
@@ -164,7 +167,7 @@ def test_competing_signals_have_one_winner_in_100_seeded_real_transaction_races(
                 try:
                     with psycopg.connect(database_url) as connection, connection.transaction():
                         return KernelControl(connection).accept_signal(request)
-                except RuntimeError as error:
+                except SignalConflict as error:
                     return error
 
             with ThreadPoolExecutor(max_workers=2) as executor:
@@ -174,14 +177,14 @@ def test_competing_signals_have_one_winner_in_100_seeded_real_transaction_races(
                 outcomes = tuple(future.result() for future in futures)
             snapshot = KernelInspection(database_url=database_url).snapshot(started.instance_id)
 
-            assert sum(not isinstance(outcome, RuntimeError) for outcome in outcomes) == 1, seed
-            assert sum(isinstance(outcome, RuntimeError) for outcome in outcomes) == 1, seed
+            conflicts = tuple(
+                outcome for outcome in outcomes if isinstance(outcome, SignalConflict)
+            )
+            assert len(conflicts) == 1, seed
+            assert conflicts[0].reason is SignalConflictReason.WAIT_ALREADY_SATISFIED, seed
             assert len(snapshot.steps) == 1, seed
             assert snapshot.waits[0].state == "satisfied", seed
-            winner = cast(
-                SignalReceipt,
-                next(outcome for outcome in outcomes if not isinstance(outcome, RuntimeError)),
-            )
+            winner = next(outcome for outcome in outcomes if isinstance(outcome, SignalReceipt))
             instance_ids.append(started.instance_id)
             step_ids.append(snapshot.steps[0].step_id)
             wait_ids.append(wait_id)
@@ -239,6 +242,14 @@ def test_concurrent_exact_signal_and_closure_replays_return_one_receipt() -> Non
             signal_futures = tuple(executor.submit(accept) for _ in range(2))
             signal_receipts = tuple(future.result() for future in signal_futures)
         assert signal_receipts[0] == signal_receipts[1]
+
+        with (
+            psycopg.connect(database_url) as connection,
+            connection.transaction(),
+            pytest.raises(SignalConflict) as conflict,
+        ):
+            KernelControl(connection).accept_signal(replace(signal, route_key="revise"))
+        assert conflict.value.reason is SignalConflictReason.IDENTITY_REUSED
 
         closure = CloseInstance(uuid4(), started.instance_id)
 

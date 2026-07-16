@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+
+from pydantic import BaseModel
 
 from openmagic_playground import (
     exercise_process_controls,
@@ -22,15 +24,15 @@ def _controls(_arguments: argparse.Namespace) -> dict[str, object]:
     return dict(process_controls().as_dict())
 
 
-def _renewal(_arguments: argparse.Namespace) -> dict[str, object]:
-    return run_renewal_demonstration().as_dict()
+def _renewal(_arguments: argparse.Namespace) -> BaseModel:
+    return run_renewal_demonstration()
 
 
-def _verification(_arguments: argparse.Namespace) -> dict[str, object]:
-    return run_verification_demonstration().as_dict()
+def _verification(_arguments: argparse.Namespace) -> BaseModel:
+    return run_verification_demonstration()
 
 
-def _exercise(arguments: argparse.Namespace) -> dict[str, object]:
+def _exercise(arguments: argparse.Namespace) -> BaseModel:
     return exercise_process_controls(working_directory=arguments.working_directory)
 
 
@@ -38,7 +40,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(prog="openmagic-playground")
     commands = parser.add_subparsers(dest="command", required=True)
 
-    handlers: tuple[tuple[str, str, Any], ...] = (
+    handlers: tuple[
+        tuple[str, str, Callable[[argparse.Namespace], dict[str, object] | BaseModel]], ...
+    ] = (
         ("manifest", "print the synthetic safety contract", _manifest),
         ("controls", "print explicit local role process controls", _controls),
         ("demo-renewal", "run the effects-disabled renewal demonstration", _renewal),
@@ -52,7 +56,9 @@ def main() -> None:
     exercise.set_defaults(handler=_exercise)
 
     arguments = parser.parse_args()
-    print(json.dumps(arguments.handler(arguments), sort_keys=True))
+    result = arguments.handler(arguments)
+    value = result.model_dump(mode="json") if isinstance(result, BaseModel) else result
+    print(json.dumps(value, sort_keys=True))
 
 
 if __name__ == "__main__":

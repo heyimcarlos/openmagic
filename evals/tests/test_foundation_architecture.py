@@ -19,6 +19,7 @@ from openmagic_evals.evidence.package_policy import (
     python_imports,
     role_dependency_violations,
     role_import_violations,
+    role_private_import_violations,
     source_python_files,
 )
 
@@ -54,7 +55,25 @@ def test_production_dependency_direction_is_one_way() -> None:
         imports = python_imports(source_python_files(ROOT / role.source))
         dependencies = project_dependencies(ROOT / role.project)
         assert role_import_violations(role, imports) == ()
+        assert role_private_import_violations(role, imports) == ()
         assert role_dependency_violations(role, dependencies) == ()
+
+
+def test_private_persistence_import_policy_rejects_full_import_paths(tmp_path: Path) -> None:
+    fixture = tmp_path / "consumer.py"
+    fixture.write_text(
+        "import openmagic_runtime._persistence\nfrom example_insurance import _persistence\n",
+        encoding="utf-8",
+    )
+    imports = python_imports((fixture,))
+    api_role = next(role for role in PACKAGE_ROLES if role.distribution == "openmagic-api")
+
+    assert "openmagic_runtime._persistence" in imports
+    assert "example_insurance._persistence" in imports
+    assert role_private_import_violations(api_role, imports) == (
+        "openmagic-api imports private persistence package example_insurance._persistence",
+        "openmagic-api imports private persistence package openmagic_runtime._persistence",
+    )
 
 
 def test_runtime_root_and_role_modules_have_explicit_export_allowlists() -> None:

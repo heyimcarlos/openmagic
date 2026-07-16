@@ -29,7 +29,12 @@ from openmagic_evals.harness import (
 )
 from openmagic_runtime.commands import Actor, Cause, CommandReceipt
 from openmagic_runtime.evidence import content_fingerprint
-from openmagic_runtime.kernel.control import AcceptSignal, KernelControl
+from openmagic_runtime.kernel.control import (
+    AcceptSignal,
+    KernelControl,
+    SignalConflict,
+    SignalConflictReason,
+)
 from openmagic_runtime.kernel.inspection import KernelInspection
 from openmagic_runtime.threads import CreateThread
 
@@ -123,9 +128,10 @@ def test_signal_before_wait_materialization_is_rejected_and_not_buffered() -> No
         with (
             psycopg.connect(database_url) as connection,
             connection.transaction(),
-            pytest.raises(RuntimeError, match="Wait does not exist"),
+            pytest.raises(SignalConflict) as rejected,
         ):
             KernelControl(connection).accept_signal(early_signal)
+        assert rejected.value.reason is SignalConflictReason.WAIT_NOT_FOUND
 
         application.run_workflow_worker_once(worker_id="early-facts")
         application.run_workflow_worker_once(worker_id="early-draft")

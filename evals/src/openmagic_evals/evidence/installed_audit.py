@@ -15,6 +15,7 @@ from openmagic_evals.evidence.package_policy import (
     requirement_name,
     role_dependency_violations,
     role_import_violations,
+    role_private_import_violations,
 )
 from openmagic_evals.evidence.surface_contracts import (
     APPLICATION_PUBLIC_EXPORTS,
@@ -110,6 +111,12 @@ def audit_installed_environment() -> InstalledSurfaceAudit:
     }
     for role in PACKAGE_ROLES:
         violations.extend(role_import_violations(role, imports_by_distribution[role.distribution]))
+        violations.extend(
+            role_private_import_violations(
+                role,
+                imports_by_distribution[role.distribution],
+            )
+        )
         requirements = frozenset(
             requirement_name(requirement)
             for requirement in (installed[role.distribution].requires or ())

@@ -4,14 +4,17 @@ from __future__ import annotations
 
 from uuid import UUID
 
+from example_insurance.renewal_submission import (
+    RenewalSubmission,
+    RenewalSubmissionApplication,
+)
 from example_insurance.renewals import (
-    ExampleInsurance,
     RenewalFacts,
     StartRenewalOutreach,
     StartRenewalOutreachInput,
 )
 from openmagic_runtime.commands import Actor, Cause
-from openmagic_runtime.threads import CreateThread, ThreadStore
+from openmagic_runtime.threads import CreateThread
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -47,47 +50,37 @@ class StartRenewalResponse(BaseModel):
 def submit_renewal(*, database_url: str, request: StartRenewalRequest) -> StartRenewalResponse:
     """Submit one renewal through the public application boundary."""
 
-    threads = ThreadStore(database_url=database_url)
-    try:
-        thread = threads.read(request.thread_id)
-    except KeyError:
-        threads.create(
-            CreateThread(
+    application = RenewalSubmissionApplication(database_url=database_url)
+    application.prepare()
+    receipt = application.provision_and_start_renewal(
+        RenewalSubmission(
+            thread=CreateThread(
                 thread_id=request.thread_id,
                 channel_kind="email",
                 channel_reference=request.policyholder_email,
-            )
-        )
-    else:
-        if thread.channel_kind != "email" or thread.channel_reference != request.policyholder_email:
-            raise ValueError("Renewal replay changed its durable Thread identity")
-
-    application = ExampleInsurance(database_url=database_url)
-    application.prepare()
-    application.replace_renewal_facts(
-        RenewalFacts(
-            policy_id=request.policy_id,
-            policy_number=request.policy_number,
-            policyholder_name=request.policyholder_name,
-            policyholder_email=request.policyholder_email,
-            renewal_date=request.renewal_date,
-            expiring_premium_cents=request.expiring_premium_cents,
-        )
-    )
-    receipt = application.start_renewal_outreach(
-        StartRenewalOutreach(
-            command_id=request.command_id,
-            actor=Actor("party", str(request.actor_id)),
-            cause=Cause("message", str(request.cause_id)),
-            input=StartRenewalOutreachInput(
-                workflow_id=request.workflow_id,
-                thread_id=request.thread_id,
+            ),
+            facts=RenewalFacts(
                 policy_id=request.policy_id,
                 policy_number=request.policy_number,
                 policyholder_name=request.policyholder_name,
                 policyholder_email=request.policyholder_email,
                 renewal_date=request.renewal_date,
                 expiring_premium_cents=request.expiring_premium_cents,
+            ),
+            command=StartRenewalOutreach(
+                command_id=request.command_id,
+                actor=Actor("party", str(request.actor_id)),
+                cause=Cause("message", str(request.cause_id)),
+                input=StartRenewalOutreachInput(
+                    workflow_id=request.workflow_id,
+                    thread_id=request.thread_id,
+                    policy_id=request.policy_id,
+                    policy_number=request.policy_number,
+                    policyholder_name=request.policyholder_name,
+                    policyholder_email=request.policyholder_email,
+                    renewal_date=request.renewal_date,
+                    expiring_premium_cents=request.expiring_premium_cents,
+                ),
             ),
         )
     )

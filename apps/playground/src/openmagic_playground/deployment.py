@@ -61,12 +61,16 @@ class PlaygroundDeployment:
         *,
         working_directory: Path,
         readiness_timeout: float = 30.0,
+        shutdown_timeout: float = 5.0,
         email_provider_url: str | None = None,
         verification_code_secret: str | None = None,
         role_capacities: Mapping[ProcessRole, int] | None = None,
     ) -> None:
         self.working_directory = working_directory.resolve()
         self.readiness_timeout = readiness_timeout
+        if shutdown_timeout <= 0:
+            raise ValueError("Process shutdown timeout must be positive")
+        self.shutdown_timeout = shutdown_timeout
         self.email_provider_url = email_provider_url
         self.verification_code_secret = verification_code_secret
         capacities = role_capacities or {
@@ -99,7 +103,7 @@ class PlaygroundDeployment:
         self.stop()
 
     def start(self) -> tuple[ManagedProcess, ...]:
-        if self._container is not None:
+        if self._container is not None or self._running:
             raise RuntimeError("Playground deployment is already running")
         self.working_directory.mkdir(parents=True, exist_ok=True)
         self.database_name = f"openmagic_playground_{uuid4().hex}"
@@ -123,25 +127,43 @@ class PlaygroundDeployment:
             for process in self.processes:
                 self._wait_ready(process)
             return self.processes
-        except BaseException:
-            self.stop()
+        except BaseException as start_error:
+            try:
+                self.stop()
+            except BaseException as cleanup_error:
+                raise BaseExceptionGroup(
+                    "playground start and cleanup failed",
+                    [start_error, cleanup_error],
+                ) from start_error
             raise
 
     def stop(self) -> tuple[ManagedProcess, ...]:
-        stopped = tuple(item.public for item in self._running)
+        owned = tuple(self._running)
+        errors: list[Exception] = []
         try:
-            for running in tuple(reversed(self._running)):
-                self._stop_running(running, force=False)
+            for running in reversed(owned):
+                try:
+                    self._stop_running(running, force=False)
+                except Exception as error:
+                    errors.append(error)
         finally:
-            self._running.clear()
+            self._running[:] = [running for running in owned if not self._process_exited(running)]
             self._refresh()
             try:
                 if self._container is not None:
-                    self._container.stop()
+                    try:
+                        self._container.stop()
+                    except Exception as error:
+                        errors.append(error)
             finally:
                 self._container = None
-                self._verification_secret_path.unlink(missing_ok=True)
-        return stopped
+                try:
+                    self._verification_secret_path.unlink(missing_ok=True)
+                except Exception as error:
+                    errors.append(error)
+        if errors:
+            raise ExceptionGroup("playground cleanup failed", errors)
+        return tuple(running.public for running in owned if self._process_exited(running))
 
     def reset(self) -> None:
         """Reset only after every owned process has been explicitly drained."""
@@ -155,9 +177,12 @@ class PlaygroundDeployment:
     def terminate_role(self, role: ProcessRole) -> ManagedProcess:
         running = next(item for item in self._running if item.public.role == role)
         public = running.public
-        self._stop_running(running, force=True)
-        self._running.remove(running)
-        self._refresh()
+        try:
+            self._stop_running(running, force=True)
+        finally:
+            if self._process_exited(running):
+                self._running.remove(running)
+            self._refresh()
         return public
 
     def restart_role(self, role: ProcessRole) -> ManagedProcess:
@@ -166,27 +191,50 @@ class PlaygroundDeployment:
 
     def drain_role(self, role: ProcessRole) -> tuple[ManagedProcess, ...]:
         drained: list[ManagedProcess] = []
+        errors: list[Exception] = []
         for running in tuple(self._running):
             if running.public.role == role:
-                drained.append(running.public)
-                self._stop_running(running, force=False)
-                self._running.remove(running)
+                try:
+                    self._stop_running(running, force=False)
+                except Exception as error:
+                    errors.append(error)
+                finally:
+                    if self._process_exited(running):
+                        self._running.remove(running)
+                        drained.append(running.public)
         self._refresh()
+        if errors:
+            raise ExceptionGroup(f"failed to drain playground role {role}", errors)
         return tuple(drained)
 
     def drain(self) -> tuple[ManagedProcess, ...]:
         drained: list[ManagedProcess] = []
+        errors: list[Exception] = []
         for role in _SCRIPTS:
-            drained.extend(self.drain_role(role))
+            try:
+                drained.extend(self.drain_role(role))
+            except Exception as error:
+                errors.append(error)
+        if errors:
+            raise ExceptionGroup("failed to drain playground deployment", errors)
         return tuple(drained)
 
     def scale_role(self, role: ProcessRole, *, capacity: int) -> tuple[ManagedProcess, ...]:
         if type(capacity) is not int or capacity < 0:
             raise ValueError("Process-pool capacity must be a non-negative integer")
         current = [item for item in self._running if item.public.role == role]
+        errors: list[Exception] = []
         for running in reversed(current[capacity:]):
-            self._stop_running(running, force=False)
-            self._running.remove(running)
+            try:
+                self._stop_running(running, force=False)
+            except Exception as error:
+                errors.append(error)
+            finally:
+                if self._process_exited(running):
+                    self._running.remove(running)
+        if errors:
+            self._refresh()
+            raise ExceptionGroup(f"failed to scale playground role {role}", errors)
         started: list[ManagedProcess] = []
         for _ in range(max(0, capacity - len(current))):
             self._start_process(role)
@@ -200,20 +248,57 @@ class PlaygroundDeployment:
         self.processes = tuple(item.public for item in self._running)
 
     @staticmethod
-    def _stop_running(running: _RunningProcess, *, force: bool) -> None:
-        if running.process.poll() is None:
-            if force:
-                running.process.kill()
-            else:
-                running.process.terminate()
+    def _process_exited(running: _RunningProcess) -> bool:
         try:
-            running.process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            running.process.kill()
-            running.process.wait(timeout=5)
-        close = getattr(running.log_handle, "close", None)
-        if close is not None:
-            close()
+            return running.process.poll() is not None
+        except Exception:
+            return False
+
+    def _stop_running(self, running: _RunningProcess, *, force: bool) -> None:
+        errors: list[Exception] = []
+        try:
+            if running.process.poll() is None:
+                if force:
+                    try:
+                        running.process.kill()
+                    except Exception as error:
+                        errors.append(error)
+                else:
+                    try:
+                        running.process.terminate()
+                        running.process.wait(timeout=self.shutdown_timeout)
+                    except subprocess.TimeoutExpired:
+                        pass
+                    except Exception as error:
+                        errors.append(error)
+                if running.process.poll() is None:
+                    try:
+                        running.process.kill()
+                    except Exception as error:
+                        errors.append(error)
+                if running.process.poll() is None:
+                    try:
+                        running.process.wait(timeout=self.shutdown_timeout)
+                    except Exception as error:
+                        errors.append(error)
+            if running.process.poll() is None:
+                errors.append(
+                    RuntimeError(
+                        f"owned {running.public.role} process {running.public.pid} survived cleanup"
+                    )
+                )
+        finally:
+            close = getattr(running.log_handle, "close", None)
+            if close is not None:
+                try:
+                    close()
+                except Exception as error:
+                    errors.append(error)
+        if errors:
+            raise ExceptionGroup(
+                f"failed to reap {running.public.role} process {running.public.pid}",
+                errors,
+            )
 
     def _start_process(self, role: ProcessRole) -> None:
         port = _free_port()
@@ -240,24 +325,28 @@ class PlaygroundDeployment:
                 ["--verification-code-secret-file", str(self._verification_secret_path)]
             )
         log_handle = (self.working_directory / f"{role}-{uuid4().hex}.log").open("wb")
-        process = subprocess.Popen(
-            [
-                str(script),
-                "--database-url",
-                self.database_url,
-                "--host",
-                "127.0.0.1",
-                "--port",
-                str(port),
-                *arguments,
-            ],
-            cwd=self.working_directory,
-            env={"PATH": os.defpath, "PYTHONNOUSERSITE": "1", "PYTHONUNBUFFERED": "1"},
-            stdin=subprocess.DEVNULL,
-            stdout=log_handle,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
+        try:
+            process = subprocess.Popen(
+                [
+                    str(script),
+                    "--database-url",
+                    self.database_url,
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    str(port),
+                    *arguments,
+                ],
+                cwd=self.working_directory,
+                env={"PATH": os.defpath, "PYTHONNOUSERSITE": "1", "PYTHONUNBUFFERED": "1"},
+                stdin=subprocess.DEVNULL,
+                stdout=log_handle,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+        except BaseException:
+            log_handle.close()
+            raise
         self._running.append(
             _RunningProcess(
                 public=ManagedProcess(

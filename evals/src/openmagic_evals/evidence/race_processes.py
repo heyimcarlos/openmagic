@@ -9,6 +9,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from multiprocessing import get_context
 from multiprocessing.connection import Connection
+from multiprocessing.process import BaseProcess
 from typing import Any, Literal, cast
 from uuid import UUID
 
@@ -33,16 +34,31 @@ RaceOperation = Literal[
 
 
 @dataclass(frozen=True)
+class ProcessRaceFailure:
+    exception_type: type[BaseException]
+    reason: object | None
+    message: str
+
+    @classmethod
+    def capture(cls, error: BaseException) -> ProcessRaceFailure:
+        return cls(
+            exception_type=type(error),
+            reason=getattr(error, "reason", None),
+            message=str(error),
+        )
+
+
+@dataclass(frozen=True)
 class ProcessRaceResult:
     process_id: int
     value: object | None
-    error_type: str | None
-    error_message: str | None
+    failure: ProcessRaceFailure | None
 
     def require_value(self) -> object:
-        if self.error_type is not None:
+        if self.failure is not None:
             raise RuntimeError(
-                f"race contender failed through its public operation: {self.error_type}"
+                "race contender failed through its public operation: "
+                f"{self.failure.exception_type.__name__}"
             )
         return self.value
 
@@ -136,9 +152,9 @@ def _contend(
             time.sleep(jitter_microseconds / 1_000_000)
             try:
                 value = _execute(database_url, operation, payload)
-                control.send(("result", process_id, value, None, None))
+                control.send(("result", process_id, value, None))
             except BaseException as error:
-                control.send(("result", process_id, None, type(error).__name__, str(error)))
+                control.send(("result", process_id, None, ProcessRaceFailure.capture(error)))
             finally:
                 barrier.execute("SELECT pg_advisory_unlock_shared(%s)", (barrier_key,))
     except BaseException as error:
@@ -157,6 +173,59 @@ def _receive(connection: Connection, expected: str, timeout: float = 15.0) -> tu
     return message
 
 
+def _reap_processes(processes: tuple[BaseProcess, ...], *, timeout_seconds: float = 5.0) -> None:
+    """Reap every owned contender before reporting any cleanup failure."""
+
+    errors: list[Exception] = []
+    for process in processes:
+        alive = True
+        try:
+            try:
+                process.join(timeout=timeout_seconds)
+            except Exception as error:
+                errors.append(error)
+            try:
+                alive = process.is_alive()
+            except Exception as error:
+                errors.append(error)
+            if alive:
+                try:
+                    process.terminate()
+                except Exception as error:
+                    errors.append(error)
+                try:
+                    process.join(timeout=timeout_seconds)
+                except Exception as error:
+                    errors.append(error)
+                try:
+                    alive = process.is_alive()
+                except Exception as error:
+                    errors.append(error)
+            if alive:
+                try:
+                    process.kill()
+                except Exception as error:
+                    errors.append(error)
+                try:
+                    process.join(timeout=timeout_seconds)
+                except Exception as error:
+                    errors.append(error)
+                try:
+                    alive = process.is_alive()
+                except Exception as error:
+                    errors.append(error)
+            if alive:
+                errors.append(RuntimeError(f"race contender {process.pid} survived cleanup"))
+        finally:
+            if not alive:
+                try:
+                    process.close()
+                except Exception as error:
+                    errors.append(error)
+    if errors:
+        raise ExceptionGroup("race contender cleanup failed", errors)
+
+
 def run_process_contenders(
     database_url: str,
     *,
@@ -171,7 +240,7 @@ def run_process_contenders(
     key = _barrier_key(case_id, seed)
     context = get_context("spawn")
     parents: list[Connection] = []
-    processes = []
+    processes: list[BaseProcess] = []
     with psycopg.connect(database_url, autocommit=True) as coordinator:
         coordinator.execute("SELECT pg_advisory_lock(%s)", (key,))
         try:
@@ -233,8 +302,7 @@ def run_process_contenders(
                 ProcessRaceResult(
                     process_id=cast(int, message[1]),
                     value=message[2],
-                    error_type=cast(str | None, message[3]),
-                    error_message=cast(str | None, message[4]),
+                    failure=cast(ProcessRaceFailure | None, message[3]),
                 )
                 for message in messages
             )
@@ -245,17 +313,26 @@ def run_process_contenders(
                 overlap_barrier_observed=True,
             )
         finally:
-            coordinator.execute("SELECT pg_advisory_unlock(%s)", (key,))
+            cleanup_errors: list[Exception] = []
+            try:
+                coordinator.execute("SELECT pg_advisory_unlock(%s)", (key,))
+            except Exception as error:
+                cleanup_errors.append(error)
             for parent in parents:
-                parent.close()
-            for process in processes:
-                process.join(timeout=5)
-                if process.is_alive():
-                    process.terminate()
-                    process.join(timeout=5)
+                try:
+                    parent.close()
+                except Exception as error:
+                    cleanup_errors.append(error)
+            try:
+                _reap_processes(tuple(processes))
+            except Exception as error:
+                cleanup_errors.append(error)
+            if cleanup_errors:
+                raise ExceptionGroup("race process cleanup failed", cleanup_errors)
 
 
 __all__ = [
+    "ProcessRaceFailure",
     "ProcessRacePair",
     "ProcessRaceResult",
     "RaceOperation",
