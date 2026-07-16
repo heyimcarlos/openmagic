@@ -5,7 +5,7 @@ from __future__ import annotations
 from openmagic_evals.evidence._sealed_agent_corpus import HELD_OUT_CASES
 
 HELD_OUT_CORPUS_VERSION = "issue-71.agent-heldout.v2"
-HELD_OUT_SEALED_AT_COMMIT = "304349ae02c53a4db08641fa22c5384c2783ca5e"
+HELD_OUT_SEALED_AT_COMMIT = "a7f6f33528c5b5f43e1144ffab7c9bbe7d1760b8"
 HELD_OUT_SEALED_BLOB = "12bd63dfeb37f0ba805cfdcfdc2e63a55941174b"
 HELD_OUT_SEALED_PATH = "evals/src/openmagic_evals/evidence/_sealed_agent_corpus.py"
 HELD_OUT_CORPUS_DIGEST = "sha256:8c6e84ad1386446e4777f692339e06e8feb6ee79d67f452f4bc791bfc3850634"
@@ -13,7 +13,7 @@ TUNING_LOCKED_BLOBS = {
     "evals/src/openmagic_evals/evidence/_sealed_agent_corpus.py": "12bd63dfeb37f0ba805cfdcfdc2e63a55941174b",
     "packages/openmagic-runtime/src/openmagic_runtime/agents.py": "af60373bcedb7bc0ebeb063caeb71881dcfa2777",
     "packages/openmagic-runtime/src/openmagic_runtime/commands.py": "71876d561037769fcc86630673e1e9e15c773d68",
-    "packages/openmagic-runtime/src/openmagic_runtime/execution.py": "4e98a57f0f8674fc4a71f7a855ebbbfaba49be77",
+    "packages/openmagic-runtime/src/openmagic_runtime/execution.py": "d438079e36bb246545e28133aa61650b4bb483fe",
     "packages/openmagic-runtime/src/openmagic_runtime/kernel/work.py": "ddb21b39203d262dbe6e0bd03bc5602100f38eef",
     "packages/openmagic-runtime/src/openmagic_runtime/threads.py": "89a94ac60aa13ddcd216164384340f96978976b1",
     "reference-apps/example-insurance/src/example_insurance/renewal_attempt_control.py": "1f40f29463c661f889027280bdf5f315bd61f6d5",
@@ -28,7 +28,7 @@ TUNING_LOCKED_BLOBS = {
     "evals/src/openmagic_evals/evidence/agent_boundary_trials.py": "314cfd3bbcbb50424a7f140b5821cb2eea32912a",
     "evals/src/openmagic_evals/evidence/agent_cases.py": "4e6a71536e07f39a1a959e08c0ebc8170d353e99",
     "evals/src/openmagic_evals/evidence/agent_models.py": "282759e90f760694095dd38996a406216f9646e4",
-    "evals/src/openmagic_evals/evidence/agent_quality.py": "e7103bcf4d4bebb146913cae413cafd54ab8d059",
+    "evals/src/openmagic_evals/evidence/agent_quality.py": "c22969b0f4a25194201645f01507179fa7a4be3d",
     "evals/src/openmagic_evals/evidence/agent_scoring.py": "ed37d032bfecd6f3731cd24c038574f60f7ed8ed",
     "evals/src/openmagic_evals/evidence/agent_trials.py": "a046db5d57d7ac0b0dfbf133ed0cd3c8c4c20afb",
     "evals/src/openmagic_evals/evidence/contracts.py": "ed377e6c7f0604e660c6bd84a884ad11088d7efd",
