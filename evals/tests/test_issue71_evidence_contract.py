@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import UTC, datetime
+from typing import Literal, cast
 
 import pytest
 from openmagic_evals.evidence.contracts import (
@@ -21,6 +23,7 @@ from openmagic_evals.evidence.contracts import (
     QueueDepth,
     RaceTrialEvidence,
     ReproducibilityPin,
+    SanitizedAgentEvent,
     canonical_artifact_json,
     parse_artifact,
 )
@@ -95,6 +98,30 @@ def _agent_configuration() -> AgentConfigurationPin:
 
 def _agent_case() -> ArtifactCase:
     correlations = Correlations(command_ids=("018f2f00-0000-7000-8000-000000000001",))
+    trajectory = tuple(
+        SanitizedAgentEvent(
+            sequence=index,
+            event_type=cast(
+                Literal["context_projection", "candidate", "outcome_verification"],
+                event_type,
+            ),
+            durable_identity=f"identity-{index}",
+            input_digest="sha256:" + f"{index:064x}",
+            output_digest="sha256:" + f"{index + 3:064x}",
+        )
+        for index, event_type in enumerate(
+            ("context_projection", "candidate", "outcome_verification"), start=1
+        )
+    )
+    trajectory_document = json.dumps(
+        {
+            "rubric_scores": {"quality": True},
+            "trajectory": [event.model_dump(mode="json") for event in trajectory],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    trajectory_digest = "sha256:" + hashlib.sha256(trajectory_document).hexdigest()
     return ArtifactCase(
         case_id="agent.development.tool-choice",
         case_schema_version=1,
@@ -103,15 +130,17 @@ def _agent_case() -> ArtifactCase:
         observed_trials=1,
         seeds=(0,),
         correlations=correlations,
-        observation_digests=("sha256:" + "9" * 64,),
+        observation_digests=(trajectory_digest,),
         agent_trials=(
             AgentTrialEvidence(
                 seed=0,
                 outcome_passed=True,
                 prohibited_actions=(),
                 latency_ms=1,
-                trajectory_digest="sha256:" + "9" * 64,
+                trajectory_digest=trajectory_digest,
                 correlations=correlations,
+                trajectory=trajectory,
+                rubric_scores={"quality": True},
             ),
         ),
         pass_threshold=0.75,
@@ -189,6 +218,8 @@ def test_race_trial_requires_cardinality_one_and_durable_correlations() -> None:
             constraint_rows=2,
             correlations=Correlations(command_ids=("018f2f00-0000-7000-8000-000000000001",)),
             observation_digest="sha256:" + "1" * 64,
+            contender_process_ids=(101, 102),
+            database_overlap_observed=True,
         )
 
     with pytest.raises(ValueError, match="correlate"):
@@ -199,6 +230,8 @@ def test_race_trial_requires_cardinality_one_and_durable_correlations() -> None:
             constraint_rows=1,
             correlations=Correlations(),
             observation_digest="sha256:" + "1" * 64,
+            contender_process_ids=(101, 102),
+            database_overlap_observed=True,
         )
 
     with pytest.raises(ValueError, match="Agent quality cannot determine"):

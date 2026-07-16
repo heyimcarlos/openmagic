@@ -175,6 +175,16 @@ def audit_repository(root: Path) -> RepositoryAudit:
     root_exports = _declared_exports(runtime_root / "__init__.py")
     if root_exports != {"__version__"}:
         violations.append("runtime root exports more than package metadata")
+    actual_public_modules = tuple(
+        sorted(
+            path.relative_to(runtime_root).as_posix()
+            for path in runtime_root.rglob("*.py")
+            if path.name != "__init__.py"
+            and all(not part.startswith("_") for part in path.relative_to(runtime_root).parts)
+        )
+    )
+    if actual_public_modules != tuple(sorted(RUNTIME_PUBLIC_MODULES)):
+        violations.append("runtime modules differ from the exact accepted public surface")
     for relative in RUNTIME_PUBLIC_MODULES:
         exports = _declared_exports(runtime_root / relative)
         if exports is None:

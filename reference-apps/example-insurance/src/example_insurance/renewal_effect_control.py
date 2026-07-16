@@ -6,8 +6,7 @@ from typing import Any
 from uuid import UUID
 
 from openmagic_runtime.commands import StateConflict
-from openmagic_runtime.kernel.control import KernelControl
-from openmagic_runtime.kernel.transitions import ResolveDeferredStep
+from openmagic_runtime.kernel.control import KernelControl, ResolveDeferredStep
 from openmagic_runtime.kernel.work import ClaimedAttempt, DispositionRequired
 from psycopg import Connection
 

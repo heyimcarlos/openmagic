@@ -8,11 +8,7 @@ from typing import Any
 from uuid import UUID
 
 from openmagic_runtime.commands import Actor
-from openmagic_runtime.kernel.records import (
-    activated_by_attempt,
-    expired_attempt_instances,
-    lock_instance,
-)
+from openmagic_runtime.kernel.inspection import KernelTransactionInspection
 from psycopg import Connection
 from psycopg.rows import dict_row
 
@@ -100,7 +96,10 @@ def lock_instance_for_workflow(
     connection: Connection[tuple[Any, ...]], workflow_id: UUID
 ) -> WorkflowIdentity | None:
     identity = _read_workflow_identity(connection, workflow_id)
-    if identity is None or lock_instance(connection, identity.instance_id) is None:
+    if (
+        identity is None
+        or KernelTransactionInspection(connection).lock_instance(identity.instance_id) is None
+    ):
         return None
     with connection.cursor(row_factory=dict_row) as cursor:
         record = cursor.execute(
@@ -164,7 +163,7 @@ def record_workflow(
 def expired_workflow_instances(
     connection: Connection[tuple[Any, ...]],
 ) -> tuple[UUID, ...]:
-    candidates = expired_attempt_instances(connection)
+    candidates = KernelTransactionInspection(connection).expired_attempt_instances()
     if not candidates:
         return ()
     with connection.cursor(row_factory=dict_row) as cursor:
@@ -198,8 +197,7 @@ def activation_receipt(
     instance_id: UUID,
     source_attempt_id: UUID,
 ) -> ActivationReceipt:
-    activated = activated_by_attempt(
-        connection,
+    activated = KernelTransactionInspection(connection).activated_by_attempt(
         instance_id=instance_id,
         attempt_id=source_attempt_id,
     )

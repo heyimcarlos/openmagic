@@ -5,8 +5,7 @@ from __future__ import annotations
 from typing import Any
 from uuid import UUID, uuid4
 
-from openmagic_runtime.kernel.control import KernelControl
-from openmagic_runtime.kernel.transitions import AcceptSignal
+from openmagic_runtime.kernel.control import AcceptSignal, KernelControl
 from psycopg import Connection
 
 from example_insurance.renewal_approval_policy import (

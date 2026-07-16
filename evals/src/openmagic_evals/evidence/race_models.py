@@ -6,6 +6,7 @@ import hashlib
 import json
 import random
 from dataclasses import dataclass
+from typing import Literal
 
 from openmagic_evals.evidence.contracts import Correlations
 
@@ -30,6 +31,8 @@ class RaceSeedResult:
     constraint_rows: int
     correlations: Correlations
     observation_digest: str
+    contender_process_ids: tuple[int, int]
+    database_overlap_observed: Literal[True]
 
 
 @dataclass(frozen=True)

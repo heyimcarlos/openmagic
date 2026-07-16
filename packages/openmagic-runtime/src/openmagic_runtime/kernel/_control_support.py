@@ -9,6 +9,13 @@ from psycopg import Connection
 from psycopg.types.json import Jsonb
 
 from openmagic_runtime._canonical import canonical_digest
+from openmagic_runtime.kernel._records import (
+    AttemptState,
+    InstanceState,
+)
+from openmagic_runtime.kernel._records import (
+    lock_instance as lock_instance_record,
+)
 from openmagic_runtime.kernel._transition_records import (
     lock_disposition_source,
     read_instance_definition,
@@ -18,13 +25,6 @@ from openmagic_runtime.kernel.definitions import (
     WorkflowDefinition,
     validate_payload,
     verified_definition,
-)
-from openmagic_runtime.kernel.records import (
-    AttemptState,
-    InstanceState,
-)
-from openmagic_runtime.kernel.records import (
-    lock_instance as lock_instance_record,
 )
 from openmagic_runtime.kernel.work import DispositionRequired
 

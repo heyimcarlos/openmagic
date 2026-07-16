@@ -8,7 +8,7 @@ from uuid import UUID
 
 from openmagic_runtime.delivery import DeliveryStatus
 from openmagic_runtime.evidence import content_fingerprint
-from openmagic_runtime.kernel.records import WaitState
+from openmagic_runtime.kernel.inspection import WaitState
 
 from example_insurance.renewal_effect_types import RenewalEmailEffect
 from example_insurance.renewal_lifecycle_policy import WorkflowLifecycle

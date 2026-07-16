@@ -25,7 +25,6 @@ from openmagic_evals.evidence.contracts import (
     ArtifactCase,
     BuildPin,
     CaseVerdict,
-    Correlations,
     DeterministicArtifact,
     DeterministicSummary,
     RaceArtifact,
@@ -34,6 +33,10 @@ from openmagic_evals.evidence.contracts import (
     merge_correlations,
 )
 from openmagic_evals.evidence.deadline import bounded_evidence
+from openmagic_evals.evidence.deterministic_observations import (
+    DeterministicObservation,
+    release_observations,
+)
 from openmagic_evals.evidence.matrix import (
     DETERMINISTIC_RELEASE_MATRIX,
     RaceContract,
@@ -51,6 +54,12 @@ _DISTRIBUTIONS = (
     "openmagic-evals",
     "openmagic-runtime",
 )
+_DISTRIBUTION_ROOTS = {
+    "example-insurance": Path("reference-apps/example-insurance"),
+    "openmagic-api": Path("apps/api"),
+    "openmagic-evals": Path("evals"),
+    "openmagic-runtime": Path("packages/openmagic-runtime"),
+}
 
 
 def _sha256(value: bytes) -> str:
@@ -75,11 +84,11 @@ def _build_pin(root: Path) -> BuildPin:
         checkout_clean=not status,
         lock_digest=_sha256((root / "uv.lock").read_bytes()),
         distributions={name: version(name) for name in _DISTRIBUTIONS},
-        distribution_digests={name: _distribution_digest(name) for name in _DISTRIBUTIONS},
+        distribution_digests={name: _distribution_digest(root, name) for name in _DISTRIBUTIONS},
     )
 
 
-def _distribution_digest(name: str) -> str:
+def _distribution_digest(root: Path, name: str) -> str:
     item = distribution(name)
     content = hashlib.sha256()
     for file in sorted(item.files or (), key=str):
@@ -87,6 +96,17 @@ def _distribution_digest(name: str) -> str:
         if not path.is_file():
             continue
         content.update(str(file).encode())
+        content.update(b"\0")
+        content.update(path.read_bytes())
+        content.update(b"\0")
+    source_root = root / _DISTRIBUTION_ROOTS[name]
+    for path in sorted(source_root.rglob("*")):
+        if not path.is_file() or any(
+            part == "__pycache__" or part.startswith(".") for part in path.parts
+        ):
+            continue
+        relative = path.relative_to(root)
+        content.update(relative.as_posix().encode())
         content.update(b"\0")
         content.update(path.read_bytes())
         content.update(b"\0")
@@ -197,10 +217,23 @@ def _matching_results(
     }
 
 
-def _release_case(case: ReleaseCase, tests: dict[str, dict[str, Any]]) -> ArtifactCase:
+def _release_case(
+    case: ReleaseCase,
+    tests: dict[str, dict[str, Any]],
+    observation: DeterministicObservation,
+) -> ArtifactCase:
     matched = _matching_results(tests, case.pytest_nodes)
     statuses = tuple(result["status"] for result in matched.values())
-    if not matched:
+    missing_nodes = tuple(
+        node
+        for node in case.pytest_nodes
+        if ("::" in node and node not in matched)
+        or ("::" not in node and not any(item.startswith(node) for item in matched))
+    )
+    if missing_nodes:
+        status = "infrastructure_error"
+        violations = ("release case omitted a predeclared pytest node",)
+    elif not matched:
         status = "infrastructure_error"
         violations = ("release case collected no tests",)
     elif all(item == "passed" for item in statuses):
@@ -212,43 +245,29 @@ def _release_case(case: ReleaseCase, tests: dict[str, dict[str, Any]]) -> Artifa
     else:
         status = "infrastructure_error"
         violations = ("release case did not complete",)
-    digest_input = {node: matched[node] for node in sorted(matched)}
+    digest_input = {
+        "durable_observation": observation.document,
+        "tests": {node: matched[node] for node in sorted(matched)},
+    }
     return ArtifactCase(
         case_id=case.case_id,
         case_schema_version=1,
         expected_trials=1,
         observed_trials=1,
         seeds=(0,),
-        correlations=Correlations(),
+        correlations=observation.correlations,
         observation_digests=_case_digest(case.case_id, digest_input, (0,)),
         verdict=CaseVerdict(status=status, invariant_violations=violations),
     )
 
 
 def _trace_completeness_case(
-    root: Path,
     case: ReleaseCase,
     tests: dict[str, dict[str, Any]],
+    observation: DeterministicObservation,
 ) -> ArtifactCase:
-    from openmagic_evals.evidence.demos import run_renewal_demo, run_verification_demo
-
-    contract = _release_case(case, tests)
-    if contract.verdict.status != "passed":
-        return contract
-    with tempfile.TemporaryDirectory(prefix="openmagic-trace-coverage-") as directory:
-        output_root = Path(directory)
-        renewal = run_renewal_demo(
-            repository_root=root,
-            working_directory=output_root / "renewal-provider",
-            output=output_root / "renewal.json",
-        )
-        verification = run_verification_demo(
-            repository_root=root,
-            output=output_root / "verification.json",
-        )
-    correlations = merge_correlations(
-        case.correlations for artifact in (renewal, verification) for case in artifact.cases
-    )
+    contract = _release_case(case, tests, observation)
+    correlations = observation.correlations
     required_identity_groups = (
         correlations.command_ids,
         correlations.workflow_ids,
@@ -274,24 +293,7 @@ def _trace_completeness_case(
     )
     if not all(required_identity_groups):
         raise AssertionError("trace completeness omitted an accepted durable identity")
-    return contract.model_copy(
-        update={
-            "correlations": correlations,
-            "observation_digests": (
-                _sha256(
-                    json.dumps(
-                        {
-                            "contract": contract.observation_digests,
-                            "renewal": renewal.cases[0].observation_digests,
-                            "verification": verification.cases[0].observation_digests,
-                        },
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    ).encode()
-                ),
-            ),
-        }
-    )
+    return contract
 
 
 def _race_case(case: RaceContract, corpus: RaceCorpus) -> ArtifactCase:
@@ -300,6 +302,8 @@ def _race_case(case: RaceContract, corpus: RaceCorpus) -> ArtifactCase:
         or corpus.database_constraint != case.database_constraint
         or corpus.uses_overlap_barrier != case.uses_overlap_barrier
         or corpus.varied_jitter != case.varied_jitter
+        or tuple(sorted(corpus.expected_public_outcomes))
+        != tuple(sorted(case.expected_public_outcomes))
     ):
         raise ValueError(f"race corpus metadata differs from its contract: {case.case_id}")
     if tuple(result.seed for result in corpus.results) != case.seeds:
@@ -318,6 +322,8 @@ def _race_case(case: RaceContract, corpus: RaceCorpus) -> ArtifactCase:
             constraint_rows=result.constraint_rows,
             correlations=result.correlations,
             observation_digest=result.observation_digest,
+            contender_process_ids=result.contender_process_ids,
+            database_overlap_observed=result.database_overlap_observed,
         )
         for result in corpus.results
     )
@@ -342,7 +348,7 @@ def run_deterministic_release(
     *,
     repository_root: Path,
     output: Path,
-    timeout_seconds: int = 900,
+    timeout_seconds: int = 1800,
     pytest_nodes: tuple[str, ...] = (),
     release_cases: tuple[ReleaseCase, ...] | None = None,
     race_contracts: tuple[RaceContract, ...] | None = None,
@@ -366,6 +372,8 @@ def run_deterministic_release(
         "openmagic_evals.evidence.pytest_plugin",
     )
     public_command = (
+        "uv",
+        "run",
         "openmagic-evidence",
         "deterministic",
         "--repository-root",
@@ -408,11 +416,12 @@ def run_deterministic_release(
         if not result_path.is_file():
             raise RuntimeError("pytest did not produce its explicit evidence result file")
         test_document = json.loads(result_path.read_text(encoding="utf-8"))
+        observations = release_observations(Path(directory) / "observations")
     tests = dict(test_document["tests"])
     cases = tuple(
-        _trace_completeness_case(root, case, tests)
+        _trace_completeness_case(case, tests, observations[case.family])
         if case.family == "trace_completeness"
-        else _release_case(case, tests)
+        else _release_case(case, tests, observations[case.family])
         for case in selected_release_cases
     )
     corpora = {corpus.case_id: corpus for corpus in run_all_races()}
@@ -465,6 +474,8 @@ def run_race_release(
     root = repository_root.resolve()
     contracts = cardinality_one_races()
     command = (
+        "uv",
+        "run",
         "openmagic-evidence",
         "races",
         "--repository-root",

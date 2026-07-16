@@ -105,13 +105,13 @@ class EvidenceInspection:
             worker_id=str(row[3]),
         )
 
-    def query_is_waiting(self, prefix: str) -> bool:
+    def query_is_lock_waiting(self, fragment: str) -> bool:
         with psycopg.connect(self._database_url) as connection, connection.transaction():
             connection.execute("SET TRANSACTION READ ONLY")
             row = connection.execute(
                 "SELECT 1 FROM pg_stat_activity WHERE datname = current_database() "
-                "AND state = 'active' AND query LIKE %s AND wait_event = 'PgSleep'",
-                (f"{prefix}%",),
+                "AND state = 'active' AND query LIKE %s AND wait_event_type = 'Lock'",
+                (f"%{fragment}%",),
             ).fetchone()
         return row is not None
 

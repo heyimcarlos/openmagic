@@ -8,10 +8,12 @@ from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from openmagic_runtime.commands import StateConflict
-from openmagic_runtime.kernel.attempt_guard import CurrentAttemptGuard
-from openmagic_runtime.kernel.control import KernelControl
-from openmagic_runtime.kernel.records import read_attempt, read_step
-from openmagic_runtime.kernel.transitions import GuardCurrentAttempt
+from openmagic_runtime.kernel.control import (
+    CurrentAttemptGuard,
+    GuardCurrentAttempt,
+    KernelControl,
+)
+from openmagic_runtime.kernel.inspection import KernelTransactionInspection
 from openmagic_runtime.kernel.work import ClaimedAttempt
 from psycopg import Connection
 from psycopg.rows import dict_row
@@ -185,7 +187,7 @@ def _lock_workflow_authority(
 def _load_durable_dispatch_claim(
     connection: Connection[tuple[Any, ...]], attempt_id: UUID
 ) -> DispatchClaim:
-    attempt = read_attempt(connection, attempt_id)
+    attempt = KernelTransactionInspection(connection).read_attempt(attempt_id)
     if attempt is None:
         raise StateConflict("Durable dispatch Attempt is unavailable")
     return _claim_from_input(
@@ -298,7 +300,7 @@ def commit_dispatch_fence(
 def lock_reconciliation_target(
     connection: Connection[tuple[Any, ...]], step_id: UUID
 ) -> ReconciliationTarget:
-    step = read_step(connection, step_id)
+    step = KernelTransactionInspection(connection).read_step(step_id)
     if step is None:
         raise StateConflict("Reconciliation Step input is unavailable")
     try:
@@ -307,7 +309,7 @@ def lock_reconciliation_target(
         basis_attempt_id = UUID(str(step.input["basis_attempt_id"]))
     except (KeyError, ValueError) as error:
         raise StateConflict("Reconciliation Step input is unavailable") from error
-    basis_attempt = read_attempt(connection, basis_attempt_id)
+    basis_attempt = KernelTransactionInspection(connection).read_attempt(basis_attempt_id)
     if basis_attempt is None:
         raise StateConflict("Reconciliation basis Attempt is unavailable")
     effect = lock_external_effect(connection, effect_step_id)

@@ -1,4 +1,4 @@
-"""Durable Signal acceptance transition."""
+"""Private durable Signal acceptance transition."""
 
 from __future__ import annotations
 
@@ -15,10 +15,10 @@ from openmagic_runtime.kernel._control_support import (
     materialize_route,
     require_open_instance,
 )
+from openmagic_runtime.kernel._records import lock_instance, lock_wait
 from openmagic_runtime.kernel._trace import append_trace, read_trace_replay
+from openmagic_runtime.kernel._transitions import AcceptSignal, SignalReceipt
 from openmagic_runtime.kernel.definitions import Route, validate_payload
-from openmagic_runtime.kernel.records import lock_instance, lock_wait
-from openmagic_runtime.kernel.transitions import AcceptSignal, SignalReceipt
 
 
 def _receipt(payload: dict[str, Any]) -> SignalReceipt:

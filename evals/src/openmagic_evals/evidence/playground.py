@@ -86,6 +86,8 @@ def verify_playground(
     timeout_seconds: int = 120,
 ) -> PlaygroundArtifact:
     command = (
+        "uv",
+        "run",
         "openmagic-evidence",
         "playground",
         "--repository-root",

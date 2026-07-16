@@ -45,6 +45,44 @@ def _common_reproducibility_pin(artifact: Artifact) -> tuple[object, ...]:
     )
 
 
+def _validate_release_matrix(artifact: DeterministicArtifact) -> None:
+    cases = {case.case_id: case for case in artifact.cases}
+    if len(cases) != len(artifact.cases):
+        raise ValueError("claim report requires unique deterministic case identities")
+    release_contracts = {case.case_id: case for case in DETERMINISTIC_RELEASE_MATRIX}
+    race_contracts = {case.case_id: case for case in cardinality_one_races()}
+    if set(cases) != set(release_contracts) | set(race_contracts):
+        raise ValueError("claim report requires the complete deterministic release matrix")
+    for case_id in release_contracts:
+        case = cases[case_id]
+        if (
+            case.verdict.status != "passed"
+            or case.expected_trials != 1
+            or case.observed_trials != 1
+            or case.race_trials
+            or not case.observation_digests
+            or not any(case.correlations.model_dump(mode="python").values())
+        ):
+            raise ValueError(f"claim report deterministic proof is incomplete: {case_id}")
+    for case_id, contract in race_contracts.items():
+        case = cases[case_id]
+        if (
+            case.verdict.status != "passed"
+            or case.expected_trials != 100
+            or case.observed_trials != 100
+            or case.seeds != contract.seeds
+            or len(case.race_trials) != 100
+            or any(
+                trial.constraint_rows != 1
+                or not trial.database_overlap_observed
+                or tuple(sorted(trial.public_outcomes))
+                != tuple(sorted(contract.expected_public_outcomes))
+                for trial in case.race_trials
+            )
+        ):
+            raise ValueError(f"claim report race proof is incomplete: {case_id}")
+
+
 def write_claim_report(
     *,
     deterministic_path: Path,
@@ -62,11 +100,7 @@ def write_claim_report(
         raise TypeError("claim report requires a deterministic release artifact")
     if not deterministic.summary.strict_pass:
         raise ValueError("claim report cannot publish supported claims from a failed release gate")
-    expected_release_cases = {case.case_id for case in DETERMINISTIC_RELEASE_MATRIX} | {
-        race.case_id for race in cardinality_one_races()
-    }
-    if {case.case_id for case in deterministic.cases} != expected_release_cases:
-        raise ValueError("claim report requires the complete deterministic release matrix")
+    _validate_release_matrix(deterministic)
     related: list[tuple[str, Path, Artifact]] = [
         ("deterministic", deterministic_path, deterministic)
     ]

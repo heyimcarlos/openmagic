@@ -15,7 +15,7 @@ from openmagic_runtime.delivery import (
     read_delivery_presentation,
 )
 from openmagic_runtime.evidence import content_fingerprint
-from openmagic_runtime.kernel.records import RuntimeWait, lock_wait, waits_for_instance
+from openmagic_runtime.kernel.inspection import KernelTransactionInspection, RuntimeWait
 from psycopg import Connection
 from psycopg.rows import dict_row
 
@@ -245,7 +245,9 @@ def load_approval_presentation_snapshot(
         draft = _read_latest_draft(connection, workflow_id)
         waits = tuple(
             wait
-            for wait in waits_for_instance(connection, workflow.instance_id)
+            for wait in KernelTransactionInspection(connection).waits_for_instance(
+                workflow.instance_id
+            )
             if draft is not None
             and wait.template_key == "renewal_draft_approval"
             and wait.input.get("draft_id") == str(draft.draft_id)
@@ -288,8 +290,7 @@ def lock_approval_decision_snapshot(
         workflow_id=workflow_id,
         draft_id=draft_id,
     )
-    wait = lock_wait(
-        connection,
+    wait = KernelTransactionInspection(connection).lock_wait(
         instance_id=identity.instance_id,
         wait_id=wait_id,
     )

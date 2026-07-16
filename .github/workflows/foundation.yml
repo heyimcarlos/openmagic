@@ -38,7 +38,7 @@ jobs:
           uv run openmagic-evidence deterministic
           --repository-root .
           --output .artifacts/issue71/deterministic-release.json
-          --timeout-seconds 900
+          --timeout-seconds 1800
       - run: >-
           uv run openmagic-evidence agent-quality
           --repository-root .

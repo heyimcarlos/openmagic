@@ -7,7 +7,7 @@ from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from openmagic_runtime.commands import Actor, Cause
-from openmagic_runtime.kernel.records import expired_attempt_instances
+from openmagic_runtime.kernel.inspection import KernelTransactionInspection
 from psycopg import Connection
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
@@ -136,7 +136,7 @@ def complete_verification_workflow(
 def expired_verification_instances(
     connection: Connection[tuple[Any, ...]],
 ) -> tuple[UUID, ...]:
-    candidates = expired_attempt_instances(connection)
+    candidates = KernelTransactionInspection(connection).expired_attempt_instances()
     if not candidates:
         return ()
     with connection.cursor(row_factory=dict_row) as cursor:

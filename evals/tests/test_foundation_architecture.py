@@ -19,7 +19,6 @@ RUNTIME_PUBLIC_MODULES = (
     "openmagic_runtime.kernel.definitions",
     "openmagic_runtime.kernel.control",
     "openmagic_runtime.kernel.work",
-    "openmagic_runtime.kernel.records",
     "openmagic_runtime.kernel.inspection",
     "openmagic_runtime.commands",
     "openmagic_runtime.execution",

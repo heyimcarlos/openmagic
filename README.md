@@ -67,14 +67,17 @@ uv run openmagic-evidence audit-surface --repository-root .
 uv run pytest evals/tests/test_foundation_wheels.py
 uv run openmagic-evidence deterministic \
   --repository-root . \
-  --output .artifacts/issue71/deterministic-release.json
+  --output .artifacts/issue71/deterministic-release.json \
+  --timeout-seconds 1800
 uv run openmagic-evidence races \
   --repository-root . \
-  --output .artifacts/issue71/races.json
+  --output .artifacts/issue71/races.json \
+  --timeout-seconds 900
 uv run openmagic-evidence processes \
   --repository-root . \
   --working-directory .artifacts/issue71/processes \
-  --output .artifacts/issue71/processes.json
+  --output .artifacts/issue71/processes.json \
+  --timeout-seconds 120
 ```
 
 Generate the other evidence products and final claim report:

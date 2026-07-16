@@ -1,4 +1,4 @@
-"""Typed contracts for generic kernel Signal, guard, deferral, and closure transitions."""
+"""Private typed contracts for generic kernel transitions."""
 
 from __future__ import annotations
 

@@ -30,7 +30,7 @@ from openmagic_evals.evidence.contracts import (
     merge_correlations,
 )
 from openmagic_evals.evidence.deadline import bounded_evidence
-from openmagic_evals.evidence.fault_injection import pause_message_append
+from openmagic_evals.evidence.fault_injection import lock_message_append
 from openmagic_evals.evidence.inspection import (
     AttemptAuthority,
     DeliveryAuthority,
@@ -203,9 +203,7 @@ def _wait_delivery(
     deadline = time.monotonic() + 15
     while time.monotonic() < deadline:
         authority = inspection.active_delivery(process.worker_id)
-        if authority is not None and inspection.query_is_waiting(
-            "INSERT INTO openmagic_runtime.messages"
-        ):
+        if authority is not None and inspection.query_is_lock_waiting("openmagic_runtime.messages"):
             return authority
         time.sleep(0.02)
     raise TimeoutError("Delivery Worker did not hold observed durable authority")
@@ -282,10 +280,13 @@ def run_process_evidence(*, working_directory: Path, workflow_count: int = 12) -
         deployment.drain_role("workflow-worker")
         workflow_drain_seconds = time.monotonic() - throughput_started
 
-        with pause_message_append(deployment.database_url):
-            lock_wait_started = time.monotonic()
+        with lock_message_append(deployment.database_url):
             lost_delivery_process = deployment.scale_role("delivery-worker", capacity=1)[0]
             lost_delivery_authority = _wait_delivery(inspection, lost_delivery_process)
+            lock_wait_started = time.monotonic()
+            time.sleep(0.25)
+            if not inspection.query_is_lock_waiting("openmagic_runtime.messages"):
+                raise AssertionError("Delivery Worker did not remain in the observed lock wait")
             lock_wait_ms = round((time.monotonic() - lock_wait_started) * 1000)
             lost_delivery = deployment.terminate_role("delivery-worker")
             if lost_delivery.pid != lost_delivery_process.pid:
@@ -346,6 +347,8 @@ def run_process_release(
 ) -> ProcessArtifact:
     """Record one canonical process-loss and backpressure evidence artifact."""
     command = (
+        "uv",
+        "run",
         "openmagic-evidence",
         "processes",
         "--repository-root",

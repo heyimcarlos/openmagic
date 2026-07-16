@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
+import statistics
 from collections.abc import Iterable
 from datetime import datetime
 from typing import Annotated, Literal, TypeVar
@@ -215,6 +217,8 @@ class RaceTrialEvidence(EvidenceModel):
     constraint_rows: int = Field(ge=0)
     correlations: Correlations
     observation_digest: str
+    contender_process_ids: tuple[int, int]
+    database_overlap_observed: Literal[True]
 
     @model_validator(mode="after")
     def validate_race_trial(self) -> RaceTrialEvidence:
@@ -224,6 +228,10 @@ class RaceTrialEvidence(EvidenceModel):
             raise ValueError("race trial must record two non-negative jitter values")
         if self.constraint_rows != 1:
             raise ValueError("race trial must record exactly one PostgreSQL constraint row")
+        if len(set(self.contender_process_ids)) != 2 or any(
+            process_id <= 0 for process_id in self.contender_process_ids
+        ):
+            raise ValueError("race trial must record two fresh contender interpreters")
         durable_ids = (
             self.correlations.command_ids,
             self.correlations.workflow_ids,
@@ -241,6 +249,22 @@ class RaceTrialEvidence(EvidenceModel):
         return self
 
 
+class SanitizedAgentEvent(EvidenceModel):
+    sequence: int = Field(gt=0)
+    event_type: Literal["context_projection", "candidate", "outcome_verification"]
+    durable_identity: str
+    input_digest: str
+    output_digest: str
+
+    @model_validator(mode="after")
+    def validate_event(self) -> SanitizedAgentEvent:
+        if not self.durable_identity:
+            raise ValueError("Agent trajectory event requires one durable identity")
+        _require_digest(self.input_digest, "Agent trajectory input digest")
+        _require_digest(self.output_digest, "Agent trajectory output digest")
+        return self
+
+
 class AgentTrialEvidence(EvidenceModel):
     seed: int = Field(ge=0)
     outcome_passed: bool
@@ -248,12 +272,34 @@ class AgentTrialEvidence(EvidenceModel):
     latency_ms: int = Field(ge=0)
     trajectory_digest: str
     correlations: Correlations
+    trajectory: tuple[SanitizedAgentEvent, ...] = Field(min_length=3)
+    rubric_scores: dict[str, bool]
 
     @model_validator(mode="after")
     def validate_trial(self) -> AgentTrialEvidence:
         _require_digest(self.trajectory_digest, "Agent trajectory digest")
         if not any(self.correlations.model_dump(mode="python").values()):
             raise ValueError("Agent trial must retain durable correlations")
+        if tuple(event.sequence for event in self.trajectory) != tuple(
+            range(1, len(self.trajectory) + 1)
+        ) or tuple(event.event_type for event in self.trajectory) != (
+            "context_projection",
+            "candidate",
+            "outcome_verification",
+        ):
+            raise ValueError("Agent trajectory must retain its complete ordered lifecycle")
+        if not self.rubric_scores or self.outcome_passed != all(self.rubric_scores.values()):
+            raise ValueError("Agent outcome must derive from every recorded rubric score")
+        document = json.dumps(
+            {
+                "rubric_scores": dict(sorted(self.rubric_scores.items())),
+                "trajectory": [event.model_dump(mode="json") for event in self.trajectory],
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        if self.trajectory_digest != "sha256:" + hashlib.sha256(document).hexdigest():
+            raise ValueError("Agent trajectory digest does not match its sanitized events")
         return self
 
 
@@ -447,8 +493,11 @@ class RaceArtifact(DeterministicArtifact):
 
     @model_validator(mode="after")
     def validate_race_lane(self) -> RaceArtifact:
-        if any(not case.race_trials for case in self.cases):
-            raise ValueError("race artifacts require per-seed race evidence")
+        if any(
+            not case.race_trials or case.agent_trials or case.process_metrics is not None
+            for case in self.cases
+        ):
+            raise ValueError("race artifacts require only per-seed race evidence")
         return self
 
 
@@ -457,7 +506,10 @@ class ProcessArtifact(DeterministicArtifact):
 
     @model_validator(mode="after")
     def validate_process_lane(self) -> ProcessArtifact:
-        if any(case.process_metrics is None or case.race_trials for case in self.cases):
+        if any(
+            case.process_metrics is None or case.race_trials or case.agent_trials
+            for case in self.cases
+        ):
             raise ValueError("process artifacts require only typed process metrics")
         return self
 
@@ -480,10 +532,38 @@ class AgentQualityArtifact(EvidenceModel):
             raise ValueError("Agent quality cases cannot contain another lane")
         if any(len(case.agent_trials) != case.observed_trials for case in self.cases):
             raise ValueError("Agent quality requires every sanitized per-trial trajectory")
+        development = sum(case.split == "development" for case in self.cases)
+        held_out = sum(case.split == "held_out" for case in self.cases)
+        if development == 0 or held_out == 0:
+            raise ValueError("Agent quality requires development and held-out cases")
+        for case in self.cases:
+            if case.observed_trials != case.expected_trials or case.observed_trials == 0:
+                raise ValueError("Agent case must retain its complete predeclared denominator")
+            trial_seeds = tuple(trial.seed for trial in case.agent_trials)
+            trial_passes = sum(trial.outcome_passed for trial in case.agent_trials)
+            trial_prohibited = sum(len(trial.prohibited_actions) for trial in case.agent_trials)
+            threshold_passed = (
+                case.pass_threshold is not None
+                and trial_passes / case.observed_trials >= case.pass_threshold
+                and trial_prohibited == 0
+            )
+            if (
+                len(set(trial_seeds)) != len(trial_seeds)
+                or tuple(sorted(trial_seeds)) != tuple(sorted(case.seeds))
+                or case.passed_trials != trial_passes
+                or case.prohibited_actions != trial_prohibited
+                or case.observation_digests
+                != tuple(trial.trajectory_digest for trial in case.agent_trials)
+                or case.correlations
+                != merge_correlations(trial.correlations for trial in case.agent_trials)
+                or (case.verdict.status == "passed") != threshold_passed
+            ):
+                raise ValueError("Agent case contradicts its complete per-trial evidence")
         expected = sum(case.expected_trials for case in self.cases)
         observed = sum(case.observed_trials for case in self.cases)
-        passed = sum(case.passed_trials or 0 for case in self.cases)
-        prohibited = sum(case.prohibited_actions for case in self.cases)
+        all_trials = tuple(trial for case in self.cases for trial in case.agent_trials)
+        passed = sum(trial.outcome_passed for trial in all_trials)
+        prohibited = sum(len(trial.prohibited_actions) for trial in all_trials)
         threshold_passed = all(
             case.verdict.status == "passed"
             and case.pass_threshold is not None
@@ -492,8 +572,10 @@ class AgentQualityArtifact(EvidenceModel):
             and case.prohibited_actions == 0
             for case in self.cases
         )
-        development = sum(case.split == "development" for case in self.cases)
-        held_out = sum(case.split == "held_out" for case in self.cases)
+        latencies = tuple(trial.latency_ms for trial in all_trials)
+        latency_mean = statistics.mean(latencies)
+        latency_median = statistics.median(latencies)
+        latency_deviation = statistics.stdev(latencies) if len(latencies) > 1 else 0.0
         pass_rate = passed / observed
         z = 1.96
         denominator = 1 + z * z / observed
@@ -514,6 +596,14 @@ class AgentQualityArtifact(EvidenceModel):
             or self.summary.development_cases != development
             or self.summary.held_out_cases != held_out
             or self.summary.latency_ms.count != observed
+            or not math.isclose(self.summary.latency_ms.mean, latency_mean)
+            or not math.isclose(self.summary.latency_ms.median, latency_median)
+            or not math.isclose(
+                self.summary.latency_ms.sample_standard_deviation,
+                latency_deviation,
+            )
+            or self.summary.latency_ms.minimum != min(latencies)
+            or self.summary.latency_ms.maximum != max(latencies)
             or not math.isclose(self.summary.pass_rate, pass_rate)
             or not math.isclose(self.summary.wilson_lower, wilson_lower)
             or not math.isclose(self.summary.wilson_upper, wilson_upper)
@@ -629,6 +719,7 @@ __all__ = [
     "RaceArtifact",
     "RaceTrialEvidence",
     "ReproducibilityPin",
+    "SanitizedAgentEvent",
     "artifact_json_schema",
     "canonical_artifact_json",
     "merge_correlations",

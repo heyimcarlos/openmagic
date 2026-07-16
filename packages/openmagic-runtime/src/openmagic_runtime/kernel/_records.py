@@ -1,4 +1,4 @@
-"""Typed transaction-scoped reads over private kernel persistence."""
+"""Private typed transaction-scoped reads over kernel persistence."""
 
 from __future__ import annotations
 

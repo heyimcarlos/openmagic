@@ -7,8 +7,7 @@ from uuid import UUID, uuid5
 
 from openmagic_runtime.commands import Actor, Cause
 from openmagic_runtime.delivery import DeliveryControl
-from openmagic_runtime.kernel.control import KernelControl
-from openmagic_runtime.kernel.transitions import CloseInstance
+from openmagic_runtime.kernel.control import CloseInstance, KernelControl
 from openmagic_runtime.kernel.work import ClaimedAttempt, DispositionRequired, KernelWork
 from psycopg import Connection
 

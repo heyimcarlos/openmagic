@@ -1,4 +1,4 @@
-"""Durable deferred Step resolution transition."""
+"""Private durable deferred Step resolution transition."""
 
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ from openmagic_runtime.kernel._control_support import (
     require_open_instance,
     validate_disposition,
 )
+from openmagic_runtime.kernel._records import lock_instance
 from openmagic_runtime.kernel._step_mutations import (
     DeferredStep,
     fail_step,
@@ -27,13 +28,12 @@ from openmagic_runtime.kernel._transition_records import (
     attempt_count_for_step,
     lock_deferred_step,
 )
-from openmagic_runtime.kernel.definitions import StepTemplate, validate_payload
-from openmagic_runtime.kernel.records import lock_instance
-from openmagic_runtime.kernel.transitions import (
+from openmagic_runtime.kernel._transitions import (
     ResolveDeferredStep,
     ResolveDeferredStepReceipt,
     deferred_action,
 )
+from openmagic_runtime.kernel.definitions import StepTemplate, validate_payload
 from openmagic_runtime.kernel.work import DispositionRequired
 
 

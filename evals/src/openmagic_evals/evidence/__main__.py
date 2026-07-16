@@ -41,7 +41,11 @@ def _parser() -> argparse.ArgumentParser:
         if name in release_commands:
             command.add_argument("--repository-root", type=Path, required=True)
             command.add_argument("--output", type=Path, required=True)
-            command.add_argument("--timeout-seconds", type=int, default=900)
+            command.add_argument(
+                "--timeout-seconds",
+                type=int,
+                default=1800 if name == "deterministic" else 900,
+            )
         elif name == "processes":
             command.add_argument("--repository-root", type=Path, required=True)
             command.add_argument("--working-directory", type=Path, required=True)
@@ -81,9 +85,11 @@ def _parser() -> argparse.ArgumentParser:
             command.add_argument("--repository-root", type=Path, required=True)
             command.add_argument("--working-directory", type=Path, required=True)
             command.add_argument("--output", type=Path, required=True)
+            command.add_argument("--timeout-seconds", type=int, default=120)
         elif name == "demo-verification":
             command.add_argument("--repository-root", type=Path, required=True)
             command.add_argument("--output", type=Path, required=True)
+            command.add_argument("--timeout-seconds", type=int, default=120)
     return parser
 
 
@@ -210,6 +216,7 @@ def main() -> None:
         artifact = run_verification_demo(
             repository_root=arguments.repository_root,
             output=arguments.output,
+            timeout_seconds=arguments.timeout_seconds,
         )
         print(json.dumps(artifact.summary.model_dump(mode="json"), sort_keys=True))
         return

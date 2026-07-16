@@ -11,6 +11,11 @@ from psycopg import Connection
 from psycopg.types.json import Jsonb
 
 from openmagic_runtime._canonical import canonical_digest
+from openmagic_runtime.kernel._attempt_guard import (
+    CurrentAttemptGuard,
+    guard_current_attempt,
+)
+from openmagic_runtime.kernel._closure import close_instance
 from openmagic_runtime.kernel._control_support import (
     instance_definition,
     lock_open_instance,
@@ -18,6 +23,8 @@ from openmagic_runtime.kernel._control_support import (
     materialize_step_route,
     validate_disposition,
 )
+from openmagic_runtime.kernel._deferred import defer_step, resolve_deferred_step
+from openmagic_runtime.kernel._signals import accept_signal
 from openmagic_runtime.kernel._step_mutations import (
     CurrentStep,
     fail_step,
@@ -25,15 +32,7 @@ from openmagic_runtime.kernel._step_mutations import (
     succeed_step,
 )
 from openmagic_runtime.kernel._trace import append_trace, read_trace_replay
-from openmagic_runtime.kernel.attempt_guard import (
-    CurrentAttemptGuard,
-    guard_current_attempt,
-)
-from openmagic_runtime.kernel.closure import close_instance
-from openmagic_runtime.kernel.deferred import defer_step, resolve_deferred_step
-from openmagic_runtime.kernel.definitions import validate_payload, verified_definition
-from openmagic_runtime.kernel.signals import accept_signal
-from openmagic_runtime.kernel.transitions import (
+from openmagic_runtime.kernel._transitions import (
     AcceptSignal,
     CloseInstance,
     CloseInstanceReceipt,
@@ -42,6 +41,7 @@ from openmagic_runtime.kernel.transitions import (
     ResolveDeferredStepReceipt,
     SignalReceipt,
 )
+from openmagic_runtime.kernel.definitions import validate_payload, verified_definition
 from openmagic_runtime.kernel.work import DispositionRequired
 
 
@@ -313,7 +313,15 @@ def start_instance(*, database_url: str, request: StartInstance) -> StartInstanc
 
 
 __all__ = [
+    "AcceptSignal",
+    "CloseInstance",
+    "CloseInstanceReceipt",
+    "CurrentAttemptGuard",
+    "GuardCurrentAttempt",
     "KernelControl",
+    "ResolveDeferredStep",
+    "ResolveDeferredStepReceipt",
+    "SignalReceipt",
     "StartInstance",
     "StartInstanceReceipt",
     "start_instance",

@@ -6,7 +6,7 @@ from typing import Any, Literal
 from uuid import UUID
 
 from openmagic_runtime.delivery import lock_delivery_presentation
-from openmagic_runtime.kernel.records import lock_instance
+from openmagic_runtime.kernel.inspection import KernelTransactionInspection
 from psycopg import Connection
 
 from example_insurance.verification_challenge_records import (
@@ -62,7 +62,10 @@ class VerificationChallengeLifecycle:
         )
         locked: list[PendingChallengeIdentity] = []
         for identity in identities:
-            if lock_instance(connection, identity.delivery_instance_id) is not None:
+            if (
+                KernelTransactionInspection(connection).lock_instance(identity.delivery_instance_id)
+                is not None
+            ):
                 locked.append(identity)
         return tuple(locked)
 

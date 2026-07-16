@@ -8,7 +8,7 @@ from dataclasses import dataclass
 import psycopg
 from psycopg import Connection, sql
 
-from example_insurance.migrations import apply_migrations
+from example_insurance.migrations import _apply_migrations
 
 
 class ResetPreflightBlocked(RuntimeError):
@@ -112,28 +112,25 @@ def mark_synthetic_deployment(database_url: str) -> None:
 def reset_synthetic_deployment(database_url: str) -> None:
     """Drop and rebuild only a preflight-approved synthetic deployment."""
 
-    with psycopg.connect(database_url, autocommit=True) as connection:
-        connection.execute("SELECT pg_advisory_lock(hashtextextended(current_database(), 0))")
-        try:
-            with connection.transaction():
-                assessment = _assess_connection(connection)
-                if not assessment.accepted:
-                    raise ResetPreflightBlocked("; ".join(assessment.blocking_conditions))
-                tables = _owned_tables(connection)
-                if tables:
-                    targets = sql.SQL(", ").join(
-                        sql.SQL("{}.{}").format(sql.Identifier(schema), sql.Identifier(table))
-                        for schema, table in tables
-                    )
-                    connection.execute(
-                        sql.SQL("LOCK TABLE {} IN ACCESS EXCLUSIVE MODE").format(targets)
-                    )
-                connection.execute("DROP SCHEMA IF EXISTS example_insurance CASCADE")
-                connection.execute("DROP SCHEMA IF EXISTS openmagic_runtime CASCADE")
-            apply_migrations(database_url)
-            mark_synthetic_deployment(database_url)
-        finally:
-            connection.execute("SELECT pg_advisory_unlock(hashtextextended(current_database(), 0))")
+    with psycopg.connect(database_url) as connection, connection.transaction():
+        connection.execute("SELECT pg_advisory_xact_lock(hashtextextended(current_database(), 0))")
+        assessment = _assess_connection(connection)
+        if not assessment.accepted:
+            raise ResetPreflightBlocked("; ".join(assessment.blocking_conditions))
+        tables = _owned_tables(connection)
+        if tables:
+            targets = sql.SQL(", ").join(
+                sql.SQL("{}.{}").format(sql.Identifier(schema), sql.Identifier(table))
+                for schema, table in tables
+            )
+            connection.execute(sql.SQL("LOCK TABLE {} IN ACCESS EXCLUSIVE MODE").format(targets))
+        connection.execute("DROP SCHEMA IF EXISTS example_insurance CASCADE")
+        connection.execute("DROP SCHEMA IF EXISTS openmagic_runtime CASCADE")
+        _apply_migrations(connection)
+        connection.execute(
+            "UPDATE example_insurance.deployment_metadata "
+            "SET deployment_purpose = 'synthetic' WHERE singleton"
+        )
 
 
 def main() -> None:

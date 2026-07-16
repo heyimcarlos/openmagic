@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 from uuid import UUID
 
-from openmagic_runtime.kernel.records import lock_instance
+from openmagic_runtime.kernel.inspection import KernelTransactionInspection
 from psycopg import Connection
 
 from example_insurance.renewal_workflow_records import lock_instance_for_workflow
@@ -65,7 +65,11 @@ class VerificationSubmissionControl:
         value = command.input
         code_matches = self._codes.accepts(value.challenge_id, value.code)
         identity = read_challenge_identity(connection, value.challenge_id)
-        if identity is None or lock_instance(connection, identity.delivery_instance_id) is None:
+        if (
+            identity is None
+            or KernelTransactionInspection(connection).lock_instance(identity.delivery_instance_id)
+            is None
+        ):
             return self._result(command, "invalid_code")
         if lock_instance_for_workflow(connection, identity.protected_workflow_id) is None:
             return self._reject_closed_workflow(command, connection)

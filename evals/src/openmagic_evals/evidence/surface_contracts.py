@@ -9,7 +9,6 @@ RUNTIME_PUBLIC_MODULES = (
     "kernel/control.py",
     "kernel/definitions.py",
     "kernel/inspection.py",
-    "kernel/records.py",
     "kernel/work.py",
     "threads.py",
     "workers.py",

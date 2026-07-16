@@ -33,6 +33,10 @@ def _candidate_factory():
     return lambda execution: Candidate(str(execution.run_input.task.input.value("value")))
 
 
+def _malformed_candidate_factory():
+    return lambda _execution: "not-a-typed-candidate"
+
+
 def _slow_candidate_factory(marker: Path):
     def run(execution: AgentExecutionInput) -> Candidate:
         time.sleep(1.5)
@@ -86,6 +90,18 @@ def test_fresh_agent_executor_returns_only_its_typed_candidate() -> None:
     observation = executor.execute(_execution(), CancellationToken())
 
     assert observation.value == {"value": "candidate"}
+
+
+def test_fresh_agent_executor_rejects_malformed_candidate_type() -> None:
+    executor = FreshAgentExecutor(
+        _malformed_candidate_factory,
+        result_class=Candidate,
+        encoder=lambda candidate: {"value": candidate.value},
+        timeout_seconds=1,
+    )
+
+    with pytest.raises(RuntimeError, match="outside its typed contract"):
+        executor.execute(_execution(), CancellationToken())
 
 
 def test_fresh_agent_executor_terminates_work_after_timeout(tmp_path: Path) -> None:

@@ -36,9 +36,8 @@ from openmagic_evals.harness._postgres import postgres_container
 from openmagic_runtime.commands import Actor, Cause
 from openmagic_runtime.evidence import content_fingerprint
 from openmagic_runtime.execution import AttemptExecution, CancellationToken
-from openmagic_runtime.kernel.control import KernelControl
+from openmagic_runtime.kernel.control import KernelControl, ResolveDeferredStep
 from openmagic_runtime.kernel.inspection import KernelInspection
-from openmagic_runtime.kernel.transitions import ResolveDeferredStep
 from openmagic_runtime.threads import ThreadStore
 
 

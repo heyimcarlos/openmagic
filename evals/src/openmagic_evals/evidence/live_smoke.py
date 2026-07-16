@@ -60,6 +60,8 @@ def run_live_smoke(
     timeout_seconds: int = 10,
 ) -> LiveSmokeArtifact:
     command_parts = [
+        "uv",
+        "run",
         "openmagic-evidence",
         "live-smoke",
         "--repository-root",

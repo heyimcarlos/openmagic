@@ -1,4 +1,4 @@
-"""Durable Instance closure transition."""
+"""Private durable Instance closure transition."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from openmagic_runtime.kernel._control_support import (
     require_open_instance,
 )
 from openmagic_runtime.kernel._trace import append_trace, read_trace_replay
-from openmagic_runtime.kernel.transitions import CloseInstance, CloseInstanceReceipt
+from openmagic_runtime.kernel._transitions import CloseInstance, CloseInstanceReceipt
 
 
 def _receipt(payload: dict[str, Any]) -> CloseInstanceReceipt:

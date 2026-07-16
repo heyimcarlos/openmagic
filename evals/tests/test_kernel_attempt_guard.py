@@ -14,8 +14,7 @@ from openmagic_evals.harness import (
     prepare_renewal_approval,
 )
 from openmagic_evals.harness._postgres import postgres_container
-from openmagic_runtime.kernel.control import KernelControl
-from openmagic_runtime.kernel.transitions import GuardCurrentAttempt
+from openmagic_runtime.kernel.control import GuardCurrentAttempt, KernelControl
 from openmagic_runtime.threads import ThreadStore
 
 

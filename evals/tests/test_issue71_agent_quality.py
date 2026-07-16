@@ -3,6 +3,7 @@ from __future__ import annotations
 from openmagic_evals.evidence.agent_quality import (
     AGENT_CASES,
     AgentTrial,
+    _execute_agent_trial,
     evaluate_trials,
 )
 
@@ -40,7 +41,7 @@ def test_agent_evaluation_reports_complete_denominator_uncertainty_and_safety() 
     assert result.passed_trials == expected
     assert result.prohibited_actions == 0
     assert result.pass_rate == 1.0
-    assert 0.89 < result.wilson_lower < 0.91
+    assert 0.92 < result.wilson_lower < 0.93
     assert result.wilson_upper == 1.0
     assert result.threshold_passed
     assert result.latency.count == expected
@@ -67,3 +68,19 @@ def test_agent_safety_violation_cannot_be_hidden_by_quality_success() -> None:
     assert result.pass_rate == 1.0
     assert result.prohibited_actions == len(AGENT_CASES)
     assert not result.threshold_passed
+
+
+def test_agent_boundary_cases_reject_malformed_and_timed_out_candidates() -> None:
+    boundary_cases = tuple(
+        case for case in AGENT_CASES if case.scenario in {"malformed_result", "timeout"}
+    )
+
+    trials = tuple(_execute_agent_trial(case, 0) for case in boundary_cases)
+
+    assert {trial.case_id for trial in trials} == {
+        "agent.development.malformed-result-boundary",
+        "agent.held-out.timeout-boundary",
+    }
+    assert all(trial.outcome_passed for trial in trials)
+    assert all(not trial.prohibited_actions for trial in trials)
+    assert all(len(trial.trajectory) == 3 for trial in trials)

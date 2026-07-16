@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal, cast
 
 import pytest
 from openmagic_evals.evidence.claims import write_claim_report
@@ -18,7 +21,9 @@ from openmagic_evals.evidence.contracts import (
     DeterministicArtifact,
     DeterministicSummary,
     DistributionSummary,
+    RaceTrialEvidence,
     ReproducibilityPin,
+    SanitizedAgentEvent,
     canonical_artifact_json,
 )
 from openmagic_evals.evidence.matrix import DETERMINISTIC_RELEASE_MATRIX, cardinality_one_races
@@ -52,6 +57,34 @@ def _pin(git_sha: str) -> ReproducibilityPin:
 
 def _case(*, agent: bool = False, case_id: str = "release.test") -> ArtifactCase:
     correlations = Correlations(command_ids=("018f2f00-0000-7000-8000-000000000001",))
+    trajectory = tuple(
+        SanitizedAgentEvent(
+            sequence=index,
+            event_type=cast(
+                Literal["context_projection", "candidate", "outcome_verification"],
+                event_type,
+            ),
+            durable_identity=f"identity-{index}",
+            input_digest="sha256:" + f"{index:064x}",
+            output_digest="sha256:" + f"{index + 3:064x}",
+        )
+        for index, event_type in enumerate(
+            ("context_projection", "candidate", "outcome_verification"), start=1
+        )
+    )
+    trajectory_digest = (
+        "sha256:"
+        + hashlib.sha256(
+            json.dumps(
+                {
+                    "rubric_scores": {"quality": True},
+                    "trajectory": [event.model_dump(mode="json") for event in trajectory],
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+    )
     return ArtifactCase(
         case_id="agent.development.test" if agent else case_id,
         case_schema_version=1,
@@ -60,7 +93,7 @@ def _case(*, agent: bool = False, case_id: str = "release.test") -> ArtifactCase
         observed_trials=1,
         seeds=(0,),
         correlations=correlations,
-        observation_digests=("sha256:" + "7" * 64,),
+        observation_digests=(trajectory_digest,) if agent else ("sha256:" + "7" * 64,),
         pass_threshold=1.0 if agent else None,
         passed_trials=1 if agent else None,
         agent_trials=(
@@ -70,8 +103,10 @@ def _case(*, agent: bool = False, case_id: str = "release.test") -> ArtifactCase
                     outcome_passed=True,
                     prohibited_actions=(),
                     latency_ms=1,
-                    trajectory_digest="sha256:" + "7" * 64,
+                    trajectory_digest=trajectory_digest,
                     correlations=correlations,
+                    trajectory=trajectory,
+                    rubric_scores={"quality": True},
                 ),
             )
             if agent
@@ -81,13 +116,39 @@ def _case(*, agent: bool = False, case_id: str = "release.test") -> ArtifactCase
     )
 
 
-def test_claim_report_rejects_artifacts_from_different_builds(tmp_path: Path) -> None:
-    release_cases = tuple(
-        _case(case_id=case_id)
-        for case_id in (
-            *(case.case_id for case in DETERMINISTIC_RELEASE_MATRIX),
-            *(case.case_id for case in cardinality_one_races()),
+def _race_case(case_id: str) -> ArtifactCase:
+    contract = next(case for case in cardinality_one_races() if case.case_id == case_id)
+    correlations = Correlations(command_ids=("018f2f00-0000-7000-8000-000000000001",))
+    trials = tuple(
+        RaceTrialEvidence(
+            seed=seed,
+            jitter_microseconds=(seed, seed + 1),
+            public_outcomes=contract.expected_public_outcomes,
+            constraint_rows=1,
+            correlations=correlations,
+            observation_digest="sha256:" + f"{seed:064x}",
+            contender_process_ids=(1000 + seed * 2, 1001 + seed * 2),
+            database_overlap_observed=True,
         )
+        for seed in contract.seeds
+    )
+    return ArtifactCase(
+        case_id=case_id,
+        case_schema_version=1,
+        expected_trials=100,
+        observed_trials=100,
+        seeds=contract.seeds,
+        correlations=correlations,
+        observation_digests=tuple(trial.observation_digest for trial in trials),
+        race_trials=trials,
+        verdict=CaseVerdict(status="passed", invariant_violations=()),
+    )
+
+
+def test_claim_report_rejects_artifacts_from_different_builds(tmp_path: Path) -> None:
+    release_cases = (
+        *(_case(case_id=case.case_id) for case in DETERMINISTIC_RELEASE_MATRIX),
+        *(_race_case(case.case_id) for case in cardinality_one_races()),
     )
     deterministic = DeterministicArtifact(
         reproducibility=_pin("1" * 40),
@@ -117,20 +178,25 @@ def test_claim_report_rejects_artifacts_from_different_builds(tmp_path: Path) ->
             reasoning="none",
             temperature=0,
         ),
-        cases=(_case(agent=True),),
+        cases=(
+            _case(agent=True),
+            _case(agent=True).model_copy(
+                update={"case_id": "agent.held-out.test", "split": "held_out"}
+            ),
+        ),
         summary=AgentQualitySummary(
             development_cases=1,
-            held_out_cases=0,
-            expected_trials=1,
-            observed_trials=1,
-            passed_trials=1,
+            held_out_cases=1,
+            expected_trials=2,
+            observed_trials=2,
+            passed_trials=2,
             prohibited_actions=0,
             threshold_passed=True,
             pass_rate=1,
-            wilson_lower=0.20654329147389294,
+            wilson_lower=0.34237195288961925,
             wilson_upper=1,
             latency_ms=DistributionSummary(
-                count=1,
+                count=2,
                 mean=1,
                 median=1,
                 sample_standard_deviation=0,

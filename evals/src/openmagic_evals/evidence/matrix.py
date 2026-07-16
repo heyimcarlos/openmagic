@@ -40,6 +40,7 @@ class RaceContract:
     seeds: tuple[int, ...]
     varied_jitter: bool
     database_constraint: str
+    expected_public_outcomes: tuple[str, str]
 
 
 DETERMINISTIC_RELEASE_MATRIX = (
@@ -67,8 +68,9 @@ DETERMINISTIC_RELEASE_MATRIX = (
         "transaction",
         (
             "evals/tests/test_renewal_drafting.py::test_start_command_commits_and_replays_value_identically",
+            "evals/tests/test_renewal_drafting.py::test_command_validation_rejects_nested_types_and_semantics_before_commit",
         ),
-        "Command state, kernel state, Domain Events, and receipt commit atomically.",
+        "Valid Command state, kernel state, Domain Events, and receipt commit together; invalid input does not commit and exact replay is value-identical.",
     ),
     ReleaseCase(
         "replay.public-identities",
@@ -84,7 +86,7 @@ DETERMINISTIC_RELEASE_MATRIX = (
         (
             "evals/tests/test_renewal_drafting.py::test_start_route_replay_returns_the_same_complete_occurrence_batch",
         ),
-        "A predefined Route materializes its finite batch and Trace Event atomically.",
+        "A predefined Route materializes one complete finite batch and exact replay returns the same occurrences.",
     ),
     ReleaseCase(
         "wait.one-shot",
@@ -141,6 +143,7 @@ DETERMINISTIC_RELEASE_MATRIX = (
         "executor",
         (
             "packages/openmagic-runtime/tests/test_execution.py::test_fresh_agent_executor_returns_only_its_typed_candidate",
+            "packages/openmagic-runtime/tests/test_execution.py::test_fresh_agent_executor_rejects_malformed_candidate_type",
             "packages/openmagic-runtime/tests/test_execution.py::test_fresh_agent_executor_terminates_work_after_timeout",
             "evals/tests/test_renewal_drafting.py::test_agent_process_loss_terminalizes_run_and_retries_without_phantom_authority",
         ),
@@ -167,8 +170,9 @@ DETERMINISTIC_RELEASE_MATRIX = (
         "acknowledgement",
         (
             "evals/tests/test_renewal_drafting.py::test_delivery_appends_once_to_only_the_frozen_exact_thread",
+            "evals/tests/test_renewal_drafting.py::test_delivery_process_loss_after_claim_recovers_without_duplicate_message",
         ),
-        "Message append, Attempt success, and Delivery acknowledgement commit atomically.",
+        "Message append and Delivery acknowledgement recover after process loss without a duplicate Message.",
     ),
     ReleaseCase(
         "completion.evidence-backed",
@@ -196,6 +200,7 @@ _RACES = (
         tuple(range(100)),
         True,
         "openmagic_runtime.command_receipts(command_id)",
+        ("value_identical_receipt", "value_identical_receipt"),
     ),
     RaceContract(
         "race.delivery-claim",
@@ -204,6 +209,7 @@ _RACES = (
         tuple(range(100)),
         True,
         "one_running_delivery_attempt",
+        ("claimed", "not_claimed"),
     ),
     RaceContract(
         "race.step-claim",
@@ -212,6 +218,7 @@ _RACES = (
         tuple(range(100)),
         True,
         "one_leased_attempt_per_step",
+        ("claimed", "not_claimed"),
     ),
     RaceContract(
         "race.wait-signal",
@@ -220,6 +227,7 @@ _RACES = (
         tuple(range(100)),
         True,
         "openmagic_runtime.signals(wait_id)",
+        ("accepted", "conflict"),
     ),
     RaceContract(
         "race.attempt-result",
@@ -228,6 +236,7 @@ _RACES = (
         tuple(range(100)),
         True,
         "one accepted result per Attempt",
+        ("accepted", "replayed"),
     ),
     RaceContract(
         "race.route-activation",
@@ -236,6 +245,7 @@ _RACES = (
         tuple(range(100)),
         True,
         "one materialized output per Route slot",
+        ("value_identical_receipt", "value_identical_receipt"),
     ),
     RaceContract(
         "race.verification-submission",
@@ -244,6 +254,7 @@ _RACES = (
         tuple(range(100)),
         True,
         "example_insurance.verification_sessions(challenge_id)",
+        ("already_used", "verified"),
     ),
 )
 

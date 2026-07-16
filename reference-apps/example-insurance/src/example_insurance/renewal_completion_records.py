@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
-from openmagic_runtime.kernel.records import steps_for_instance
+from openmagic_runtime.kernel.inspection import KernelTransactionInspection
 from psycopg import Connection
 from psycopg.rows import dict_row
 
@@ -68,7 +68,7 @@ def lock_completion_snapshot(
     workflow = CompletionWorkflow.decode(workflow_record)
     if workflow.instance_id != identity.instance_id:
         raise RuntimeError("Renewal Workflow identity changed while locking")
-    steps = steps_for_instance(connection, workflow.instance_id)
+    steps = KernelTransactionInspection(connection).steps_for_instance(workflow.instance_id)
     with connection.cursor(row_factory=dict_row) as cursor:
         effect_records = cursor.execute(
             "SELECT e.certainty, EXISTS (SELECT 1 FROM "
