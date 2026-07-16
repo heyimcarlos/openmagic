@@ -357,6 +357,8 @@ def load_sealed_held_out_cases(repository_root: Path) -> tuple[AgentCase, ...]:
         HELD_OUT_CASES,
         HELD_OUT_CORPUS_DIGEST,
         HELD_OUT_SEALED_AT_COMMIT,
+        HELD_OUT_SEALED_BLOB,
+        HELD_OUT_SEALED_PATH,
         TUNING_LOCKED_PATHS,
     )
 
@@ -369,13 +371,29 @@ def load_sealed_held_out_cases(repository_root: Path) -> tuple[AgentCase, ...]:
         check=False,
         capture_output=True,
     )
+    sealed_blob = subprocess.run(
+        [
+            "git",
+            "rev-parse",
+            f"{HELD_OUT_SEALED_AT_COMMIT}:{HELD_OUT_SEALED_PATH}",
+        ],
+        cwd=repository_root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
     unchanged = subprocess.run(
         ["git", "diff", "--quiet", HELD_OUT_SEALED_AT_COMMIT, "--", *TUNING_LOCKED_PATHS],
         cwd=repository_root,
         check=False,
         capture_output=True,
     )
-    if ancestor.returncode != 0 or unchanged.returncode != 0:
+    if (
+        ancestor.returncode != 0
+        or sealed_blob.returncode != 0
+        or sealed_blob.stdout.strip() != HELD_OUT_SEALED_BLOB
+        or unchanged.returncode != 0
+    ):
         raise RuntimeError("Agent implementation changed after the held-out corpus was sealed")
     return HELD_OUT_CASES
 

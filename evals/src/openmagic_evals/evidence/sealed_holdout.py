@@ -10,11 +10,20 @@ from openmagic_evals.evidence.agent_cases import (
 )
 
 HELD_OUT_CORPUS_VERSION = "issue-71.agent-heldout.v2"
-HELD_OUT_SEALED_AT_COMMIT = "0bd49804515afa8a77565d5b238366ef870cc1e0"
+HELD_OUT_SEALED_AT_COMMIT = "42b05059ef4639185a7382ffbbfdf731d86b590e"
+HELD_OUT_SEALED_BLOB = "e9fb9918b0a9799871a50b9e0e5a37112f028c6b"
+HELD_OUT_SEALED_PATH = "evals/src/openmagic_evals/evidence/sealed_holdout.py"
 HELD_OUT_CORPUS_DIGEST = "sha256:8c6e84ad1386446e4777f692339e06e8feb6ee79d67f452f4bc791bfc3850634"
 TUNING_LOCKED_PATHS = (
+    "packages/openmagic-runtime/src/openmagic_runtime/agents.py",
+    "packages/openmagic-runtime/src/openmagic_runtime/execution.py",
     "reference-apps/example-insurance/src/example_insurance/renewal_attempts.py",
     "reference-apps/example-insurance/src/example_insurance/renewals.py",
+    "reference-apps/example-insurance/src/example_insurance/workflow_worker_control.py",
+    "evals/src/openmagic_evals/evidence/agent_boundary_trials.py",
+    "evals/src/openmagic_evals/evidence/agent_cases.py",
+    "evals/src/openmagic_evals/evidence/agent_scoring.py",
+    "evals/src/openmagic_evals/evidence/agent_trials.py",
 )
 
 HELD_OUT_CASES: tuple[AgentCase, ...] = (
@@ -90,5 +99,7 @@ __all__ = [
     "HELD_OUT_CORPUS_DIGEST",
     "HELD_OUT_CORPUS_VERSION",
     "HELD_OUT_SEALED_AT_COMMIT",
+    "HELD_OUT_SEALED_BLOB",
+    "HELD_OUT_SEALED_PATH",
     "TUNING_LOCKED_PATHS",
 ]
