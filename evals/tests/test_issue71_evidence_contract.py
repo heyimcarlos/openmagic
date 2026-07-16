@@ -649,3 +649,23 @@ def test_surface_verdict_cannot_hide_recorded_violations() -> None:
 def test_redaction_audit_rejects_secret_and_sensitive_raw_content(payload: object) -> None:
     with pytest.raises(RedactionViolation):
         audit_redaction(payload)
+
+
+def test_redaction_audit_accepts_predeclared_pytest_node_identities() -> None:
+    result = {
+        "status": "passed",
+        "duration_seconds": 1.0,
+        "detail_digest": "sha256:" + "a" * 64,
+    }
+
+    assert audit_redaction(
+        {
+            "cases": [
+                {
+                    "test_results": {
+                        "evals/tests/test_verification_contract.py::test_verification_code_is_single_use_replay_safe_and_serialized": result
+                    }
+                }
+            ]
+        }
+    ).passed

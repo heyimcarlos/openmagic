@@ -16,6 +16,8 @@ _SENSITIVE_VALUES = (
     re.compile(r"\bsk-(?:proj-)?[A-Za-z0-9_-]{12,}\b"),
     re.compile(r"\bgh[opusr]_[A-Za-z0-9_-]{12,}\b"),
 )
+_PYTEST_NODE_ID = re.compile(r"^(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.py::test_[A-Za-z0-9_]+$")
+_PYTEST_RESULT_FIELDS = {"detail_digest", "duration_seconds", "status"}
 
 
 class RedactionViolation(ValueError):
@@ -38,7 +40,13 @@ def audit_redaction(value: object) -> RedactionAudit:
             for key, child in item.items():
                 key_text = str(key)
                 child_path = f"{path}.{key_text}"
-                if _SENSITIVE_KEYS.search(key_text):
+                is_test_result = (
+                    path.endswith(".test_results")
+                    and _PYTEST_NODE_ID.fullmatch(key_text) is not None
+                    and isinstance(child, dict)
+                    and set(child) == _PYTEST_RESULT_FIELDS
+                )
+                if _SENSITIVE_KEYS.search(key_text) and not is_test_result:
                     raise RedactionViolation(f"sensitive field is forbidden at {child_path}")
                 visit(child, child_path)
             return
