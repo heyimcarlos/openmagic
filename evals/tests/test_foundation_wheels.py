@@ -51,6 +51,11 @@ def test_built_wheels_install_and_boot_in_clean_environments(tmp_path) -> None:
         _run(["uv", "venv", "--python", "3.13", str(environment)])
         wheel = next(wheel_directory.glob(f"{wheel_prefix}-*.whl"))
         python = environment / "bin/python"
+        requirements = (
+            [str(item) for item in sorted(wheel_directory.glob("*.whl"))]
+            if package == "openmagic-evals"
+            else [str(wheel)]
+        )
         _run(
             [
                 "uv",
@@ -60,7 +65,7 @@ def test_built_wheels_install_and_boot_in_clean_environments(tmp_path) -> None:
                 str(python),
                 "--find-links",
                 str(wheel_directory),
-                str(wheel),
+                *requirements,
             ]
         )
         _run([str(python), "-c", f"import {import_name}"])
