@@ -24,6 +24,7 @@ from openmagic_evals.evidence.contracts import (
     DeliveryAuthorityEvidence,
     DeterministicSummary,
     DistributionSummary,
+    ForcedProcessLoss,
     ProcessArtifact,
     ProcessCase,
     ProcessContract,
@@ -443,7 +444,11 @@ def run_process_release(
             ProcessIdentityEvidence(role=item.role, pid=item.pid, worker_id=item.worker_id)
             for item in report.replacement_processes
         ),
-        forced_loss_process_ids=report.forced_loss_pids,
+        forced_losses=(
+            ForcedProcessLoss(role="api", pid=report.forced_loss_pids[0]),
+            ForcedProcessLoss(role="workflow-worker", pid=report.forced_loss_pids[1]),
+            ForcedProcessLoss(role="delivery-worker", pid=report.forced_loss_pids[2]),
+        ),
         lost_attempt=AttemptAuthorityEvidence(
             instance_id=report.lost_attempt.instance_id,
             step_id=report.lost_attempt.step_id,

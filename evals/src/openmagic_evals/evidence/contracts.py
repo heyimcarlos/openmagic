@@ -5,13 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import re
 import statistics
-from collections.abc import Iterable
-from typing import Annotated, Literal, TypeVar
-from uuid import UUID
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter, model_validator
+from pydantic import Field, JsonValue, TypeAdapter, model_validator
 
 from openmagic_evals.evidence.agent_scoring import (
     AgentCandidateObservation,
@@ -22,7 +19,30 @@ from openmagic_evals.evidence.agent_scoring import (
     RenewalAgentScorerContract,
     agent_rubric_scores,
 )
+from openmagic_evals.evidence.core_models import (
+    ArtifactCaseBase,
+    CaseVerdict,
+    Correlations,
+    DistributionSummary,
+    EvidenceModel,
+    SanitizedObservation,
+    canonical_digest,
+    merge_correlations,
+    require_digest,
+)
 from openmagic_evals.evidence.pins import BuildPin, ReproducibilityPin, WheelArchivePin
+from openmagic_evals.evidence.process_models import (
+    AttemptAuthorityEvidence,
+    DeliveryAuthorityEvidence,
+    ForcedProcessLoss,
+    ProcessCase,
+    ProcessContract,
+    ProcessIdentityEvidence,
+    ProcessMetrics,
+    ProcessObservation,
+    QueueDepth,
+)
+from openmagic_evals.evidence.race_models import RaceCase, RaceTrialEvidence, race_trial_digest
 from openmagic_evals.evidence.surface_models import (
     ColdSchemaEvidence,
     InstalledSurfaceEvidence,
@@ -39,304 +59,6 @@ REQUIRED_NEGATIVE_CLAIMS = (
     "No parity claim with mature workflow engines.",
 )
 
-_SHA256 = re.compile(r"sha256:[0-9a-f]{64}")
-CorrelationValue = TypeVar("CorrelationValue")
-ProcessRole = Literal["api", "workflow-worker", "delivery-worker"]
-PROCESS_ROLES: tuple[ProcessRole, ...] = ("api", "workflow-worker", "delivery-worker")
-
-
-class EvidenceModel(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-
-def canonical_digest(value: object) -> str:
-    document = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
-    return "sha256:" + hashlib.sha256(document).hexdigest()
-
-
-class SanitizedObservation(EvidenceModel):
-    document: dict[str, JsonValue]
-    digest: str
-
-    @model_validator(mode="after")
-    def validate_digest(self) -> SanitizedObservation:
-        if self.digest != canonical_digest(self.document):
-            raise ValueError("sanitized observation digest does not match its canonical document")
-        return self
-
-
-class Correlations(EvidenceModel):
-    command_ids: tuple[UUID, ...] = ()
-    workflow_ids: tuple[UUID, ...] = ()
-    instance_ids: tuple[UUID, ...] = ()
-    step_ids: tuple[UUID, ...] = ()
-    attempt_ids: tuple[UUID, ...] = ()
-    wait_ids: tuple[UUID, ...] = ()
-    signal_ids: tuple[UUID, ...] = ()
-    trace_event_ids: tuple[UUID, ...] = ()
-    thread_ids: tuple[UUID, ...] = ()
-    message_ids: tuple[UUID, ...] = ()
-    agent_run_ids: tuple[UUID, ...] = ()
-    domain_event_ids: tuple[UUID, ...] = ()
-    delivery_ids: tuple[UUID, ...] = ()
-    delivery_attempt_ids: tuple[UUID, ...] = ()
-    external_effect_ids: tuple[UUID, ...] = ()
-    approval_grant_ids: tuple[UUID, ...] = ()
-    verification_challenge_ids: tuple[UUID, ...] = ()
-    verification_session_ids: tuple[UUID, ...] = ()
-    worker_ids: tuple[str, ...] = ()
-    process_ids: tuple[int, ...] = ()
-    provider_request_ids: tuple[str, ...] = ()
-
-
-def merge_correlations(values: Iterable[Correlations]) -> Correlations:
-    items = tuple(values)
-
-    def unique(source: Iterable[CorrelationValue]) -> tuple[CorrelationValue, ...]:
-        return tuple(dict.fromkeys(source))
-
-    return Correlations(
-        command_ids=unique(value for item in items for value in item.command_ids),
-        workflow_ids=unique(value for item in items for value in item.workflow_ids),
-        instance_ids=unique(value for item in items for value in item.instance_ids),
-        step_ids=unique(value for item in items for value in item.step_ids),
-        attempt_ids=unique(value for item in items for value in item.attempt_ids),
-        wait_ids=unique(value for item in items for value in item.wait_ids),
-        signal_ids=unique(value for item in items for value in item.signal_ids),
-        trace_event_ids=unique(value for item in items for value in item.trace_event_ids),
-        thread_ids=unique(value for item in items for value in item.thread_ids),
-        message_ids=unique(value for item in items for value in item.message_ids),
-        agent_run_ids=unique(value for item in items for value in item.agent_run_ids),
-        domain_event_ids=unique(value for item in items for value in item.domain_event_ids),
-        delivery_ids=unique(value for item in items for value in item.delivery_ids),
-        delivery_attempt_ids=unique(value for item in items for value in item.delivery_attempt_ids),
-        external_effect_ids=unique(value for item in items for value in item.external_effect_ids),
-        approval_grant_ids=unique(value for item in items for value in item.approval_grant_ids),
-        verification_challenge_ids=unique(
-            value for item in items for value in item.verification_challenge_ids
-        ),
-        verification_session_ids=unique(
-            value for item in items for value in item.verification_session_ids
-        ),
-        worker_ids=unique(value for item in items for value in item.worker_ids),
-        process_ids=unique(value for item in items for value in item.process_ids),
-        provider_request_ids=unique(value for item in items for value in item.provider_request_ids),
-    )
-
-
-class CaseVerdict(EvidenceModel):
-    status: Literal["passed", "failed", "infrastructure_error", "unavailable"]
-    invariant_violations: tuple[str, ...]
-    verifier_version: str = "issue-71.v1"
-
-    @model_validator(mode="after")
-    def validate_verdict(self) -> CaseVerdict:
-        if self.status == "passed" and self.invariant_violations:
-            raise ValueError("a passed case cannot contain invariant violations")
-        if self.status == "failed" and not self.invariant_violations:
-            raise ValueError("a failed case must name an invariant violation")
-        return self
-
-
-class QueueDepth(EvidenceModel):
-    pending_steps: int = Field(ge=0)
-    pending_deliveries: int = Field(ge=0)
-
-
-class DistributionSummary(EvidenceModel):
-    count: int = Field(gt=0)
-    mean: float = Field(ge=0)
-    median: float = Field(ge=0)
-    sample_standard_deviation: float = Field(ge=0)
-    minimum: int = Field(ge=0)
-    maximum: int = Field(ge=0)
-
-
-class ProcessMetrics(EvidenceModel):
-    queued_workflows: int = Field(gt=0)
-    initial_queue: QueueDepth
-    drained_queue: QueueDepth
-    initial_capacity: dict[Literal["api", "workflow-worker", "delivery-worker"], int]
-    started_processes: dict[Literal["api", "workflow-worker", "delivery-worker"], int]
-    forced_losses: dict[ProcessRole, int]
-    fresh_interpreters: Literal[True]
-    postgresql_only_reconstruction: Literal[True]
-    elapsed_ms: int = Field(ge=0)
-    claim_latency_ms: DistributionSummary
-    recovery_time_ms: DistributionSummary
-    lock_wait_lower_bound_ms: DistributionSummary
-    observed_throughput_per_second: float = Field(gt=0)
-
-    @model_validator(mode="after")
-    def validate_process_evidence(self) -> ProcessMetrics:
-        roles = set(PROCESS_ROLES)
-        if set(self.initial_capacity) != roles or set(self.started_processes) != roles:
-            raise ValueError("process evidence must report every independent role")
-        if any(self.initial_capacity[role] < 1 for role in PROCESS_ROLES):
-            raise ValueError("process evidence requires positive initial capacity for every role")
-        if any(self.started_processes[role] < 1 for role in PROCESS_ROLES):
-            raise ValueError("process evidence must restart every role in a fresh interpreter")
-        if set(self.forced_losses) != roles:
-            raise ValueError("process evidence must report forced loss for every process role")
-        if any(value < 1 for value in self.forced_losses.values()):
-            raise ValueError("process evidence must force loss in every process role")
-        if self.initial_queue.pending_steps != self.queued_workflows:
-            raise ValueError("initial Step queue must match the submitted Workflow denominator")
-        if self.drained_queue.pending_steps or self.drained_queue.pending_deliveries:
-            raise ValueError("process evidence must finish with both durable queues drained")
-        if (
-            self.claim_latency_ms.count != 1
-            or self.recovery_time_ms.count != sum(self.forced_losses.values())
-            or self.lock_wait_lower_bound_ms.count != 1
-        ):
-            raise ValueError("process timing distributions must retain their exact denominators")
-        return self
-
-
-class ProcessIdentityEvidence(EvidenceModel):
-    role: ProcessRole
-    pid: int = Field(gt=0)
-    worker_id: str | None
-
-
-class AttemptAuthorityEvidence(EvidenceModel):
-    instance_id: UUID
-    step_id: UUID
-    attempt_id: UUID
-    worker_id: str
-
-
-class DeliveryAuthorityEvidence(EvidenceModel):
-    delivery_id: UUID
-    delivery_attempt_id: UUID
-    thread_id: UUID
-    worker_id: str
-
-
-class ProcessObservation(EvidenceModel):
-    initial_processes: tuple[ProcessIdentityEvidence, ...]
-    replacement_processes: tuple[ProcessIdentityEvidence, ...]
-    forced_loss_process_ids: tuple[int, int, int]
-    lost_attempt: AttemptAuthorityEvidence
-    lost_delivery: DeliveryAuthorityEvidence
-    workload_observations: tuple[SanitizedObservation, ...] = Field(min_length=1)
-    api_observations: tuple[SanitizedObservation, SanitizedObservation]
-
-    @model_validator(mode="after")
-    def validate_process_observation(self) -> ProcessObservation:
-        initial_pids = {item.pid for item in self.initial_processes}
-        replacement_pids = {item.pid for item in self.replacement_processes}
-        if initial_pids & replacement_pids:
-            raise ValueError("replacement process evidence requires fresh interpreter identities")
-        if len(set(self.forced_loss_process_ids)) != len(PROCESS_ROLES):
-            raise ValueError("process evidence requires one distinct forced-loss identity per role")
-        return self
-
-
-class ProcessContract(EvidenceModel):
-    scenario_version: Literal["process.loss-backpressure-recovery.v1"]
-    queued_workflows: int = Field(gt=3)
-    initial_capacity: dict[ProcessRole, int]
-    burst_capacity: dict[ProcessRole, int]
-    provider_behavior: Literal["slow_success"]
-    provider_delay_seconds: int = Field(gt=0)
-    forced_loss_points: tuple[
-        Literal["api-readiness"],
-        Literal["workflow-worker-provider-io"],
-        Literal["delivery-worker-message-lock"],
-    ]
-    queue_predicates: tuple[
-        Literal["pending-steps-equal-workflow-denominator"],
-        Literal["pending-steps-and-deliveries-drain-to-zero"],
-    ]
-    recovery_timeout_seconds: int = Field(gt=0)
-
-    @model_validator(mode="after")
-    def validate_process_contract(self) -> ProcessContract:
-        roles = set(PROCESS_ROLES)
-        if set(self.initial_capacity) != roles or set(self.burst_capacity) != roles:
-            raise ValueError("process contract must pin capacity for all process roles")
-        if any(value < 1 for value in self.initial_capacity.values()):
-            raise ValueError("process contract initial capacities must be positive")
-        if any(self.burst_capacity[role] < self.initial_capacity[role] for role in PROCESS_ROLES):
-            raise ValueError("process contract burst capacity cannot shrink a role")
-        return self
-
-
-def race_trial_digest(
-    *,
-    seed: int,
-    jitter_microseconds: tuple[int, int],
-    public_outcomes: tuple[str, ...],
-    constraint_rows: int,
-    correlations: Correlations,
-    observation: dict[str, JsonValue],
-    contender_process_ids: tuple[int, int],
-    overlap_barrier_observed: bool,
-) -> str:
-    return canonical_digest(
-        {
-            "seed": seed,
-            "jitter_microseconds": jitter_microseconds,
-            "public_outcomes": public_outcomes,
-            "constraint_rows": constraint_rows,
-            "correlations": correlations.model_dump(mode="json"),
-            "observation": observation,
-            "contender_process_ids": contender_process_ids,
-            "overlap_barrier_observed": overlap_barrier_observed,
-        }
-    )
-
-
-class RaceTrialEvidence(EvidenceModel):
-    seed: int = Field(ge=0)
-    jitter_microseconds: tuple[int, int]
-    public_outcomes: tuple[str, ...] = Field(min_length=2)
-    constraint_rows: int = Field(ge=0)
-    correlations: Correlations
-    observation_digest: str
-    observation: dict[str, JsonValue]
-    contender_process_ids: tuple[int, int]
-    overlap_barrier_observed: Literal[True]
-
-    @model_validator(mode="after")
-    def validate_race_trial(self) -> RaceTrialEvidence:
-        if len(self.jitter_microseconds) != 2 or any(
-            value < 0 for value in self.jitter_microseconds
-        ):
-            raise ValueError("race trial must record two non-negative jitter values")
-        if self.constraint_rows != 1:
-            raise ValueError("race trial must record exactly one PostgreSQL constraint row")
-        if len(set(self.contender_process_ids)) != 2 or any(
-            process_id <= 0 for process_id in self.contender_process_ids
-        ):
-            raise ValueError("race trial must record two fresh contender interpreters")
-        durable_ids = (
-            self.correlations.command_ids,
-            self.correlations.workflow_ids,
-            self.correlations.instance_ids,
-            self.correlations.step_ids,
-            self.correlations.attempt_ids,
-            self.correlations.wait_ids,
-            self.correlations.signal_ids,
-            self.correlations.delivery_ids,
-            self.correlations.verification_challenge_ids,
-        )
-        if not any(durable_ids):
-            raise ValueError("race trial must correlate its public and PostgreSQL outcomes")
-        if self.observation_digest != race_trial_digest(
-            seed=self.seed,
-            jitter_microseconds=self.jitter_microseconds,
-            public_outcomes=self.public_outcomes,
-            constraint_rows=self.constraint_rows,
-            correlations=self.correlations,
-            observation=self.observation,
-            contender_process_ids=self.contender_process_ids,
-            overlap_barrier_observed=self.overlap_barrier_observed,
-        ):
-            raise ValueError("race trial digest does not match its canonical observation")
-        return self
-
 
 class SanitizedAgentEvent(EvidenceModel):
     sequence: int = Field(gt=0)
@@ -349,8 +71,8 @@ class SanitizedAgentEvent(EvidenceModel):
     def validate_event(self) -> SanitizedAgentEvent:
         if not self.durable_identity:
             raise ValueError("Agent trajectory event requires one durable identity")
-        _require_digest(self.input_digest, "Agent trajectory input digest")
-        _require_digest(self.output_digest, "Agent trajectory output digest")
+        require_digest(self.input_digest, "Agent trajectory input digest")
+        require_digest(self.output_digest, "Agent trajectory output digest")
         return self
 
 
@@ -367,7 +89,7 @@ class AgentTrialEvidence(EvidenceModel):
 
     @model_validator(mode="after")
     def validate_trial(self) -> AgentTrialEvidence:
-        _require_digest(self.trajectory_digest, "Agent trajectory digest")
+        require_digest(self.trajectory_digest, "Agent trajectory digest")
         if not any(self.correlations.model_dump(mode="python").values()):
             raise ValueError("Agent trial must retain durable correlations")
         if tuple(event.sequence for event in self.trajectory) != tuple(
@@ -422,32 +144,7 @@ def deterministic_observation_digest(
     )
 
 
-class _ArtifactCaseBase(EvidenceModel):
-    case_id: str
-    case_schema_version: int = Field(gt=0)
-    expected_trials: int = Field(gt=0)
-    observed_trials: int = Field(ge=0)
-    seeds: tuple[int, ...]
-    correlations: Correlations
-    observation_digests: tuple[str, ...]
-    verdict: CaseVerdict
-
-    @model_validator(mode="after")
-    def validate_denominator(self) -> _ArtifactCaseBase:
-        if self.observed_trials != self.expected_trials:
-            raise ValueError("observed trials must equal the predeclared expected trials")
-        if len(self.seeds) != self.observed_trials:
-            raise ValueError("one recorded seed is required for every observed trial")
-        if len(self.observation_digests) != self.observed_trials:
-            raise ValueError("one observation digest is required for every observed trial")
-        if len(set(self.seeds)) != len(self.seeds):
-            raise ValueError("trial seeds must be unique")
-        for digest in self.observation_digests:
-            _require_digest(digest, "observation_digest")
-        return self
-
-
-class ArtifactCase(_ArtifactCaseBase):
+class ArtifactCase(ArtifactCaseBase):
     case_kind: Literal["deterministic"] = "deterministic"
     scenarios: tuple[DeterministicScenarioEvidence, ...] = Field(min_length=1)
     test_results: dict[str, dict[str, JsonValue]]
@@ -468,93 +165,7 @@ class ArtifactCase(_ArtifactCaseBase):
         return self
 
 
-class RaceCase(_ArtifactCaseBase):
-    case_kind: Literal["race"] = "race"
-    race_trials: tuple[RaceTrialEvidence, ...] = Field(min_length=1)
-
-    @model_validator(mode="after")
-    def validate_trials(self) -> RaceCase:
-        if tuple(trial.seed for trial in self.race_trials) != self.seeds:
-            raise ValueError("race trials must follow the predeclared seed corpus")
-        if tuple(trial.observation_digest for trial in self.race_trials) != (
-            self.observation_digests
-        ):
-            raise ValueError("race trials must own every recorded observation digest")
-        if self.correlations != merge_correlations(
-            trial.correlations for trial in self.race_trials
-        ):
-            raise ValueError("race case correlations must derive from every trial")
-        return self
-
-
-class ProcessCase(_ArtifactCaseBase):
-    case_kind: Literal["process"] = "process"
-    process_metrics: ProcessMetrics
-    process_contract: ProcessContract
-    process_observation: ProcessObservation
-
-    @model_validator(mode="after")
-    def validate_process_observation(self) -> ProcessCase:
-        document = {
-            "contract": self.process_contract.model_dump(mode="json"),
-            "metrics": self.process_metrics.model_dump(mode="json"),
-            "observation": self.process_observation.model_dump(mode="json"),
-            "correlations": self.correlations.model_dump(mode="json"),
-        }
-        if self.observation_digests != (canonical_digest(document),):
-            raise ValueError("process case digest must derive from its complete canonical proof")
-        if (
-            len(self.process_observation.workload_observations)
-            != self.process_metrics.queued_workflows
-        ):
-            raise ValueError("process observation must retain every queued Workflow result")
-        if (
-            self.process_contract.queued_workflows != self.process_metrics.queued_workflows
-            or self.process_contract.initial_capacity != self.process_metrics.initial_capacity
-        ):
-            raise ValueError("process contract must match the executed process metrics")
-        initial_counts = {
-            role: sum(item.role == role for item in self.process_observation.initial_processes)
-            for role in PROCESS_ROLES
-        }
-        started_counts = {
-            role: sum(item.role == role for item in self.process_observation.replacement_processes)
-            for role in PROCESS_ROLES
-        }
-        if (
-            initial_counts != self.process_metrics.initial_capacity
-            or started_counts != self.process_metrics.started_processes
-            or any(
-                started_counts[role] < self.process_contract.burst_capacity[role]
-                for role in PROCESS_ROLES
-            )
-        ):
-            raise ValueError("process identities must match measured and contracted capacities")
-        all_processes = (
-            *self.process_observation.initial_processes,
-            *self.process_observation.replacement_processes,
-        )
-        forced = set(self.process_observation.forced_loss_process_ids)
-        if {item.role for item in all_processes if item.pid in forced} != set(PROCESS_ROLES):
-            raise ValueError("forced process identities must cover API and both Worker roles")
-        worker_processes = {
-            item.worker_id: item
-            for item in self.process_observation.replacement_processes
-            if item.worker_id is not None
-        }
-        lost_workers = (
-            self.process_observation.lost_attempt.worker_id,
-            self.process_observation.lost_delivery.worker_id,
-        )
-        if any(
-            worker_id not in worker_processes or worker_processes[worker_id].pid not in forced
-            for worker_id in lost_workers
-        ):
-            raise ValueError("lost Worker authorities must identify their forced process loss")
-        return self
-
-
-class AgentCaseEvidence(_ArtifactCaseBase):
+class AgentCaseEvidence(ArtifactCaseBase):
     case_kind: Literal["agent"] = "agent"
     configuration_key: str
     split: Literal["development", "held_out"]
@@ -641,8 +252,8 @@ class AgentConfigurationPin(EvidenceModel):
 
     @model_validator(mode="after")
     def validate_agent_pin(self) -> AgentConfigurationPin:
-        _require_digest(self.instruction_digest, "instruction_digest")
-        _require_digest(self.tool_schema_digest, "tool_schema_digest")
+        require_digest(self.instruction_digest, "instruction_digest")
+        require_digest(self.tool_schema_digest, "tool_schema_digest")
         return self
 
 
@@ -670,8 +281,8 @@ class LiveProviderPin(EvidenceModel):
 
     @model_validator(mode="after")
     def validate_live_pin(self) -> LiveProviderPin:
-        _require_digest(self.endpoint_digest, "endpoint_digest")
-        _require_digest(self.configuration_digest, "configuration_digest")
+        require_digest(self.endpoint_digest, "endpoint_digest")
+        require_digest(self.configuration_digest, "configuration_digest")
         return self
 
 
@@ -922,11 +533,6 @@ def artifact_json_schema() -> dict[str, object]:
     return _ARTIFACT_ADAPTER.json_schema()
 
 
-def _require_digest(value: str, field: str) -> None:
-    if _SHA256.fullmatch(value) is None:
-        raise ValueError(f"{field} must be a lowercase SHA-256 digest")
-
-
 __all__ = [
     "REQUIRED_NEGATIVE_CLAIMS",
     "SCHEMA_VERSION",
@@ -952,6 +558,7 @@ __all__ = [
     "DeterministicScenarioEvidence",
     "DeterministicSummary",
     "DistributionSummary",
+    "ForcedProcessLoss",
     "InstalledSurfaceEvidence",
     "LiveProviderPin",
     "LiveSmokeArtifact",

@@ -117,6 +117,7 @@ def _member_digest(archive: zipfile.ZipFile, names: tuple[str, ...]) -> str:
 
 
 def _wheel_archive_pin(name: str) -> WheelArchivePin:
+    installed = distribution(name)
     document = _direct_url(name)
     if document is None:
         raise RuntimeError(f"wheel installation has no local archive provenance: {name}")
@@ -137,16 +138,26 @@ def _wheel_archive_pin(name: str) -> WheelArchivePin:
         if expected != archive_digest:
             raise RuntimeError(f"wheel archive differs from its installer provenance: {name}")
     with zipfile.ZipFile(wheel) as archive:
-        members = tuple(sorted(item.filename for item in archive.infolist() if not item.is_dir()))
+        member_names = tuple(item.filename for item in archive.infolist() if not item.is_dir())
+        if len(set(member_names)) != len(member_names):
+            raise RuntimeError(f"wheel contains duplicate archive members: {name}")
+        members = tuple(sorted(member_names))
         records = tuple(member for member in members if member.endswith(".dist-info/RECORD"))
         if len(records) != 1:
             raise RuntimeError(f"wheel must contain exactly one RECORD: {name}")
         record_name = records[0]
+        dist_info = record_name.rsplit("/", 1)[0]
+        required_metadata = (f"{dist_info}/METADATA", f"{dist_info}/WHEEL")
+        if any(members.count(member) != 1 for member in required_metadata):
+            raise RuntimeError(f"wheel must contain exact METADATA and WHEEL members: {name}")
         record_bytes = archive.read(record_name)
-        rows = {
-            row[0]: (row[1], row[2])
-            for row in csv.reader(io.StringIO(record_bytes.decode("utf-8")))
-        }
+        record_rows = tuple(csv.reader(io.StringIO(record_bytes.decode("utf-8"))))
+        if any(len(row) != 3 or not row[0] for row in record_rows):
+            raise RuntimeError(f"wheel RECORD contains a malformed row: {name}")
+        record_paths = tuple(row[0] for row in record_rows)
+        if len(set(record_paths)) != len(record_paths):
+            raise RuntimeError(f"wheel RECORD contains duplicate paths: {name}")
+        rows = {row[0]: (row[1], row[2]) for row in record_rows}
         if set(rows) != set(members):
             raise RuntimeError(f"wheel RECORD does not enumerate every archive member: {name}")
         for member in members:
@@ -159,6 +170,11 @@ def _wheel_archive_pin(name: str) -> WheelArchivePin:
             encoded = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode()
             if digest != f"sha256={encoded}" or size != str(len(data)):
                 raise RuntimeError(f"wheel RECORD hash or size mismatch: {name}:{member}")
+            installed_path = Path(str(installed.locate_file(member)))
+            if not installed_path.is_file() or installed_path.read_bytes() != data:
+                raise RuntimeError(
+                    f"installed distribution differs from pinned wheel: {name}:{member}"
+                )
         metadata = tuple(
             member for member in members if ".dist-info/" in member and member != record_name
         )

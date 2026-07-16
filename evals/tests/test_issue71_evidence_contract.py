@@ -4,6 +4,7 @@ import hashlib
 import json
 from datetime import UTC, datetime
 from typing import Literal, cast
+from uuid import UUID
 
 import pytest
 from openmagic_evals.evidence.contracts import (
@@ -14,23 +15,32 @@ from openmagic_evals.evidence.contracts import (
     AgentQualitySummary,
     AgentTrialEvidence,
     ArtifactCase,
+    AttemptAuthorityEvidence,
     BoundaryAgentCandidateObservation,
     BoundaryAgentScorerContract,
     BuildPin,
     CaseVerdict,
     Correlations,
+    DeliveryAuthorityEvidence,
     DeterministicArtifact,
     DeterministicScenarioEvidence,
     DeterministicSummary,
     DistributionSummary,
+    ForcedProcessLoss,
+    ProcessCase,
+    ProcessContract,
+    ProcessIdentityEvidence,
     ProcessMetrics,
+    ProcessObservation,
     QueueDepth,
     RaceTrialEvidence,
     RepositorySurfaceEvidence,
     ReproducibilityPin,
     SanitizedAgentEvent,
+    SanitizedObservation,
     WheelArchivePin,
     canonical_artifact_json,
+    canonical_digest,
     deterministic_observation_digest,
     parse_artifact,
     race_trial_digest,
@@ -445,6 +455,154 @@ def test_process_metrics_require_independent_roles_losses_and_drained_queues() -
                 update={"drained_queue": QueueDepth(pending_steps=0, pending_deliveries=1)}
             ).model_dump()
         )
+
+
+def _process_case() -> ProcessCase:
+    workload = tuple(
+        SanitizedObservation(
+            document={"ordinal": ordinal}, digest=canonical_digest({"ordinal": ordinal})
+        )
+        for ordinal in range(4)
+    )
+    api = SanitizedObservation(document={"role": "api"}, digest=canonical_digest({"role": "api"}))
+    observation = ProcessObservation(
+        initial_processes=(
+            ProcessIdentityEvidence(role="api", pid=10, worker_id=None),
+            ProcessIdentityEvidence(role="workflow-worker", pid=11, worker_id="workflow-old"),
+            ProcessIdentityEvidence(role="delivery-worker", pid=12, worker_id="delivery-old"),
+        ),
+        replacement_processes=(
+            ProcessIdentityEvidence(role="api", pid=20, worker_id=None),
+            ProcessIdentityEvidence(role="workflow-worker", pid=21, worker_id="workflow-lost"),
+            ProcessIdentityEvidence(role="delivery-worker", pid=22, worker_id="delivery-lost"),
+        ),
+        forced_losses=(
+            ForcedProcessLoss(role="api", pid=20),
+            ForcedProcessLoss(role="workflow-worker", pid=21),
+            ForcedProcessLoss(role="delivery-worker", pid=22),
+        ),
+        lost_attempt=AttemptAuthorityEvidence(
+            instance_id=UUID(int=1),
+            step_id=UUID(int=2),
+            attempt_id=UUID(int=3),
+            worker_id="workflow-lost",
+        ),
+        lost_delivery=DeliveryAuthorityEvidence(
+            delivery_id=UUID(int=4),
+            delivery_attempt_id=UUID(int=5),
+            thread_id=UUID(int=6),
+            worker_id="delivery-lost",
+        ),
+        workload_observations=workload,
+        api_observations=(api, api),
+    )
+    contract = ProcessContract(
+        scenario_version="process.loss-backpressure-recovery.v1",
+        queued_workflows=4,
+        initial_capacity={"api": 1, "workflow-worker": 1, "delivery-worker": 1},
+        burst_capacity={"api": 1, "workflow-worker": 1, "delivery-worker": 1},
+        provider_behavior="slow_success",
+        provider_delay_seconds=1,
+        forced_loss_points=(
+            "api-readiness",
+            "workflow-worker-provider-io",
+            "delivery-worker-message-lock",
+        ),
+        queue_predicates=(
+            "pending-steps-equal-workflow-denominator",
+            "pending-steps-and-deliveries-drain-to-zero",
+        ),
+        recovery_timeout_seconds=10,
+    )
+    one_sample = DistributionSummary(
+        count=1,
+        mean=1,
+        median=1,
+        sample_standard_deviation=0,
+        minimum=1,
+        maximum=1,
+    )
+    metrics = ProcessMetrics(
+        queued_workflows=4,
+        initial_queue=QueueDepth(pending_steps=4, pending_deliveries=0),
+        drained_queue=QueueDepth(pending_steps=0, pending_deliveries=0),
+        initial_capacity={"api": 1, "workflow-worker": 1, "delivery-worker": 1},
+        started_processes={"api": 1, "workflow-worker": 1, "delivery-worker": 1},
+        forced_losses={"api": 1, "workflow-worker": 1, "delivery-worker": 1},
+        fresh_interpreters=True,
+        postgresql_only_reconstruction=True,
+        elapsed_ms=1,
+        claim_latency_ms=one_sample,
+        recovery_time_ms=one_sample.model_copy(update={"count": 3}),
+        lock_wait_lower_bound_ms=one_sample,
+        observed_throughput_per_second=1,
+    )
+    correlations = Correlations(
+        worker_ids=("workflow-lost", "delivery-lost"), process_ids=(10, 11, 12, 20, 21, 22)
+    )
+    proof = {
+        "contract": contract.model_dump(mode="json"),
+        "metrics": metrics.model_dump(mode="json"),
+        "observation": observation.model_dump(mode="json"),
+        "correlations": correlations.model_dump(mode="json"),
+    }
+    return ProcessCase(
+        case_id="process.contract-test",
+        case_schema_version=1,
+        expected_trials=1,
+        observed_trials=1,
+        seeds=(0,),
+        correlations=correlations,
+        observation_digests=(canonical_digest(proof),),
+        verdict=CaseVerdict(status="passed", invariant_violations=()),
+        process_metrics=metrics,
+        process_contract=contract,
+        process_observation=observation,
+    )
+
+
+def _rehash_process_payload(payload: dict[str, object]) -> None:
+    payload["observation_digests"] = (
+        canonical_digest(
+            {
+                "contract": payload["process_contract"],
+                "metrics": payload["process_metrics"],
+                "observation": payload["process_observation"],
+                "correlations": payload["correlations"],
+            }
+        ),
+    )
+
+
+def test_process_case_derives_loss_counts_from_typed_identities() -> None:
+    payload = _process_case().model_dump(mode="json")
+    payload["process_metrics"]["forced_losses"] = {
+        "api": 2,
+        "workflow-worker": 2,
+        "delivery-worker": 2,
+    }
+    payload["process_metrics"]["recovery_time_ms"]["count"] = 6
+    _rehash_process_payload(payload)
+
+    with pytest.raises(ValueError, match="loss metrics must derive"):
+        ProcessCase.model_validate(payload)
+
+
+def test_process_case_binds_lost_authorities_to_role_correct_workers() -> None:
+    payload = _process_case().model_dump(mode="json")
+    payload["process_observation"]["lost_attempt"]["worker_id"] = "delivery-lost"
+    _rehash_process_payload(payload)
+
+    with pytest.raises(ValueError, match="forced Workflow Worker"):
+        ProcessCase.model_validate(payload)
+
+
+def test_process_observation_rejects_duplicate_worker_identities() -> None:
+    payload = _process_case().process_observation.model_dump(mode="python")
+    payload["replacement_processes"][2]["worker_id"] = "workflow-lost"
+
+    with pytest.raises(ValueError, match="unique worker identity"):
+        ProcessObservation.model_validate(payload)
 
 
 def test_surface_verdict_cannot_hide_recorded_violations() -> None:
