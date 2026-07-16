@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from example_insurance.renewals import ExampleInsurance
+from openmagic_runtime.processes import owned_cleanup_scope
 from openmagic_runtime.threads import ThreadStore
 
 from openmagic_playground._failure_scenario import FailureScenarioPhase, run_failure_scenario
@@ -141,8 +142,11 @@ def _assemble_response(
 
 def run_control_scenario(*, working_directory: Path) -> ControlExerciseResponse:
     deployment = PlaygroundDeployment(working_directory=working_directory)
-    original = deployment.start()
-    try:
+    with owned_cleanup_scope(
+        deployment.stop,
+        message="playground control execution and cleanup failed",
+    ):
+        original = deployment.start()
         drained = deployment.drain()
         reset = _exercise_reset(deployment)
         failures = _exercise_failures(deployment, working_directory)
@@ -155,8 +159,6 @@ def run_control_scenario(*, working_directory: Path) -> ControlExerciseResponse:
             reset,
             failures,
         )
-    finally:
-        deployment.stop()
 
 
 __all__: list[str] = []

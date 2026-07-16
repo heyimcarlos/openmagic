@@ -12,6 +12,7 @@ from example_insurance.verification_definition import VERIFICATION_DEFINITION
 from openmagic_evals.evidence.case_recording import (
     load_case_observations,
     record_case_observation,
+    record_case_observations,
     record_renewal_case,
 )
 from openmagic_evals.evidence.contracts import Correlations, DeterministicScenarioEvidence
@@ -239,9 +240,8 @@ def test_every_cardinality_one_race_declares_barrier_and_100_varied_jitter_seeds
 
 
 def test_case_recording_rejects_duplicate_case_and_scenario_emissions(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
-    monkeypatch.setenv("OPENMAGIC_EVIDENCE_OBSERVATION_DIRECTORY", str(tmp_path))
     values = {
         "case_id": "release.test",
         "scenario_id": "exact-scenario",
@@ -249,8 +249,9 @@ def test_case_recording_rejects_duplicate_case_and_scenario_emissions(
         "document": {"observed": True},
     }
 
-    record_case_observation(**values)
-    record_case_observation(**values)
+    with record_case_observations(tmp_path):
+        record_case_observation(**values)
+        record_case_observation(**values)
 
     with pytest.raises(ValueError, match="duplicate deterministic observation"):
         load_case_observations(tmp_path)

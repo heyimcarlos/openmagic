@@ -4,37 +4,43 @@ from __future__ import annotations
 
 import hashlib
 import json
-from contextlib import AbstractContextManager
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 
+from openmagic_evals.evidence.case_recording import record_case_observations
 from openmagic_evals.evidence.postgres_provenance import record_postgres_deployments
 
-_RECORDER_ATTRIBUTE = "_openmagic_postgres_recorder"
+_RECORDER_ATTRIBUTE = "_openmagic_evidence_recorders"
 
 
 def pytest_addoption(parser: Any) -> None:
     parser.addoption("--openmagic-evidence-results", action="store", default=None)
+    parser.addoption("--openmagic-observation-directory", action="store", default=None)
     parser.addoption("--openmagic-postgres-directory", action="store", default=None)
 
 
 def pytest_configure(config: Any) -> None:
-    directory = config.getoption("--openmagic-postgres-directory")
-    if directory is None:
+    observation_directory = config.getoption("--openmagic-observation-directory")
+    postgres_directory = config.getoption("--openmagic-postgres-directory")
+    if observation_directory is None and postgres_directory is None:
         return
-    recorder = record_postgres_deployments(Path(directory))
-    recorder.__enter__()
-    setattr(config, _RECORDER_ATTRIBUTE, recorder)
+    recorders = ExitStack()
+    if observation_directory is not None:
+        recorders.enter_context(record_case_observations(Path(observation_directory)))
+    if postgres_directory is not None:
+        recorders.enter_context(record_postgres_deployments(Path(postgres_directory)))
+    setattr(config, _RECORDER_ATTRIBUTE, recorders)
 
 
 def pytest_unconfigure(config: Any) -> None:
-    recorder: AbstractContextManager[None] | None = getattr(
+    recorders: ExitStack | None = getattr(
         config,
         _RECORDER_ATTRIBUTE,
         None,
     )
-    if recorder is not None:
-        recorder.__exit__(None, None, None)
+    if recorders is not None:
+        recorders.close()
 
 
 def pytest_sessionfinish(session: Any, exitstatus: int) -> None:

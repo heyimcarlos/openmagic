@@ -5,7 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -24,7 +26,10 @@ from openmagic_evals.evidence.contracts import (
 )
 from openmagic_evals.evidence.inspection import EvidenceInspection
 
-_DIRECTORY_ENVIRONMENT = "OPENMAGIC_EVIDENCE_OBSERVATION_DIRECTORY"
+_ACTIVE_RECORDER: ContextVar[Path | None] = ContextVar(
+    "openmagic_case_observation_recorder",
+    default=None,
+)
 
 
 @dataclass(frozen=True)
@@ -162,10 +167,9 @@ def record_case_observation(
 ) -> None:
     """Record one exact proof observation when the release runner requests it."""
 
-    configured = os.environ.get(_DIRECTORY_ENVIRONMENT)
-    if configured is None:
+    directory = _ACTIVE_RECORDER.get()
+    if directory is None:
         return
-    directory = Path(configured)
     directory.mkdir(parents=True, exist_ok=True)
     identity = hashlib.sha256(f"{case_id}\0{scenario_id}".encode()).hexdigest()
     emission_id = uuid4().hex
@@ -182,6 +186,17 @@ def record_case_observation(
         encoding="utf-8",
     )
     os.replace(temporary, target)
+
+
+@contextmanager
+def record_case_observations(directory: Path) -> Iterator[None]:
+    """Direct exact case observations into one explicitly owned directory."""
+
+    token = _ACTIVE_RECORDER.set(directory.resolve())
+    try:
+        yield
+    finally:
+        _ACTIVE_RECORDER.reset(token)
 
 
 def load_case_observations(
@@ -236,6 +251,7 @@ __all__ = [
     "load_case_observations",
     "merge_case_observations",
     "record_case_observation",
+    "record_case_observations",
     "record_complete_durable_chain",
     "record_renewal_case",
 ]

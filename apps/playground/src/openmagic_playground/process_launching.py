@@ -3,9 +3,18 @@
 from __future__ import annotations
 
 import subprocess
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, Protocol
+
+from openmagic_runtime.processes import OwnedProcess
+
+
+@dataclass(frozen=True)
+class OwnedSubprocess:
+    process: subprocess.Popen[bytes]
+    owner: OwnedProcess
 
 
 class ProcessLauncher(Protocol):
@@ -43,20 +52,33 @@ class SubprocessLauncher:
         )
 
 
-def finish_owned_context(
-    cleanup: Callable[[], object],
+def launch_owned_process(
+    launcher: ProcessLauncher,
+    command: Sequence[str],
     *,
-    execution_error: BaseException | None,
-    message: str,
-) -> None:
-    """Run complete owner cleanup without replacing an active body failure."""
+    working_directory: Path,
+    environment: Mapping[str, str],
+    output: BinaryIO,
+    cleanup_timeout_seconds: float,
+) -> OwnedSubprocess:
+    """Launch and acquire one complete subprocess group without an ownership gap."""
 
-    try:
-        cleanup()
-    except BaseException as cleanup_error:
-        if execution_error is None:
-            raise
-        raise BaseExceptionGroup(message, [execution_error, cleanup_error]) from execution_error
+    process, owner = OwnedProcess.acquire_subprocess(
+        lambda: launcher.launch(
+            command,
+            working_directory=working_directory,
+            environment=environment,
+            output=output,
+        ),
+        resources=(output,),
+        timeout_seconds=cleanup_timeout_seconds,
+    )
+    return OwnedSubprocess(process=process, owner=owner)
 
 
-__all__ = ["ProcessLauncher", "SubprocessLauncher", "finish_owned_context"]
+__all__ = [
+    "OwnedSubprocess",
+    "ProcessLauncher",
+    "SubprocessLauncher",
+    "launch_owned_process",
+]

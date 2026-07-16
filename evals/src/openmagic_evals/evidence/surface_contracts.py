@@ -141,7 +141,13 @@ RUNTIME_PUBLIC_EXPORTS = {
         "StepState",
         "WaitState",
     ),
-    "processes.py": ("Closeable", "OwnedProcess", "ProcessCleanup"),
+    "processes.py": (
+        "Closeable",
+        "OwnedProcess",
+        "ProcessCleanup",
+        "finish_owned_cleanup",
+        "owned_cleanup_scope",
+    ),
     "kernel/work.py": (
         "AttemptExecutionAuthority",
         "AttemptResultConflict",
@@ -415,9 +421,9 @@ EXPECTED_PRODUCTION_EDGES = (
 PUBLIC_SURFACE_DIGESTS = {
     "example-insurance": "sha256:d9bb55a4f39f49f8d85a1f46535ac78c86b014d1e063678f82afaa75f8339a4c",
     "openmagic-api": "sha256:b47b899d81cf0831f3fa31e984c8e342e9fa8a32adbec983739a29929d131ed3",
-    "openmagic-evals": "sha256:148b8a00d2da09bb99dbc15f055466745138aa2d1bff020d68ad6498c7ff8d8b",
-    "openmagic-playground": "sha256:015441bb015beddc5c8776a079c7e5121a6a469f861b2920251b14d18e05b843",
-    "openmagic-runtime": "sha256:53af53a0b149517213b8e893d256b9e6499f5c0e9da5486d13f00e99c97fcc7a",
+    "openmagic-evals": "sha256:90e8db96a04d120d30ca0e0ce4529870771b844d79fa6ab554ec2c8366cd4d84",
+    "openmagic-playground": "sha256:ab943ef2dfaa3e0cc8177773283c90965655d5250c89de415020acbb81b15a0d",
+    "openmagic-runtime": "sha256:9c9c7890845c465d87a3c7bf6d7f5882003365072ecf7f611e84b69ca901d7db",
 }
 
 __all__ = [

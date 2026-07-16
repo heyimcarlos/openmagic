@@ -14,20 +14,21 @@ import pytest
 from openmagic_evals.evidence.playground_client import parse_playground_response
 from openmagic_evals.harness.local_provider import LocalEmailProvider
 from openmagic_playground.deployment import PlaygroundDeployment
-from openmagic_playground.process_launching import finish_owned_context
 from openmagic_playground.responses import (
     ControlExerciseResponse,
     RenewalDemonstrationResponse,
 )
 from openmagic_playground.synthetic_provider import SyntheticEmailProvider
+from openmagic_runtime.processes import finish_owned_cleanup, owned_cleanup_scope
 from pydantic import ValidationError
 
 
 class _DescendantProcessLauncher:
     """Real launcher adapter whose owned leader and descendant resist TERM."""
 
-    def __init__(self, working_directory: Path) -> None:
+    def __init__(self, working_directory: Path, *, leader_exits: bool = False) -> None:
         self.working_directory = working_directory
+        self.leader_exits = leader_exits
         self.process_ids: list[int] = []
         self.child_process_ids: list[int] = []
         self.outputs: list[BinaryIO] = []
@@ -53,7 +54,7 @@ class _DescendantProcessLauncher:
                     "'import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
                     "time.sleep(30)']);"
                     f"pathlib.Path({str(child_pid_path)!r}).write_text(str(child.pid));"
-                    "time.sleep(30)"
+                    + ("" if self.leader_exits else "time.sleep(30)")
                 ),
             ],
             stdin=subprocess.DEVNULL,
@@ -71,6 +72,8 @@ class _DescendantProcessLauncher:
         self.process_ids.append(process.pid)
         self.child_process_ids.append(int(child_pid_path.read_text(encoding="utf-8")))
         self.outputs.append(output)
+        if self.leader_exits:
+            process.wait(timeout=3)
         return process
 
 
@@ -91,10 +94,12 @@ def _assert_launcher_reaped(launcher: _DescendantProcessLauncher, expected: int)
     assert all(output.closed for output in launcher.outputs)
 
 
+@pytest.mark.parametrize("leader_exits", [False, True])
 def test_deployment_start_failure_reaps_every_descendant_and_closes_every_log(
     tmp_path: Path,
+    leader_exits: bool,
 ) -> None:
-    launcher = _DescendantProcessLauncher(tmp_path)
+    launcher = _DescendantProcessLauncher(tmp_path, leader_exits=leader_exits)
     deployment = PlaygroundDeployment(
         working_directory=tmp_path,
         readiness_timeout=0.1,
@@ -102,7 +107,10 @@ def test_deployment_start_failure_reaps_every_descendant_and_closes_every_log(
         process_launcher=launcher,
     )
 
-    with pytest.raises(TimeoutError, match="did not become ready"):
+    with pytest.raises(
+        (RuntimeError, TimeoutError),
+        match=r"exited before readiness|did not become ready",
+    ):
         deployment.start()
 
     _assert_launcher_reaped(launcher, expected=3)
@@ -174,34 +182,44 @@ def test_control_response_rejects_malformed_nested_payload() -> None:
     }
 
 
+@pytest.mark.parametrize("leader_exits", [False, True])
 def test_local_provider_start_failure_reaps_descendant_group_and_closes_log(
     tmp_path: Path,
+    leader_exits: bool,
 ) -> None:
-    launcher = _DescendantProcessLauncher(tmp_path)
+    launcher = _DescendantProcessLauncher(tmp_path, leader_exits=leader_exits)
     provider = LocalEmailProvider(
         working_directory=tmp_path,
         readiness_timeout=0.1,
         shutdown_timeout=0.1,
         process_launcher=launcher,
     )
-    with pytest.raises(TimeoutError, match="did not become ready"):
+    with pytest.raises(
+        (RuntimeError, TimeoutError),
+        match=r"exited before readiness|did not become ready",
+    ):
         provider.start()
 
     _assert_launcher_reaped(launcher, expected=1)
     provider.stop()
 
 
+@pytest.mark.parametrize("leader_exits", [False, True])
 def test_synthetic_provider_start_failure_reaps_descendant_group_and_closes_log(
     tmp_path: Path,
+    leader_exits: bool,
 ) -> None:
-    launcher = _DescendantProcessLauncher(tmp_path)
+    launcher = _DescendantProcessLauncher(tmp_path, leader_exits=leader_exits)
     provider = SyntheticEmailProvider(
         working_directory=tmp_path,
         readiness_timeout=0.1,
         shutdown_timeout=0.1,
         process_launcher=launcher,
     )
-    with pytest.raises(TimeoutError, match="did not become ready"):
+    with pytest.raises(
+        (RuntimeError, TimeoutError),
+        match=r"exited before readiness|did not become ready",
+    ):
         provider.start()
 
     _assert_launcher_reaped(launcher, expected=1)
@@ -215,7 +233,7 @@ def test_owned_context_preserves_execution_and_cleanup_failures() -> None:
         raise RuntimeError("cleanup failed")
 
     with pytest.raises(BaseExceptionGroup, match="execution and cleanup") as raised:
-        finish_owned_context(
+        finish_owned_cleanup(
             fail_cleanup,
             execution_error=execution_error,
             message="execution and cleanup failed",
@@ -223,6 +241,25 @@ def test_owned_context_preserves_execution_and_cleanup_failures() -> None:
 
     assert raised.value.exceptions[0] is execution_error
     assert str(raised.value.exceptions[1]) == "cleanup failed"
+
+
+def test_owned_cleanup_scope_preserves_body_and_cleanup_failures() -> None:
+    execution_error = ValueError("control scenario failed")
+
+    def fail_cleanup() -> None:
+        raise RuntimeError("deployment stop failed")
+
+    with (
+        pytest.raises(BaseExceptionGroup, match="control execution and cleanup") as raised,
+        owned_cleanup_scope(
+            fail_cleanup,
+            message="control execution and cleanup failed",
+        ),
+    ):
+        raise execution_error
+
+    assert raised.value.exceptions[0] is execution_error
+    assert str(raised.value.exceptions[1]) == "deployment stop failed"
 
 
 def test_control_response_rejects_unknown_nested_fields() -> None:

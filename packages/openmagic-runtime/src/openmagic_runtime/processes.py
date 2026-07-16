@@ -6,7 +6,8 @@ import os
 import signal
 import subprocess as subprocess_module
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -39,6 +40,44 @@ class ProcessCleanup:
     def raise_errors(self, message: str) -> None:
         if self.errors:
             raise BaseExceptionGroup(message, list(self.errors))
+
+
+def finish_owned_cleanup(
+    cleanup: Callable[[], object],
+    *,
+    execution_error: BaseException | None,
+    message: str,
+) -> None:
+    """Complete cleanup without replacing a previously observed failure."""
+
+    try:
+        cleanup()
+    except BaseException as cleanup_error:
+        if execution_error is None:
+            raise
+        raise BaseExceptionGroup(message, [execution_error, cleanup_error]) from execution_error
+
+
+@contextmanager
+def owned_cleanup_scope(
+    cleanup: Callable[[], object],
+    *,
+    message: str,
+) -> Iterator[None]:
+    """Preserve an active execution failure while completing owned cleanup."""
+
+    execution_error: BaseException | None = None
+    try:
+        yield
+    except BaseException as error:
+        execution_error = error
+        raise
+    finally:
+        finish_owned_cleanup(
+            cleanup,
+            execution_error=execution_error,
+            message=message,
+        )
 
 
 def _live_group_members(process_group_id: int) -> tuple[int, ...] | None:
@@ -76,6 +115,7 @@ class OwnedProcess:
         *,
         process_id: int,
         wait_for_exit: Callable[[float], bool],
+        signal_process: Callable[[signal.Signals], object] | None = None,
         close_process: Callable[[], object] | None = None,
         resources: Iterable[Closeable] = (),
     ) -> None:
@@ -83,19 +123,17 @@ class OwnedProcess:
             raise ValueError("Owned process identity must be positive")
         self.process_id = process_id
         self._wait_for_exit = wait_for_exit
+        self._signal_process = signal_process
         self._close_process = close_process
         self._resources = tuple(resources)
 
     @classmethod
-    def subprocess(
+    def _subprocess_owner(
         cls,
         process: subprocess_module.Popen[bytes],
         *,
         resources: Iterable[Closeable] = (),
     ) -> OwnedProcess:
-        if not _is_session_leader(process.pid):
-            raise ValueError("Owned subprocess must be an observed session leader")
-
         def wait_for_exit(timeout: float) -> bool:
             try:
                 process.wait(timeout=timeout)
@@ -106,6 +144,83 @@ class OwnedProcess:
         return cls(
             process_id=process.pid,
             wait_for_exit=wait_for_exit,
+            signal_process=process.send_signal,
+            resources=resources,
+        )
+
+    @classmethod
+    def subprocess(
+        cls,
+        process: subprocess_module.Popen[bytes],
+        *,
+        resources: Iterable[Closeable] = (),
+    ) -> OwnedProcess:
+        """Adopt a caller-verified live session leader."""
+
+        if not _is_session_leader(process.pid):
+            raise ValueError("Owned subprocess must be an observed session leader")
+        return cls._subprocess_owner(process, resources=resources)
+
+    @classmethod
+    def acquire_subprocess(
+        cls,
+        launch: Callable[[], subprocess_module.Popen[bytes]],
+        *,
+        resources: Iterable[Closeable] = (),
+        timeout_seconds: float,
+    ) -> tuple[subprocess_module.Popen[bytes], OwnedProcess]:
+        """Launch and own one new session, reaping every partial acquisition."""
+
+        if timeout_seconds <= 0:
+            raise ValueError("Process acquisition timeout must be positive")
+        owned_resources = tuple(resources)
+        process: subprocess_module.Popen[bytes] | None = None
+        owner: OwnedProcess | None = None
+        try:
+            process = launch()
+            owner = cls._subprocess_owner(process, resources=owned_resources)
+            if process.poll() is None and not _is_session_leader(process.pid):
+                raise ValueError("Owned subprocess must be an observed session leader")
+            return process, owner
+        except BaseException as acquisition_error:
+            cleanup_errors: list[BaseException] = []
+            if owner is not None:
+                cleanup_errors.extend(owner.reap(timeout_seconds=timeout_seconds).errors)
+            else:
+                for resource in owned_resources:
+                    try:
+                        resource.close()
+                    except BaseException as error:
+                        cleanup_errors.append(error)
+            if cleanup_errors:
+                raise BaseExceptionGroup(
+                    "subprocess acquisition and cleanup failed",
+                    [acquisition_error, *cleanup_errors],
+                ) from acquisition_error
+            raise
+
+    @classmethod
+    def _multiprocessing_owner(
+        cls,
+        process: _MultiprocessingProcess,
+        *,
+        resources: Iterable[Closeable] = (),
+    ) -> OwnedProcess:
+        process_id = getattr(process, "pid", None)
+        if not isinstance(process_id, int):
+            raise ValueError("Started multiprocessing child must expose its process identity")
+
+        def wait_for_exit(timeout: float) -> bool:
+            process.join(timeout=timeout)
+            return not bool(process.is_alive())
+
+        return cls(
+            process_id=process_id,
+            wait_for_exit=wait_for_exit,
+            signal_process=lambda sig: (
+                process.kill() if sig == signal.SIGKILL else process.terminate()
+            ),
+            close_process=process.close,
             resources=resources,
         )
 
@@ -121,17 +236,7 @@ class OwnedProcess:
             raise ValueError("Started multiprocessing child must expose its process identity")
         if not _is_session_leader(process_id):
             raise ValueError("Owned multiprocessing child must be an observed session leader")
-
-        def wait_for_exit(timeout: float) -> bool:
-            process.join(timeout=timeout)
-            return not bool(process.is_alive())
-
-        return cls(
-            process_id=process_id,
-            wait_for_exit=wait_for_exit,
-            close_process=process.close,
-            resources=resources,
-        )
+        return cls._multiprocessing_owner(process, resources=resources)
 
     @classmethod
     def cleanup_multiprocessing_start(
@@ -146,8 +251,9 @@ class OwnedProcess:
             raise ValueError("Process cleanup timeout must be positive")
         owned_resources = tuple(resources)
         process_id = getattr(process, "pid", None)
-        if isinstance(process_id, int) and _is_session_leader(process_id):
-            return cls.multiprocessing(process, resources=owned_resources).reap(
+        group_members = _live_group_members(process_id) if isinstance(process_id, int) else None
+        if isinstance(process_id, int) and (_is_session_leader(process_id) or bool(group_members)):
+            return cls._multiprocessing_owner(process, resources=owned_resources).reap(
                 timeout_seconds=timeout_seconds
             )
 
@@ -236,7 +342,8 @@ class OwnedProcess:
             return not group_exists()
 
         try:
-            if group_exists():
+            owned_group_observed = group_exists()
+            if owned_group_observed:
                 signal_group(signal.SIGKILL if forced_loss else signal.SIGTERM)
                 disappeared = wait_for_group()
                 if not disappeared and not forced_loss:
@@ -246,11 +353,31 @@ class OwnedProcess:
                     errors.append(
                         RuntimeError(f"owned process group {self.process_id} survived cleanup")
                     )
+            elif self._signal_process is not None:
+                try:
+                    self._signal_process(signal.SIGKILL if forced_loss else signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                except BaseException as error:
+                    errors.append(error)
             try:
                 leader_exited = self._wait_for_exit(timeout_seconds)
             except BaseException as error:
                 errors.append(error)
                 leader_exited = False
+            if not leader_exited and not forced_loss and not owned_group_observed:
+                if self._signal_process is not None:
+                    try:
+                        self._signal_process(signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    except BaseException as error:
+                        errors.append(error)
+                try:
+                    leader_exited = self._wait_for_exit(timeout_seconds)
+                except BaseException as error:
+                    errors.append(error)
+                    leader_exited = False
             if not leader_exited:
                 errors.append(
                     RuntimeError(f"process-group leader {self.process_id} survived cleanup")
@@ -280,4 +407,10 @@ class OwnedProcess:
         )
 
 
-__all__ = ["Closeable", "OwnedProcess", "ProcessCleanup"]
+__all__ = [
+    "Closeable",
+    "OwnedProcess",
+    "ProcessCleanup",
+    "finish_owned_cleanup",
+    "owned_cleanup_scope",
+]

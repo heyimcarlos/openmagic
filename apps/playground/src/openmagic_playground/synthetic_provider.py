@@ -18,12 +18,12 @@ from typing import Literal
 from urllib.error import URLError
 from urllib.request import urlopen
 
-from openmagic_runtime.processes import OwnedProcess
+from openmagic_runtime.processes import OwnedProcess, finish_owned_cleanup
 
 from openmagic_playground.process_launching import (
     ProcessLauncher,
     SubprocessLauncher,
-    finish_owned_context,
+    launch_owned_process,
 )
 
 ProviderBehavior = Literal["success", "not_applied"]
@@ -146,7 +146,7 @@ class SyntheticEmailProvider:
         traceback: TracebackType | None,
     ) -> None:
         del exc_type, traceback
-        finish_owned_context(
+        finish_owned_cleanup(
             self.stop,
             execution_error=exc_value,
             message="synthetic provider execution and cleanup failed",
@@ -165,7 +165,8 @@ class SyntheticEmailProvider:
         self.request_log.unlink(missing_ok=True)
         self._log = (self.working_directory / "provider.log").open("ab")
         try:
-            process = self._process_launcher.launch(
+            acquired = launch_owned_process(
+                self._process_launcher,
                 [
                     sys.executable,
                     "-m",
@@ -185,9 +186,10 @@ class SyntheticEmailProvider:
                     "PYTHONUNBUFFERED": "1",
                 },
                 output=self._log,
+                cleanup_timeout_seconds=self.shutdown_timeout,
             )
-            self._owner = OwnedProcess.subprocess(process, resources=(self._log,))
-            self._process = process
+            self._owner = acquired.owner
+            self._process = acquired.process
             deadline = time.monotonic() + self.readiness_timeout
             while time.monotonic() < deadline:
                 if self._process.poll() is not None:

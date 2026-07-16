@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -9,6 +10,7 @@ from uuid import uuid4
 from example_insurance.migrations import apply_migrations
 from openmagic_evals.evidence.audit import audit_cold_schema, audit_repository
 from openmagic_evals.evidence.contracts import artifact_json_schema
+from openmagic_evals.evidence.package_policy import PACKAGE_ROLES
 from openmagic_evals.evidence.surface_contracts import (
     APPLICATION_PUBLIC_EXPORTS,
     PUBLIC_SURFACE_DIGESTS,
@@ -52,6 +54,26 @@ def test_repository_audit_closes_dependency_export_persistence_and_legacy_surfac
     assert all(
         not hasattr(projection, "decode")
         for projection in (RuntimeAttempt, RuntimeInstance, RuntimeStep, RuntimeWait)
+    )
+
+
+def test_repository_audit_rejects_sql_outside_an_approved_owner(tmp_path: Path) -> None:
+    for role in PACKAGE_ROLES:
+        source = tmp_path / role.source
+        source.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(ROOT / role.source, source)
+        project = tmp_path / role.project
+        project.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT / role.project, project)
+    leaked = tmp_path / "reference-apps/example-insurance/src/example_insurance/renewal_policy.py"
+    leaked.write_text('connection.execute("SELECT 1")\n__all__ = []\n', encoding="utf-8")
+
+    report = audit_repository(tmp_path)
+
+    assert not report.passed
+    assert (
+        "example-insurance contains SQL outside approved persistence owner renewal_policy.py:1"
+        in report.violations
     )
 
 

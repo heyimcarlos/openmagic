@@ -20,13 +20,13 @@ from urllib.request import urlopen
 from uuid import uuid4
 
 from example_insurance.migrations import apply_migrations
-from openmagic_runtime.processes import OwnedProcess, ProcessCleanup
+from openmagic_runtime.processes import OwnedProcess, ProcessCleanup, finish_owned_cleanup
 from testcontainers.postgres import PostgresContainer
 
 from openmagic_playground.process_launching import (
     ProcessLauncher,
     SubprocessLauncher,
-    finish_owned_context,
+    launch_owned_process,
 )
 from openmagic_playground.reset import mark_synthetic_deployment, reset_synthetic_deployment
 
@@ -128,7 +128,7 @@ class PlaygroundDeployment:
         traceback: TracebackType | None,
     ) -> None:
         del exc_type, traceback
-        finish_owned_context(
+        finish_owned_cleanup(
             self.stop,
             execution_error=exc_value,
             message="playground execution and cleanup failed",
@@ -311,38 +311,36 @@ class PlaygroundDeployment:
                 ["--verification-code-secret-file", str(self._verification_secret_path)]
             )
         log_handle = (self.working_directory / f"{role}-{uuid4().hex}.log").open("wb")
-        try:
-            process = self._process_launcher.launch(
-                [
-                    str(script),
-                    "--database-url",
-                    self.database_url,
-                    "--host",
-                    "127.0.0.1",
-                    "--port",
-                    str(port),
-                    *arguments,
-                ],
-                working_directory=self.working_directory,
-                environment={
-                    "PATH": os.defpath,
-                    "PYTHONNOUSERSITE": "1",
-                    "PYTHONUNBUFFERED": "1",
-                },
-                output=log_handle,
-            )
-        except BaseException:
-            log_handle.close()
-            raise
+        acquired = launch_owned_process(
+            self._process_launcher,
+            [
+                str(script),
+                "--database-url",
+                self.database_url,
+                "--host",
+                "127.0.0.1",
+                "--port",
+                str(port),
+                *arguments,
+            ],
+            working_directory=self.working_directory,
+            environment={
+                "PATH": os.defpath,
+                "PYTHONNOUSERSITE": "1",
+                "PYTHONUNBUFFERED": "1",
+            },
+            output=log_handle,
+            cleanup_timeout_seconds=self.shutdown_timeout,
+        )
         running = _RunningProcess(
             public=ManagedProcess(
                 role=role,
-                pid=process.pid,
+                pid=acquired.process.pid,
                 health_url=f"http://127.0.0.1:{port}/health",
                 worker_id=worker_id,
             ),
-            process=process,
-            owner=OwnedProcess.subprocess(process, resources=(log_handle,)),
+            process=acquired.process,
+            owner=acquired.owner,
         )
         try:
             self._running.append(running)

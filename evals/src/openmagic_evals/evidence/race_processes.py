@@ -5,14 +5,15 @@ from __future__ import annotations
 import hashlib
 import os
 import time
-from contextlib import suppress
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager, suppress
 from multiprocessing import get_context
 from multiprocessing.connection import Connection
 from multiprocessing.context import SpawnContext
 from typing import TypeVar
 
 import psycopg
-from openmagic_runtime.processes import OwnedProcess
+from openmagic_runtime.processes import OwnedProcess, owned_cleanup_scope
 
 from openmagic_evals.evidence._race_operations import (
     AcceptSignalRace,
@@ -158,6 +159,19 @@ def _reap_processes(processes: tuple[OwnedProcess, ...], *, timeout_seconds: flo
         raise BaseExceptionGroup("race contender cleanup failed", errors)
 
 
+@contextmanager
+def _race_process_scope(
+    cleanup: Callable[[], None],
+    *,
+    message: str = "race execution and cleanup failed",
+) -> Iterator[None]:
+    with owned_cleanup_scope(
+        cleanup,
+        message=message,
+    ):
+        yield
+
+
 def _start_contender(
     *,
     context: SpawnContext,
@@ -220,7 +234,21 @@ def run_process_contenders(
     processes: list[OwnedProcess] = []
     with psycopg.connect(database_url, autocommit=True) as coordinator:
         coordinator.execute("SELECT pg_advisory_lock(%s)", (key,))
-        try:
+
+        def cleanup() -> None:
+            cleanup_errors: list[BaseException] = []
+            try:
+                coordinator.execute("SELECT pg_advisory_unlock(%s)", (key,))
+            except BaseException as error:
+                cleanup_errors.append(error)
+            try:
+                _reap_processes(tuple(processes))
+            except BaseException as error:
+                cleanup_errors.append(error)
+            if cleanup_errors:
+                raise BaseExceptionGroup("race process cleanup failed", cleanup_errors)
+
+        with _race_process_scope(cleanup):
             for index in range(2):
                 parent, process = _start_contender(
                     context=context,
@@ -279,18 +307,6 @@ def run_process_contenders(
                 results=(results[0], results[1]),
                 overlap_barrier_observed=True,
             )
-        finally:
-            cleanup_errors: list[Exception] = []
-            try:
-                coordinator.execute("SELECT pg_advisory_unlock(%s)", (key,))
-            except Exception as error:
-                cleanup_errors.append(error)
-            try:
-                _reap_processes(tuple(processes))
-            except Exception as error:
-                cleanup_errors.append(error)
-            if cleanup_errors:
-                raise ExceptionGroup("race process cleanup failed", cleanup_errors)
 
 
 __all__ = [

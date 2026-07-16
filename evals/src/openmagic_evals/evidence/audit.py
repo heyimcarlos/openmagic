@@ -18,6 +18,7 @@ from openmagic_evals.evidence.package_policy import (
     role_import_violations,
     role_private_import_violations,
     role_public_persistence_violations,
+    role_sql_ownership_violations,
     source_python_files,
 )
 from openmagic_evals.evidence.surface_contracts import (
@@ -150,6 +151,12 @@ def audit_repository(root: Path) -> RepositoryAudit:
         violations.extend(role_private_import_violations(role, imports))
         violations.extend(
             role_public_persistence_violations(
+                role,
+                source_python_files(root / role.source),
+            )
+        )
+        violations.extend(
+            role_sql_ownership_violations(
                 role,
                 source_python_files(root / role.source),
             )

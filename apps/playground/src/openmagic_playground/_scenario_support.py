@@ -17,11 +17,11 @@ from example_insurance.renewals import (
     StartRenewalOutreachInput,
 )
 from openmagic_runtime.commands import Actor, Cause
+from openmagic_runtime.processes import finish_owned_cleanup
 from openmagic_runtime.threads import CreateThread, ThreadStore
 from testcontainers.postgres import PostgresContainer
 
 from openmagic_playground.deployment import POSTGRES_IMAGE
-from openmagic_playground.process_launching import finish_owned_context
 from openmagic_playground.renewal_observation import RenewalProjection, decode_renewal_projection
 from openmagic_playground.reset import mark_synthetic_deployment
 from openmagic_playground.responses import (
@@ -81,14 +81,14 @@ def scenario_database(scenario: str) -> Iterator[str]:
         mark_synthetic_deployment(database_url)
         yield database_url
     except BaseException as execution_error:
-        finish_owned_context(
+        finish_owned_cleanup(
             container.stop,
             execution_error=execution_error,
             message="playground database execution and cleanup failed",
         )
         raise
     else:
-        finish_owned_context(
+        finish_owned_cleanup(
             container.stop,
             execution_error=None,
             message="playground database cleanup failed",

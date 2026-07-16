@@ -324,11 +324,12 @@ def run_deterministic_release(
             *process_command_base,
             "--openmagic-evidence-results",
             str(result_path),
+            "--openmagic-observation-directory",
+            str(observation_directory),
             "--openmagic-postgres-directory",
             str(postgres_directory),
         ]
         environment = {
-            "OPENMAGIC_EVIDENCE_OBSERVATION_DIRECTORY": str(observation_directory),
             "PATH": os.environ.get("PATH", os.defpath),
             "PYTHONNOUSERSITE": "1",
         }

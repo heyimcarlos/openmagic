@@ -17,6 +17,7 @@ from openmagic_evals.evidence.race_processes import (
     RaceFailureReason,
     RaceProtocolError,
     StepClaimRace,
+    _race_process_scope,
     _start_contender,
     decode_process_result,
     decode_session_ready,
@@ -146,6 +147,28 @@ def test_race_start_failure_reaps_partial_process_acquisition() -> None:
         )
 
     assert {child.pid for child in active_children()} <= existing_children
+
+
+def _fail_race_cleanup() -> None:
+    raise BaseExceptionGroup(
+        "race process cleanup failed",
+        [RuntimeError("synthetic unlock failure")],
+    )
+
+
+def test_race_scope_preserves_experiment_and_cleanup_failures() -> None:
+    experiment_error = ValueError("synthetic race failure")
+
+    with (
+        pytest.raises(BaseExceptionGroup, match="race execution and cleanup") as raised,
+        _race_process_scope(_fail_race_cleanup),
+    ):
+        raise experiment_error
+
+    assert raised.value.exceptions[0] is experiment_error
+    cleanup = raised.value.exceptions[1]
+    assert isinstance(cleanup, BaseExceptionGroup)
+    assert str(cleanup.exceptions[0]) == "synthetic unlock failure"
 
 
 def test_all_cardinality_races_record_actual_trials() -> None:
