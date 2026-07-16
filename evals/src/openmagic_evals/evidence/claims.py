@@ -18,7 +18,11 @@ from openmagic_evals.evidence.contracts import (
     SurfaceAuditArtifact,
     parse_artifact,
 )
-from openmagic_evals.evidence.matrix import DETERMINISTIC_RELEASE_MATRIX, cardinality_one_races
+from openmagic_evals.evidence.matrix import (
+    DETERMINISTIC_RELEASE_MATRIX,
+    cardinality_one_races,
+    select_pytest_results,
+)
 
 _SUPPORTED_CLAIMS = (
     "The tested single-PostgreSQL kernel preserved the pinned Definition, transaction, replay, race, lease, recovery, and retry contracts.",
@@ -56,15 +60,22 @@ def _validate_release_matrix(artifact: DeterministicArtifact) -> None:
     race_contracts = {case.case_id: case for case in cardinality_one_races()}
     if set(cases) != set(release_contracts) | set(race_contracts):
         raise ValueError("claim report requires the complete deterministic release matrix")
-    for case_id in release_contracts:
+    for case_id, contract in release_contracts.items():
         case = cases[case_id]
+        if isinstance(case, RaceCase):
+            raise ValueError(f"claim report deterministic proof is incomplete: {case_id}")
+        selected_results = select_pytest_results(case.test_results, contract.pytest_nodes)
+        scenario_ids = tuple(scenario.scenario_id for scenario in case.scenarios)
         if (
-            isinstance(case, RaceCase)
-            or case.verdict.status != "passed"
+            case.verdict.status != "passed"
             or case.expected_trials != 1
             or case.observed_trials != 1
             or not case.observation_digests
             or not any(case.correlations.model_dump(mode="python").values())
+            or scenario_ids != tuple(sorted(contract.required_scenarios))
+            or selected_results != case.test_results
+            or any(node not in selected_results for node in contract.pytest_nodes)
+            or any(result.get("status") != "passed" for result in selected_results.values())
         ):
             raise ValueError(f"claim report deterministic proof is incomplete: {case_id}")
     for case_id, contract in race_contracts.items():

@@ -138,3 +138,7 @@ def test_built_wheels_install_and_boot_in_clean_environments(tmp_path) -> None:
         assert set(artifact["reproducibility"]["build"]["distribution_digests"]) == {
             package for package, _, _ in distributions
         }
+        wheel_archives = artifact["reproducibility"]["build"]["wheel_archives"]
+        assert set(wheel_archives) == {package for package, _, _ in distributions}
+        assert all(pin["filename"].endswith(".whl") for pin in wheel_archives.values())
+        assert all(pin["archive_digest"].startswith("sha256:") for pin in wheel_archives.values())

@@ -65,7 +65,11 @@ _PROCESS_CONTRACT = ProcessContract(
     burst_capacity={"api": 1, "workflow-worker": 3, "delivery-worker": 2},
     provider_behavior="slow_success",
     provider_delay_seconds=3,
-    forced_loss_points=("workflow-worker-provider-io", "delivery-worker-message-lock"),
+    forced_loss_points=(
+        "api-readiness",
+        "workflow-worker-provider-io",
+        "delivery-worker-message-lock",
+    ),
     queue_predicates=(
         "pending-steps-equal-workflow-denominator",
         "pending-steps-and-deliveries-drain-to-zero",
@@ -81,14 +85,14 @@ class ProcessEvidence:
     drained: QueueState
     initial_processes: tuple[ManagedProcess, ...]
     replacement_processes: tuple[ManagedProcess, ...]
-    forced_loss_pids: tuple[int, ...]
+    forced_loss_pids: tuple[int, int, int]
     lost_attempt: AttemptAuthority
     lost_delivery: DeliveryAuthority
     workload_correlations: Correlations
     workload_observations: tuple[SanitizedObservation, ...]
     api_observations: tuple[SanitizedObservation, SanitizedObservation]
     claim_latency_ms: int
-    recovery_times_ms: tuple[int, int]
+    recovery_times_ms: tuple[int, int, int]
     lock_wait_lower_bound_ms: int
     observed_throughput_per_second: float
     elapsed_ms: int
@@ -236,25 +240,37 @@ def _wait_delivery(
     raise TimeoutError("Delivery Worker did not hold observed durable authority")
 
 
-def run_process_evidence(*, working_directory: Path, workflow_count: int = 12) -> ProcessEvidence:
+def run_process_evidence(
+    *,
+    working_directory: Path,
+    contract: ProcessContract = _PROCESS_CONTRACT,
+) -> ProcessEvidence:
+    workflow_count = contract.queued_workflows
     if workflow_count <= 3:
         raise ValueError("backpressure evidence requires more work than initial Worker capacity")
     started_at = time.monotonic()
     provider = LocalEmailProvider(working_directory=working_directory / "provider")
     deployment = TestDeployment(
         working_directory=working_directory / "deployment",
-        role_capacities={"api": 1, "workflow-worker": 1, "delivery-worker": 1},
+        role_capacities=contract.initial_capacity,
         email_provider_url=provider.url,
     )
     with provider, deployment:
-        provider.configure(behaviors=("slow_success",), reconciliation="unchanged", delay_seconds=3)
+        provider.configure(
+            behaviors=(contract.provider_behavior,),
+            reconciliation="unchanged",
+            delay_seconds=contract.provider_delay_seconds,
+        )
         provider_request_baseline = provider.request_count()
         initial_processes = deployment.processes
         deployment.drain_role("workflow-worker")
         deployment.drain_role("delivery-worker")
         initial_api = next(process for process in initial_processes if process.role == "api")
         initial_api_observation = _api_database_observation(initial_api)
-        api_replacement = deployment.restart_role("api")
+        api_recovery_started = time.monotonic()
+        lost_api = deployment.terminate_role("api")
+        api_replacement = deployment.scale_role("api", capacity=contract.burst_capacity["api"])[0]
+        api_recovery_ms = round((time.monotonic() - api_recovery_started) * 1000)
         if api_replacement.pid == initial_api.pid:
             raise AssertionError("API restart did not use a fresh interpreter")
         replacement_api_observation = _api_database_observation(api_replacement)
@@ -295,7 +311,9 @@ def run_process_evidence(*, working_directory: Path, workflow_count: int = 12) -
             raise AssertionError("queued Workflow count did not match pending Step depth")
 
         throughput_started = time.monotonic()
-        workflow_started = deployment.scale_role("workflow-worker", capacity=3)
+        workflow_started = deployment.scale_role(
+            "workflow-worker", capacity=contract.burst_capacity["workflow-worker"]
+        )
         first_claim = _wait_for(inspection, lambda value: value.pending_steps < workflow_count)
         if first_claim.pending_steps >= workflow_count:
             raise AssertionError("Workflow pool did not claim queued work")
@@ -303,6 +321,7 @@ def run_process_evidence(*, working_directory: Path, workflow_count: int = 12) -
         _wait_for(
             inspection,
             lambda value: value.pending_steps == 0 and value.pending_deliveries == workflow_count,
+            timeout=contract.recovery_timeout_seconds,
         )
         deployment.drain_role("workflow-worker")
         workflow_drain_seconds = time.monotonic() - throughput_started
@@ -327,10 +346,13 @@ def run_process_evidence(*, working_directory: Path, workflow_count: int = 12) -
                 raise AssertionError("Delivery loss did not target the observed authority holder")
         delivery_recovery_started = time.monotonic()
         time.sleep(1.1)
-        delivery_replacement = deployment.scale_role("delivery-worker", capacity=2)
+        delivery_replacement = deployment.scale_role(
+            "delivery-worker", capacity=contract.burst_capacity["delivery-worker"]
+        )
         drained = _wait_for(
             inspection,
             lambda value: value.pending_steps == 0 and value.pending_deliveries == 0,
+            timeout=contract.recovery_timeout_seconds,
         )
         delivery_recovery_ms = round((time.monotonic() - delivery_recovery_started) * 1000)
         workload_observations = tuple(
@@ -350,7 +372,7 @@ def run_process_evidence(*, working_directory: Path, workflow_count: int = 12) -
             drained=drained,
             initial_processes=initial_processes,
             replacement_processes=replacements,
-            forced_loss_pids=(lost_workflow.pid, lost_delivery.pid),
+            forced_loss_pids=(lost_api.pid, lost_workflow.pid, lost_delivery.pid),
             lost_attempt=lost_attempt,
             lost_delivery=lost_delivery_authority,
             workload_correlations=merge_correlations(
@@ -364,7 +386,7 @@ def run_process_evidence(*, working_directory: Path, workflow_count: int = 12) -
                 replacement_api_observation,
             ),
             claim_latency_ms=claim_latency_ms,
-            recovery_times_ms=(workflow_recovery_ms, delivery_recovery_ms),
+            recovery_times_ms=(api_recovery_ms, workflow_recovery_ms, delivery_recovery_ms),
             lock_wait_lower_bound_ms=lock_wait_lower_bound_ms,
             observed_throughput_per_second=workflow_count / workflow_drain_seconds,
             elapsed_ms=round((time.monotonic() - started_at) * 1000),
@@ -393,7 +415,7 @@ def run_process_release(
         str(timeout_seconds),
     )
     started_at = datetime.now(UTC)
-    report = run_process_evidence(working_directory=working_directory)
+    report = run_process_evidence(working_directory=working_directory, contract=_PROCESS_CONTRACT)
     finished_at = datetime.now(UTC)
     process_ids = tuple(
         dict.fromkeys(
@@ -437,50 +459,58 @@ def run_process_release(
         workload_observations=report.workload_observations,
         api_observations=report.api_observations,
     )
+    process_metrics = ProcessMetrics(
+        queued_workflows=report.queued_workflows,
+        initial_queue=QueueDepth(
+            pending_steps=report.initial.pending_steps,
+            pending_deliveries=report.initial.pending_deliveries,
+        ),
+        drained_queue=QueueDepth(
+            pending_steps=report.drained.pending_steps,
+            pending_deliveries=report.drained.pending_deliveries,
+        ),
+        initial_capacity=initial_capacity,
+        started_processes=started_processes,
+        forced_losses={"api": 1, "workflow-worker": 1, "delivery-worker": 1},
+        fresh_interpreters=True,
+        postgresql_only_reconstruction=True,
+        elapsed_ms=report.elapsed_ms,
+        claim_latency_ms=_distribution((report.claim_latency_ms,)),
+        recovery_time_ms=_distribution(report.recovery_times_ms),
+        lock_wait_lower_bound_ms=_distribution((report.lock_wait_lower_bound_ms,)),
+        observed_throughput_per_second=report.observed_throughput_per_second,
+    )
+    case_correlations = merge_correlations(
+        (
+            report.workload_correlations,
+            Correlations(
+                instance_ids=(report.lost_attempt.instance_id,),
+                step_ids=(report.lost_attempt.step_id,),
+                attempt_ids=(report.lost_attempt.attempt_id,),
+                thread_ids=(report.lost_delivery.thread_id,),
+                delivery_ids=(report.lost_delivery.delivery_id,),
+                delivery_attempt_ids=(report.lost_delivery.delivery_attempt_id,),
+                worker_ids=(report.lost_attempt.worker_id, report.lost_delivery.worker_id),
+                process_ids=process_ids,
+            ),
+        )
+    )
+    proof_document = {
+        "contract": _PROCESS_CONTRACT.model_dump(mode="json"),
+        "metrics": process_metrics.model_dump(mode="json"),
+        "observation": process_observation.model_dump(mode="json"),
+        "correlations": case_correlations.model_dump(mode="json"),
+    }
     case = ProcessCase(
         case_id="process.loss-backpressure-recovery",
         case_schema_version=1,
         expected_trials=1,
         observed_trials=1,
         seeds=(0,),
-        correlations=merge_correlations(
-            (
-                report.workload_correlations,
-                Correlations(
-                    instance_ids=(report.lost_attempt.instance_id,),
-                    step_ids=(report.lost_attempt.step_id,),
-                    attempt_ids=(report.lost_attempt.attempt_id,),
-                    thread_ids=(report.lost_delivery.thread_id,),
-                    delivery_ids=(report.lost_delivery.delivery_id,),
-                    delivery_attempt_ids=(report.lost_delivery.delivery_attempt_id,),
-                    worker_ids=(report.lost_attempt.worker_id, report.lost_delivery.worker_id),
-                    process_ids=process_ids,
-                ),
-            )
-        ),
-        observation_digests=(canonical_digest(process_observation.model_dump(mode="json")),),
+        correlations=case_correlations,
+        observation_digests=(canonical_digest(proof_document),),
         verdict=CaseVerdict(status="passed", invariant_violations=()),
-        process_metrics=ProcessMetrics(
-            queued_workflows=report.queued_workflows,
-            initial_queue=QueueDepth(
-                pending_steps=report.initial.pending_steps,
-                pending_deliveries=report.initial.pending_deliveries,
-            ),
-            drained_queue=QueueDepth(
-                pending_steps=report.drained.pending_steps,
-                pending_deliveries=report.drained.pending_deliveries,
-            ),
-            initial_capacity=initial_capacity,
-            started_processes=started_processes,
-            forced_losses={"workflow-worker": 1, "delivery-worker": 1},
-            fresh_interpreters=True,
-            postgresql_only_reconstruction=True,
-            elapsed_ms=report.elapsed_ms,
-            claim_latency_ms=_distribution((report.claim_latency_ms,)),
-            recovery_time_ms=_distribution(report.recovery_times_ms),
-            lock_wait_lower_bound_ms=_distribution((report.lock_wait_lower_bound_ms,)),
-            observed_throughput_per_second=report.observed_throughput_per_second,
-        ),
+        process_metrics=process_metrics,
         process_contract=_PROCESS_CONTRACT,
         process_observation=process_observation,
     )

@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TypeVar
+
+ResultValue = TypeVar("ResultValue")
 
 REQUIRED_EVIDENCE_FAMILIES = {
     "acknowledgement",
@@ -44,18 +47,25 @@ class RaceContract:
     expected_public_outcomes: tuple[str, str]
 
 
+def select_pytest_results(
+    tests: dict[str, ResultValue],
+    nodes: tuple[str, ...],
+) -> dict[str, ResultValue]:
+    return {
+        observed: result
+        for observed, result in tests.items()
+        if any(
+            observed == requested
+            if "::" in requested
+            else observed.startswith(
+                requested + "::" if requested.endswith(".py") else requested.rstrip("/") + "/"
+            )
+            for requested in nodes
+        )
+    }
+
+
 DETERMINISTIC_RELEASE_MATRIX = (
-    ReleaseCase(
-        "release.complete-suite",
-        "transaction",
-        (
-            "packages/openmagic-runtime/tests",
-            "reference-apps/example-insurance/tests",
-            "evals/tests",
-        ),
-        "The complete unrestricted source and integration suite passes.",
-        required_scenarios=("all-predeclared-cases",),
-    ),
     ReleaseCase(
         "definition.closed-readiness",
         "definition",

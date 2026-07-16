@@ -33,7 +33,6 @@ from openmagic_evals.evidence.race_models import (
     RaceCorpus,
     RaceSeedResult,
     jitter_pair,
-    race_digest,
     race_observation,
 )
 from openmagic_evals.evidence.race_processes import ProcessRaceResult, run_process_contenders
@@ -300,7 +299,6 @@ def _signal_trial(
             process_ids=contenders.process_ids,
         ),
         observation=document,
-        observation_digest=race_digest(document),
         contender_process_ids=contenders.process_ids,
         overlap_barrier_observed=contenders.overlap_barrier_observed,
     )
@@ -371,7 +369,6 @@ def _attempt_and_route_trial(
             process_ids=attempt_contenders.process_ids,
         ),
         observation=attempt_document,
-        observation_digest=race_digest(attempt_document),
         contender_process_ids=attempt_contenders.process_ids,
         overlap_barrier_observed=attempt_contenders.overlap_barrier_observed,
     )
@@ -449,7 +446,6 @@ def _attempt_and_route_trial(
             process_ids=route_contenders.process_ids,
         ),
         observation=route_document,
-        observation_digest=race_digest(route_document),
         contender_process_ids=route_contenders.process_ids,
         overlap_barrier_observed=route_contenders.overlap_barrier_observed,
     )

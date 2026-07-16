@@ -138,8 +138,8 @@ def _public_exports(source_root: Path) -> dict[str, tuple[str, ...]]:
     modules = (
         path
         for path in source_root.rglob("*.py")
-        if path.name != "__init__.py"
-        and all(not part.startswith("_") for part in path.relative_to(source_root).parts)
+        if all(not part.startswith("_") for part in path.relative_to(source_root).parent.parts)
+        and (path.name == "__init__.py" or not path.name.startswith("_"))
     )
     result: dict[str, tuple[str, ...]] = {}
     for path in modules:
@@ -186,9 +186,6 @@ def audit_repository(root: Path) -> RepositoryAudit:
     if production_edges != EXPECTED_PRODUCTION_EDGES:
         violations.append("production dependency graph differs from the accepted one-way graph")
 
-    root_exports = _declared_exports(runtime_root / "__init__.py")
-    if root_exports != {"__version__"}:
-        violations.append("runtime root exports more than package metadata")
     if _public_exports(runtime_root) != RUNTIME_PUBLIC_EXPORTS:
         violations.append("runtime modules or exports differ from the exact accepted surface")
     if _public_exports(application_root) != APPLICATION_PUBLIC_EXPORTS:

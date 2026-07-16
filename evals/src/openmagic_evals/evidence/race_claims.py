@@ -16,7 +16,6 @@ from openmagic_evals.evidence.race_models import (
     RaceCorpus,
     RaceSeedResult,
     jitter_pair,
-    race_digest,
     race_observation,
 )
 from openmagic_evals.evidence.race_processes import run_process_contenders
@@ -88,7 +87,6 @@ def run_claim_races(
                     process_ids=step_contenders.process_ids,
                 ),
                 observation=step_result,
-                observation_digest=race_digest(step_result),
                 contender_process_ids=step_contenders.process_ids,
                 overlap_barrier_observed=step_contenders.overlap_barrier_observed,
             )
@@ -154,7 +152,6 @@ def run_claim_races(
                     process_ids=delivery_contenders.process_ids,
                 ),
                 observation=delivery_result,
-                observation_digest=race_digest(delivery_result),
                 contender_process_ids=delivery_contenders.process_ids,
                 overlap_barrier_observed=delivery_contenders.overlap_barrier_observed,
             )

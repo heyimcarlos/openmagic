@@ -74,7 +74,9 @@ def _installed_public_exports(
             continue
         package_index = path.parts.index(package_name)
         relative = Path(*path.parts[package_index + 1 :])
-        if relative.name == "__init__.py" or any(part.startswith("_") for part in relative.parts):
+        if any(part.startswith("_") for part in relative.parent.parts) or (
+            relative.name != "__init__.py" and relative.name.startswith("_")
+        ):
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         exports: tuple[str, ...] | None = None

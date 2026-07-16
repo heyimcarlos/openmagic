@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import random
 from dataclasses import dataclass
@@ -10,7 +9,7 @@ from typing import Literal
 
 from pydantic import JsonValue, TypeAdapter
 
-from openmagic_evals.evidence.contracts import Correlations
+from openmagic_evals.evidence.contracts import Correlations, race_trial_digest
 
 _OBSERVATION_ADAPTER = TypeAdapter(dict[str, JsonValue])
 
@@ -19,11 +18,6 @@ def race_observation(value: object) -> dict[str, JsonValue]:
     return _OBSERVATION_ADAPTER.validate_json(
         json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
     )
-
-
-def race_digest(value: object) -> str:
-    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()
-    return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
 def jitter_pair(seed: int, offset: int) -> tuple[int, int]:
@@ -41,9 +35,21 @@ class RaceSeedResult:
     constraint_rows: int
     correlations: Correlations
     observation: dict[str, JsonValue]
-    observation_digest: str
     contender_process_ids: tuple[int, int]
     overlap_barrier_observed: Literal[True]
+
+    @property
+    def observation_digest(self) -> str:
+        return race_trial_digest(
+            seed=self.seed,
+            jitter_microseconds=self.jitter_microseconds,
+            public_outcomes=self.public_outcomes,
+            constraint_rows=self.constraint_rows,
+            correlations=self.correlations,
+            observation=self.observation,
+            contender_process_ids=self.contender_process_ids,
+            overlap_barrier_observed=self.overlap_barrier_observed,
+        )
 
 
 @dataclass(frozen=True)
@@ -56,4 +62,4 @@ class RaceCorpus:
     results: tuple[RaceSeedResult, ...]
 
 
-__all__ = ["RaceCorpus", "RaceSeedResult", "jitter_pair", "race_digest", "race_observation"]
+__all__ = ["RaceCorpus", "RaceSeedResult", "jitter_pair", "race_observation"]

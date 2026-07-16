@@ -74,6 +74,7 @@ class TestDeployment:
         self.processes: tuple[ManagedProcess, ...] = ()
         self._container: PostgresContainer | None = None
         self._running: list[_RunningProcess] = []
+        self._verification_secret_path = self.working_directory / "verification-code-secret"
 
     def __enter__(self) -> TestDeployment:
         self.start()
@@ -116,13 +117,18 @@ class TestDeployment:
             raise
 
     def stop(self) -> None:
-        for running in tuple(reversed(self._running)):
-            self._stop_running(running, force=False)
-        self._running.clear()
-        self.processes = ()
-        if self._container is not None:
-            self._container.stop()
-            self._container = None
+        try:
+            for running in tuple(reversed(self._running)):
+                self._stop_running(running, force=False)
+        finally:
+            self._running.clear()
+            self.processes = ()
+            try:
+                if self._container is not None:
+                    self._container.stop()
+            finally:
+                self._container = None
+                self._verification_secret_path.unlink(missing_ok=True)
 
     def terminate_role(self, role: ProcessRole) -> ManagedProcess:
         running = next(item for item in self._running if item.public.role == role)
@@ -210,16 +216,17 @@ class TestDeployment:
         if role == "workflow-worker" and self.email_provider_url is not None:
             worker_arguments.extend(["--email-provider-url", self.email_provider_url])
         if role == "workflow-worker":
-            secret_path = self.working_directory / "verification-code-secret"
             descriptor = os.open(
-                secret_path,
+                self._verification_secret_path,
                 os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW,
                 0o600,
             )
             os.fchmod(descriptor, 0o600)
             with os.fdopen(descriptor, "w", encoding="utf-8") as secret_file:
                 secret_file.write(self.verification_code_secret or _SYNTHETIC_VERIFICATION_SECRET)
-            worker_arguments.extend(["--verification-code-secret-file", str(secret_path)])
+            worker_arguments.extend(
+                ["--verification-code-secret-file", str(self._verification_secret_path)]
+            )
         command = [
             str(script),
             "--database-url",

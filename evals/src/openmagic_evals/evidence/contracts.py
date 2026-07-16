@@ -8,11 +8,27 @@ import math
 import re
 import statistics
 from collections.abc import Iterable
-from datetime import datetime
 from typing import Annotated, Literal, TypeVar
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter, model_validator
+
+from openmagic_evals.evidence.agent_scoring import (
+    AgentCandidateObservation,
+    AgentScorerContract,
+    BoundaryAgentCandidateObservation,
+    BoundaryAgentScorerContract,
+    RenewalAgentCandidateObservation,
+    RenewalAgentScorerContract,
+    agent_rubric_scores,
+)
+from openmagic_evals.evidence.pins import BuildPin, ReproducibilityPin, WheelArchivePin
+from openmagic_evals.evidence.surface_models import (
+    ColdSchemaEvidence,
+    InstalledSurfaceEvidence,
+    RepositorySurfaceEvidence,
+    SurfaceAuditSummary,
+)
 
 SCHEMA_VERSION = "openmagic.enterprise-evidence.v1"
 REQUIRED_NEGATIVE_CLAIMS = (
@@ -24,7 +40,6 @@ REQUIRED_NEGATIVE_CLAIMS = (
 )
 
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}")
-_GIT_SHA = re.compile(r"[0-9a-f]{40}")
 CorrelationValue = TypeVar("CorrelationValue")
 ProcessRole = Literal["api", "workflow-worker", "delivery-worker"]
 PROCESS_ROLES: tuple[ProcessRole, ...] = ("api", "workflow-worker", "delivery-worker")
@@ -47,70 +62,6 @@ class SanitizedObservation(EvidenceModel):
     def validate_digest(self) -> SanitizedObservation:
         if self.digest != canonical_digest(self.document):
             raise ValueError("sanitized observation digest does not match its canonical document")
-        return self
-
-
-class BuildPin(EvidenceModel):
-    git_sha: str
-    checkout_clean: bool
-    lock_digest: str
-    distributions: dict[str, str]
-    distribution_digests: dict[str, str]
-    source_distribution_digests: dict[str, str]
-    installation_kinds: dict[str, Literal["wheel", "editable"]]
-
-    @model_validator(mode="after")
-    def validate_build(self) -> BuildPin:
-        if _GIT_SHA.fullmatch(self.git_sha) is None:
-            raise ValueError("git_sha must be a full lowercase Git SHA")
-        if not self.checkout_clean:
-            raise ValueError("admissible evidence requires a clean checkout")
-        _require_digest(self.lock_digest, "lock_digest")
-        if not self.distributions:
-            raise ValueError("distribution versions must be pinned")
-        if set(self.distribution_digests) != set(self.distributions):
-            raise ValueError("every installed distribution must have one content digest")
-        if self.source_distribution_digests != self.distribution_digests:
-            raise ValueError("installed distribution contents must match the pinned source tree")
-        if set(self.installation_kinds) != set(self.distributions):
-            raise ValueError("every installed distribution must declare its installation kind")
-        for digest in self.distribution_digests.values():
-            _require_digest(digest, "distribution digest")
-        return self
-
-
-class ReproducibilityPin(EvidenceModel):
-    build: BuildPin
-    suite_version: str
-    command: tuple[str, ...]
-    environment_allowlist: tuple[str, ...]
-    started_at: datetime
-    finished_at: datetime
-    timeout_seconds: int = Field(gt=0)
-    postgres_version: str
-    postgres_image: str
-    postgres_configuration: dict[str, str]
-    postgres_configuration_digest: str
-    migration_heads: dict[str, str]
-    definition_digests: dict[str, str]
-    case_corpus_digest: str | None = None
-    sandbox_digest: str | None = None
-
-    @model_validator(mode="after")
-    def validate_reproducibility(self) -> ReproducibilityPin:
-        if not self.suite_version or not self.command:
-            raise ValueError("suite version and exact command are required")
-        if self.finished_at < self.started_at:
-            raise ValueError("finished_at cannot precede started_at")
-        if "@sha256:" not in self.postgres_image or not self.postgres_configuration:
-            raise ValueError("PostgreSQL image and observed configuration must be pinned")
-        _require_digest(self.postgres_configuration_digest, "postgres_configuration_digest")
-        if self.case_corpus_digest is not None:
-            _require_digest(self.case_corpus_digest, "case_corpus_digest")
-        if self.sandbox_digest is not None:
-            _require_digest(self.sandbox_digest, "sandbox_digest")
-        if not self.migration_heads or not self.definition_digests:
-            raise ValueError("migration heads and Definition digests are required")
         return self
 
 
@@ -207,7 +158,7 @@ class ProcessMetrics(EvidenceModel):
     drained_queue: QueueDepth
     initial_capacity: dict[Literal["api", "workflow-worker", "delivery-worker"], int]
     started_processes: dict[Literal["api", "workflow-worker", "delivery-worker"], int]
-    forced_losses: dict[Literal["workflow-worker", "delivery-worker"], int]
+    forced_losses: dict[ProcessRole, int]
     fresh_interpreters: Literal[True]
     postgresql_only_reconstruction: Literal[True]
     elapsed_ms: int = Field(ge=0)
@@ -225,10 +176,10 @@ class ProcessMetrics(EvidenceModel):
             raise ValueError("process evidence requires positive initial capacity for every role")
         if any(self.started_processes[role] < 1 for role in PROCESS_ROLES):
             raise ValueError("process evidence must restart every role in a fresh interpreter")
-        if set(self.forced_losses) != {"workflow-worker", "delivery-worker"}:
-            raise ValueError("process evidence must report both forced Worker losses")
+        if set(self.forced_losses) != roles:
+            raise ValueError("process evidence must report forced loss for every process role")
         if any(value < 1 for value in self.forced_losses.values()):
-            raise ValueError("process evidence must force loss in both Worker roles")
+            raise ValueError("process evidence must force loss in every process role")
         if self.initial_queue.pending_steps != self.queued_workflows:
             raise ValueError("initial Step queue must match the submitted Workflow denominator")
         if self.drained_queue.pending_steps or self.drained_queue.pending_deliveries:
@@ -265,7 +216,7 @@ class DeliveryAuthorityEvidence(EvidenceModel):
 class ProcessObservation(EvidenceModel):
     initial_processes: tuple[ProcessIdentityEvidence, ...]
     replacement_processes: tuple[ProcessIdentityEvidence, ...]
-    forced_loss_process_ids: tuple[int, int]
+    forced_loss_process_ids: tuple[int, int, int]
     lost_attempt: AttemptAuthorityEvidence
     lost_delivery: DeliveryAuthorityEvidence
     workload_observations: tuple[SanitizedObservation, ...] = Field(min_length=1)
@@ -277,8 +228,8 @@ class ProcessObservation(EvidenceModel):
         replacement_pids = {item.pid for item in self.replacement_processes}
         if initial_pids & replacement_pids:
             raise ValueError("replacement process evidence requires fresh interpreter identities")
-        if len(set(self.forced_loss_process_ids)) != 2:
-            raise ValueError("process evidence requires two distinct forced-loss identities")
+        if len(set(self.forced_loss_process_ids)) != len(PROCESS_ROLES):
+            raise ValueError("process evidence requires one distinct forced-loss identity per role")
         return self
 
 
@@ -290,7 +241,9 @@ class ProcessContract(EvidenceModel):
     provider_behavior: Literal["slow_success"]
     provider_delay_seconds: int = Field(gt=0)
     forced_loss_points: tuple[
-        Literal["workflow-worker-provider-io"], Literal["delivery-worker-message-lock"]
+        Literal["api-readiness"],
+        Literal["workflow-worker-provider-io"],
+        Literal["delivery-worker-message-lock"],
     ]
     queue_predicates: tuple[
         Literal["pending-steps-equal-workflow-denominator"],
@@ -308,6 +261,31 @@ class ProcessContract(EvidenceModel):
         if any(self.burst_capacity[role] < self.initial_capacity[role] for role in PROCESS_ROLES):
             raise ValueError("process contract burst capacity cannot shrink a role")
         return self
+
+
+def race_trial_digest(
+    *,
+    seed: int,
+    jitter_microseconds: tuple[int, int],
+    public_outcomes: tuple[str, ...],
+    constraint_rows: int,
+    correlations: Correlations,
+    observation: dict[str, JsonValue],
+    contender_process_ids: tuple[int, int],
+    overlap_barrier_observed: bool,
+) -> str:
+    return canonical_digest(
+        {
+            "seed": seed,
+            "jitter_microseconds": jitter_microseconds,
+            "public_outcomes": public_outcomes,
+            "constraint_rows": constraint_rows,
+            "correlations": correlations.model_dump(mode="json"),
+            "observation": observation,
+            "contender_process_ids": contender_process_ids,
+            "overlap_barrier_observed": overlap_barrier_observed,
+        }
+    )
 
 
 class RaceTrialEvidence(EvidenceModel):
@@ -346,7 +324,16 @@ class RaceTrialEvidence(EvidenceModel):
         )
         if not any(durable_ids):
             raise ValueError("race trial must correlate its public and PostgreSQL outcomes")
-        if self.observation_digest != canonical_digest(self.observation):
+        if self.observation_digest != race_trial_digest(
+            seed=self.seed,
+            jitter_microseconds=self.jitter_microseconds,
+            public_outcomes=self.public_outcomes,
+            constraint_rows=self.constraint_rows,
+            correlations=self.correlations,
+            observation=self.observation,
+            contender_process_ids=self.contender_process_ids,
+            overlap_barrier_observed=self.overlap_barrier_observed,
+        ):
             raise ValueError("race trial digest does not match its canonical observation")
         return self
 
@@ -375,6 +362,7 @@ class AgentTrialEvidence(EvidenceModel):
     trajectory_digest: str
     correlations: Correlations
     trajectory: tuple[SanitizedAgentEvent, ...] = Field(min_length=3)
+    candidate_observation: AgentCandidateObservation
     rubric_scores: dict[str, bool]
 
     @model_validator(mode="after")
@@ -394,6 +382,7 @@ class AgentTrialEvidence(EvidenceModel):
             raise ValueError("Agent outcome must derive from every recorded rubric score")
         document = json.dumps(
             {
+                "candidate_observation": self.candidate_observation.model_dump(mode="json"),
                 "rubric_scores": dict(sorted(self.rubric_scores.items())),
                 "trajectory": [event.model_dump(mode="json") for event in self.trajectory],
             },
@@ -491,6 +480,10 @@ class RaceCase(_ArtifactCaseBase):
             self.observation_digests
         ):
             raise ValueError("race trials must own every recorded observation digest")
+        if self.correlations != merge_correlations(
+            trial.correlations for trial in self.race_trials
+        ):
+            raise ValueError("race case correlations must derive from every trial")
         return self
 
 
@@ -502,9 +495,14 @@ class ProcessCase(_ArtifactCaseBase):
 
     @model_validator(mode="after")
     def validate_process_observation(self) -> ProcessCase:
-        document = self.process_observation.model_dump(mode="json")
+        document = {
+            "contract": self.process_contract.model_dump(mode="json"),
+            "metrics": self.process_metrics.model_dump(mode="json"),
+            "observation": self.process_observation.model_dump(mode="json"),
+            "correlations": self.correlations.model_dump(mode="json"),
+        }
         if self.observation_digests != (canonical_digest(document),):
-            raise ValueError("process case digest must derive from its canonical observation")
+            raise ValueError("process case digest must derive from its complete canonical proof")
         if (
             len(self.process_observation.workload_observations)
             != self.process_metrics.queued_workflows
@@ -515,6 +513,44 @@ class ProcessCase(_ArtifactCaseBase):
             or self.process_contract.initial_capacity != self.process_metrics.initial_capacity
         ):
             raise ValueError("process contract must match the executed process metrics")
+        initial_counts = {
+            role: sum(item.role == role for item in self.process_observation.initial_processes)
+            for role in PROCESS_ROLES
+        }
+        started_counts = {
+            role: sum(item.role == role for item in self.process_observation.replacement_processes)
+            for role in PROCESS_ROLES
+        }
+        if (
+            initial_counts != self.process_metrics.initial_capacity
+            or started_counts != self.process_metrics.started_processes
+            or any(
+                started_counts[role] < self.process_contract.burst_capacity[role]
+                for role in PROCESS_ROLES
+            )
+        ):
+            raise ValueError("process identities must match measured and contracted capacities")
+        all_processes = (
+            *self.process_observation.initial_processes,
+            *self.process_observation.replacement_processes,
+        )
+        forced = set(self.process_observation.forced_loss_process_ids)
+        if {item.role for item in all_processes if item.pid in forced} != set(PROCESS_ROLES):
+            raise ValueError("forced process identities must cover API and both Worker roles")
+        worker_processes = {
+            item.worker_id: item
+            for item in self.process_observation.replacement_processes
+            if item.worker_id is not None
+        }
+        lost_workers = (
+            self.process_observation.lost_attempt.worker_id,
+            self.process_observation.lost_delivery.worker_id,
+        )
+        if any(
+            worker_id not in worker_processes or worker_processes[worker_id].pid not in forced
+            for worker_id in lost_workers
+        ):
+            raise ValueError("lost Worker authorities must identify their forced process loss")
         return self
 
 
@@ -523,6 +559,7 @@ class AgentCaseEvidence(_ArtifactCaseBase):
     configuration_key: str
     split: Literal["development", "held_out"]
     prohibited_action_contract: tuple[str, ...] = Field(min_length=1)
+    scorer_contract: AgentScorerContract
     agent_trials: tuple[AgentTrialEvidence, ...] = Field(min_length=1)
     pass_threshold: float = Field(ge=0.0, le=1.0)
     passed_trials: int = Field(ge=0)
@@ -543,6 +580,16 @@ class AgentCaseEvidence(_ArtifactCaseBase):
             for trial in self.agent_trials
         ):
             raise ValueError("Agent trial contains an action outside its predeclared contract")
+        if any(
+            trial.rubric_scores
+            != agent_rubric_scores(
+                self.scorer_contract,
+                trial.candidate_observation,
+                trial.prohibited_actions,
+            )
+            for trial in self.agent_trials
+        ):
+            raise ValueError("Agent trial scores must be recomputable from sanitized evidence")
         return self
 
 
@@ -635,47 +682,6 @@ class PlaygroundSummary(EvidenceModel):
     reset_verified: bool
     process_controls_verified: bool
     contributes_to_correctness: Literal[False]
-
-
-class RepositorySurfaceEvidence(EvidenceModel):
-    audited_distributions: tuple[str, ...]
-    production_dependency_edges: tuple[str, ...]
-    private_persistence_packages: tuple[str, ...]
-    violations: tuple[str, ...]
-    passed: bool
-
-
-class InstalledSurfaceEvidence(EvidenceModel):
-    distributions: dict[str, str]
-    production_dependency_edges: tuple[str, ...]
-    private_persistence_packages: tuple[str, ...]
-    audited_files: int = Field(gt=0)
-    violations: tuple[str, ...]
-    passed: bool
-
-
-class ColdSchemaEvidence(EvidenceModel):
-    schemas: tuple[str, ...]
-    tables: dict[str, tuple[str, ...]]
-    migration_heads: dict[str, str]
-    legacy_relations: tuple[str, ...]
-    violations: tuple[str, ...]
-    passed: bool
-
-
-class SurfaceAuditSummary(EvidenceModel):
-    repository_passed: bool
-    installed_surface_passed: bool
-    cold_schema_passed: bool
-    strict_pass: bool
-
-    @model_validator(mode="after")
-    def validate_summary(self) -> SurfaceAuditSummary:
-        if self.strict_pass != (
-            self.repository_passed and self.installed_surface_passed and self.cold_schema_passed
-        ):
-            raise ValueError("surface audit strict verdict must derive from every audit")
-        return self
 
 
 DeterministicEvidenceCase = Annotated[ArtifactCase | RaceCase, Field(discriminator="case_kind")]
@@ -924,15 +930,19 @@ def _require_digest(value: str, field: str) -> None:
 __all__ = [
     "REQUIRED_NEGATIVE_CLAIMS",
     "SCHEMA_VERSION",
+    "AgentCandidateObservation",
     "AgentCaseEvidence",
     "AgentConfigurationPin",
     "AgentQualityArtifact",
     "AgentQualitySummary",
+    "AgentScorerContract",
     "AgentTrialEvidence",
     "Artifact",
     "ArtifactCase",
     "AttemptAuthorityEvidence",
     "AvailabilitySummary",
+    "BoundaryAgentCandidateObservation",
+    "BoundaryAgentScorerContract",
     "BuildPin",
     "CaseVerdict",
     "ColdSchemaEvidence",
@@ -957,16 +967,21 @@ __all__ = [
     "RaceArtifact",
     "RaceCase",
     "RaceTrialEvidence",
+    "RenewalAgentCandidateObservation",
+    "RenewalAgentScorerContract",
     "RepositorySurfaceEvidence",
     "ReproducibilityPin",
     "SanitizedAgentEvent",
     "SanitizedObservation",
     "SurfaceAuditArtifact",
     "SurfaceAuditSummary",
+    "WheelArchivePin",
+    "agent_rubric_scores",
     "artifact_json_schema",
     "canonical_artifact_json",
     "canonical_digest",
     "deterministic_observation_digest",
     "merge_correlations",
     "parse_artifact",
+    "race_trial_digest",
 ]

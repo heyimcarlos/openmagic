@@ -8,6 +8,12 @@ from uuid import UUID
 from psycopg import Connection
 from psycopg.rows import dict_row
 
+from openmagic_runtime.kernel._record_decoding import (
+    decode_runtime_attempt,
+    decode_runtime_instance,
+    decode_runtime_step,
+    decode_runtime_wait,
+)
 from openmagic_runtime.kernel.inspection_types import (
     ActivatedOccurrences,
     InstanceState,
@@ -28,7 +34,7 @@ def read_instance(
             "SELECT instance_id, state FROM openmagic_runtime.instances WHERE instance_id = %s",
             (instance_id,),
         ).fetchone()
-    return RuntimeInstance.decode(record) if record is not None else None
+    return decode_runtime_instance(record) if record is not None else None
 
 
 def lock_instance(
@@ -40,7 +46,7 @@ def lock_instance(
             "WHERE instance_id = %s FOR UPDATE",
             (instance_id,),
         ).fetchone()
-    return RuntimeInstance.decode(record) if record is not None else None
+    return decode_runtime_instance(record) if record is not None else None
 
 
 def waits_for_instance(
@@ -53,7 +59,7 @@ def waits_for_instance(
             "WHERE instance_id = %s ORDER BY created_at, wait_id",
             (instance_id,),
         ).fetchall()
-    return tuple(RuntimeWait.decode(record) for record in records)
+    return tuple(decode_runtime_wait(record) for record in records)
 
 
 def lock_wait(
@@ -66,7 +72,7 @@ def lock_wait(
             "WHERE wait_id = %s AND instance_id = %s FOR UPDATE",
             (wait_id, instance_id),
         ).fetchone()
-    return RuntimeWait.decode(record) if record is not None else None
+    return decode_runtime_wait(record) if record is not None else None
 
 
 def read_step(connection: Connection[tuple[Any, ...]], step_id: UUID) -> RuntimeStep | None:
@@ -77,7 +83,7 @@ def read_step(connection: Connection[tuple[Any, ...]], step_id: UUID) -> Runtime
             "FROM openmagic_runtime.steps WHERE step_id = %s",
             (step_id,),
         ).fetchone()
-    return RuntimeStep.decode(record) if record is not None else None
+    return decode_runtime_step(record) if record is not None else None
 
 
 def steps_for_instance(
@@ -91,7 +97,7 @@ def steps_for_instance(
             "WHERE instance_id = %s ORDER BY created_at, step_id",
             (instance_id,),
         ).fetchall()
-    return tuple(RuntimeStep.decode(record) for record in records)
+    return tuple(decode_runtime_step(record) for record in records)
 
 
 def read_attempt(
@@ -106,7 +112,7 @@ def read_attempt(
             "WHERE a.attempt_id = %s",
             (attempt_id,),
         ).fetchone()
-    return RuntimeAttempt.decode(record) if record is not None else None
+    return decode_runtime_attempt(record) if record is not None else None
 
 
 def activated_by_attempt(

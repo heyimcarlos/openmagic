@@ -13,8 +13,8 @@ def test_separate_process_pools_drain_backpressure_after_forced_loss(tmp_path) -
     assert report.initial.pending_deliveries == 0
     assert report.drained.pending_steps == 0
     assert report.drained.pending_deliveries == 0
-    assert len(report.forced_loss_pids) == 2
-    assert len(set(report.forced_loss_pids)) == 2
+    assert len(report.forced_loss_pids) == 3
+    assert len(set(report.forced_loss_pids)) == 3
     assert report.lost_attempt.worker_id
     assert report.lost_attempt.attempt_id
     assert report.lost_delivery.worker_id

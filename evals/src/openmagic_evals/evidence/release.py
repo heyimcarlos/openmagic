@@ -38,6 +38,7 @@ from openmagic_evals.evidence.matrix import (
     RaceContract,
     ReleaseCase,
     cardinality_one_races,
+    select_pytest_results,
 )
 from openmagic_evals.evidence.race_models import RaceCorpus
 from openmagic_evals.evidence.races import run_all_races
@@ -87,15 +88,7 @@ def _matching_results(
     tests: dict[str, dict[str, Any]],
     nodes: tuple[str, ...],
 ) -> dict[str, dict[str, Any]]:
-    paths = tuple(node.split("::", 1)[0] for node in nodes)
-    exact = {node for node in nodes if "::" in node}
-    return {
-        node: result
-        for node, result in tests.items()
-        if node in exact
-        or (not exact and node.startswith(paths))
-        or any("::" not in requested and node.startswith(requested) for requested in nodes)
-    }
+    return select_pytest_results(tests, nodes)
 
 
 def _release_case(
@@ -275,10 +268,8 @@ def run_deterministic_release(
         DETERMINISTIC_RELEASE_MATRIX if release_cases is None else release_cases
     )
     selected_race_contracts = cardinality_one_races() if race_contracts is None else race_contracts
-    selected_nodes = pytest_nodes or (
-        "packages/openmagic-runtime/tests",
-        "reference-apps/example-insurance/tests",
-        "evals/tests",
+    selected_nodes = pytest_nodes or tuple(
+        dict.fromkeys(node for case in selected_release_cases for node in case.pytest_nodes)
     )
     process_command_base = (
         sys.executable,
@@ -330,7 +321,7 @@ def run_deterministic_release(
     case_observations = {
         case.case_id: _exact_observation(case, recorded)
         for case in selected_release_cases
-        if case.case_id not in {"release.complete-suite", "trace.complete-durable-chain"}
+        if case.case_id != "trace.complete-durable-chain"
     }
     all_correlations = merge_correlations(
         observation.correlations for observation in case_observations.values()
@@ -339,7 +330,6 @@ def run_deterministic_release(
         case_id: observation.document for case_id, observation in sorted(case_observations.items())
     }
     for aggregate_case_id, scenario_id in (
-        ("release.complete-suite", "all-predeclared-cases"),
         ("trace.complete-durable-chain", "all-accepted-scenarios"),
     ):
         if not any(case.case_id == aggregate_case_id for case in selected_release_cases):

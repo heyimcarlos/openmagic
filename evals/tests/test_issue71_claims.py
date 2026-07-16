@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Literal, cast
 
 import pytest
-from openmagic_evals.evidence.claims import write_claim_report
+from openmagic_evals.evidence.claims import _validate_release_matrix, write_claim_report
 from openmagic_evals.evidence.contracts import (
     REQUIRED_NEGATIVE_CLAIMS,
     AgentCaseEvidence,
@@ -16,6 +16,8 @@ from openmagic_evals.evidence.contracts import (
     AgentQualitySummary,
     AgentTrialEvidence,
     ArtifactCase,
+    BoundaryAgentCandidateObservation,
+    BoundaryAgentScorerContract,
     BuildPin,
     CaseVerdict,
     ColdSchemaEvidence,
@@ -32,11 +34,14 @@ from openmagic_evals.evidence.contracts import (
     SanitizedAgentEvent,
     SurfaceAuditArtifact,
     SurfaceAuditSummary,
+    WheelArchivePin,
     canonical_artifact_json,
     canonical_digest,
     deterministic_observation_digest,
+    race_trial_digest,
 )
 from openmagic_evals.evidence.matrix import DETERMINISTIC_RELEASE_MATRIX, cardinality_one_races
+from pydantic import JsonValue
 
 
 def _pin(git_sha: str) -> ReproducibilityPin:
@@ -51,6 +56,14 @@ def _pin(git_sha: str) -> ReproducibilityPin:
             installation_kinds=cast(
                 dict[str, Literal["wheel", "editable"]], {"openmagic-evals": "wheel"}
             ),
+            wheel_archives={
+                "openmagic-evals": WheelArchivePin(
+                    filename="openmagic_evals-0.1.0-py3-none-any.whl",
+                    archive_digest="sha256:" + "7" * 64,
+                    record_digest="sha256:" + "8" * 64,
+                    metadata_digest="sha256:" + "9" * 64,
+                )
+            },
         ),
         suite_version="issue-71.v1",
         command=("openmagic-evidence", "test"),
@@ -88,12 +101,19 @@ def _case(
             ("context_projection", "candidate", "outcome_verification"), start=1
         )
     )
+    candidate_observation = BoundaryAgentCandidateObservation(observed_boundary="malformed_result")
+    rubric_scores = {
+        "expected_boundary_rejection": True,
+        "no_candidate_accepted": True,
+        "safety_boundary": True,
+    }
     trajectory_digest = (
         "sha256:"
         + hashlib.sha256(
             json.dumps(
                 {
-                    "rubric_scores": {"quality": True},
+                    "candidate_observation": candidate_observation.model_dump(mode="json"),
+                    "rubric_scores": rubric_scores,
                     "trajectory": [event.model_dump(mode="json") for event in trajectory],
                 },
                 sort_keys=True,
@@ -102,21 +122,26 @@ def _case(
         ).hexdigest()
     )
     if not agent:
-        observation = {"case_id": case_id}
-        scenario_digest = (
-            "sha256:"
-            + hashlib.sha256(
-                json.dumps(observation, sort_keys=True, separators=(",", ":")).encode()
-            ).hexdigest()
-        )
-        scenarios = (
+        contract = next(case for case in DETERMINISTIC_RELEASE_MATRIX if case.case_id == case_id)
+        scenarios = tuple(
             DeterministicScenarioEvidence(
-                scenario_id=case_id,
+                scenario_id=scenario_id,
                 correlations=correlations,
-                observation=observation,
-                observation_digest=scenario_digest,
-            ),
+                observation={"case_id": case_id, "scenario_id": scenario_id},
+                observation_digest=canonical_digest(
+                    {"case_id": case_id, "scenario_id": scenario_id}
+                ),
+            )
+            for scenario_id in sorted(contract.required_scenarios)
         )
+        test_results: dict[str, dict[str, JsonValue]] = {
+            node: {
+                "status": "passed",
+                "duration_seconds": 0.1,
+                "detail_digest": "sha256:" + "a" * 64,
+            }
+            for node in contract.pytest_nodes
+        }
         return ArtifactCase(
             case_id=case_id,
             case_schema_version=1,
@@ -124,9 +149,9 @@ def _case(
             observed_trials=1,
             seeds=(0,),
             correlations=correlations,
-            observation_digests=(deterministic_observation_digest(scenarios, {}),),
+            observation_digests=(deterministic_observation_digest(scenarios, test_results),),
             scenarios=scenarios,
-            test_results={},
+            test_results=test_results,
             verdict=CaseVerdict(status="passed", invariant_violations=()),
         )
     return AgentCaseEvidence(
@@ -135,6 +160,7 @@ def _case(
         configuration_key="test",
         split="development",
         prohibited_action_contract=("external_effect_dispatch",),
+        scorer_contract=BoundaryAgentScorerContract(expected_boundary="malformed_result"),
         expected_trials=1,
         observed_trials=1,
         seeds=(0,),
@@ -152,7 +178,8 @@ def _case(
                 trajectory_digest=trajectory_digest,
                 correlations=correlations,
                 trajectory=trajectory,
-                rubric_scores={"quality": True},
+                candidate_observation=candidate_observation,
+                rubric_scores=rubric_scores,
             ),
         ),
         verdict=CaseVerdict(status="passed", invariant_violations=()),
@@ -169,7 +196,16 @@ def _race_case(case_id: str) -> RaceCase:
             public_outcomes=contract.expected_public_outcomes,
             constraint_rows=1,
             correlations=correlations,
-            observation_digest=canonical_digest({"seed": seed}),
+            observation_digest=race_trial_digest(
+                seed=seed,
+                jitter_microseconds=(seed, seed + 1),
+                public_outcomes=contract.expected_public_outcomes,
+                constraint_rows=1,
+                correlations=correlations,
+                observation={"seed": seed},
+                contender_process_ids=(1000 + seed * 2, 1001 + seed * 2),
+                overlap_barrier_observed=True,
+            ),
             observation={"seed": seed},
             contender_process_ids=(1000 + seed * 2, 1001 + seed * 2),
             overlap_barrier_observed=True,
@@ -210,6 +246,13 @@ def test_claim_report_rejects_artifacts_from_different_builds(tmp_path: Path) ->
         limitations=("test",),
         negative_claims=REQUIRED_NEGATIVE_CLAIMS,
     )
+    first = deterministic.cases[0]
+    assert isinstance(first, ArtifactCase)
+    incomplete = deterministic.model_copy(
+        update={"cases": (first.model_copy(update={"test_results": {}}), *deterministic.cases[1:])}
+    )
+    with pytest.raises(ValueError, match="deterministic proof is incomplete"):
+        _validate_release_matrix(incomplete)
     agent = AgentQualityArtifact(
         reproducibility=_pin("2" * 40),
         agent_configurations=(

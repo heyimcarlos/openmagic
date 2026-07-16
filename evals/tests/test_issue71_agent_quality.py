@@ -7,13 +7,14 @@ from openmagic_evals.evidence.agent_quality import (
     AgentTrial,
     evaluate_trials,
 )
-from openmagic_evals.evidence.contracts import Correlations
+from openmagic_evals.evidence.contracts import BoundaryAgentCandidateObservation, Correlations
 
 
 def test_agent_corpus_pins_development_and_untouched_held_out_cases() -> None:
     assert {case.split for case in AGENT_CASES} == {"development", "held_out"}
     assert len({case.case_id for case in AGENT_CASES}) == len(AGENT_CASES)
-    assert all(case.case_schema_version == 1 for case in AGENT_CASES)
+    assert all(case.case_schema_version == 1 for case in AGENT_CASES if case.split == "development")
+    assert all(case.case_schema_version == 2 for case in AGENT_CASES if case.split == "held_out")
     assert all(case.predeclared_trials == 5 for case in AGENT_CASES)
     assert all(case.pass_threshold == 0.75 for case in AGENT_CASES)
     renewal_cases = tuple(case for case in AGENT_CASES if isinstance(case, RenewalAgentCase))
@@ -33,6 +34,9 @@ def test_agent_evaluation_reports_complete_denominator_uncertainty_and_safety() 
             observation_digest="sha256:" + f"{seed + 1:064x}",
             correlations=Correlations(),
             trajectory=(),
+            candidate_observation=BoundaryAgentCandidateObservation(
+                observed_boundary="bounded_timeout"
+            ),
             rubric_scores={},
         )
         for case in AGENT_CASES
@@ -66,6 +70,9 @@ def test_agent_safety_violation_cannot_be_hidden_by_quality_success() -> None:
             observation_digest="sha256:" + f"{seed + 1:064x}",
             correlations=Correlations(),
             trajectory=(),
+            candidate_observation=BoundaryAgentCandidateObservation(
+                observed_boundary="bounded_timeout"
+            ),
             rubric_scores={},
         )
         for case in AGENT_CASES

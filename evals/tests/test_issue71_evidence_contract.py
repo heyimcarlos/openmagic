@@ -14,6 +14,8 @@ from openmagic_evals.evidence.contracts import (
     AgentQualitySummary,
     AgentTrialEvidence,
     ArtifactCase,
+    BoundaryAgentCandidateObservation,
+    BoundaryAgentScorerContract,
     BuildPin,
     CaseVerdict,
     Correlations,
@@ -24,13 +26,17 @@ from openmagic_evals.evidence.contracts import (
     ProcessMetrics,
     QueueDepth,
     RaceTrialEvidence,
+    RepositorySurfaceEvidence,
     ReproducibilityPin,
     SanitizedAgentEvent,
+    WheelArchivePin,
     canonical_artifact_json,
     deterministic_observation_digest,
     parse_artifact,
+    race_trial_digest,
 )
 from openmagic_evals.evidence.redaction import RedactionViolation, audit_redaction
+from pydantic import JsonValue
 
 
 def _pin() -> ReproducibilityPin:
@@ -66,6 +72,24 @@ def _pin() -> ReproducibilityPin:
                     "openmagic-runtime": "wheel",
                 },
             ),
+            wheel_archives={
+                name: WheelArchivePin(
+                    filename=f"{name}-0.1.0-py3-none-any.whl",
+                    archive_digest="sha256:" + digest * 64,
+                    record_digest="sha256:" + digest * 64,
+                    metadata_digest="sha256:" + digest * 64,
+                )
+                for name, digest in zip(
+                    (
+                        "example-insurance",
+                        "openmagic-api",
+                        "openmagic-evals",
+                        "openmagic-runtime",
+                    ),
+                    ("0", "1", "2", "3"),
+                    strict=True,
+                )
+            },
         ),
         suite_version="issue-71.v1",
         command=("uv", "run", "openmagic-evidence", "deterministic"),
@@ -149,9 +173,16 @@ def _agent_case() -> AgentCaseEvidence:
             ("context_projection", "candidate", "outcome_verification"), start=1
         )
     )
+    candidate_observation = BoundaryAgentCandidateObservation(observed_boundary="malformed_result")
+    rubric_scores = {
+        "expected_boundary_rejection": True,
+        "no_candidate_accepted": True,
+        "safety_boundary": True,
+    }
     trajectory_document = json.dumps(
         {
-            "rubric_scores": {"quality": True},
+            "candidate_observation": candidate_observation.model_dump(mode="json"),
+            "rubric_scores": rubric_scores,
             "trajectory": [event.model_dump(mode="json") for event in trajectory],
         },
         sort_keys=True,
@@ -164,6 +195,7 @@ def _agent_case() -> AgentCaseEvidence:
         configuration_key="renewal_outreach",
         split="development",
         prohibited_action_contract=("external_effect_dispatch",),
+        scorer_contract=BoundaryAgentScorerContract(expected_boundary="malformed_result"),
         expected_trials=1,
         observed_trials=1,
         seeds=(0,),
@@ -178,7 +210,8 @@ def _agent_case() -> AgentCaseEvidence:
                 trajectory_digest=trajectory_digest,
                 correlations=correlations,
                 trajectory=trajectory,
-                rubric_scores={"quality": True},
+                candidate_observation=candidate_observation,
+                rubric_scores=rubric_scores,
             ),
         ),
         pass_threshold=0.75,
@@ -314,6 +347,36 @@ def test_race_trial_requires_cardinality_one_and_durable_correlations() -> None:
         )
 
 
+def test_race_digest_binds_every_claim_bearing_field() -> None:
+    correlations = Correlations(command_ids=("018f2f00-0000-7000-8000-000000000001",))
+    observation: dict[str, JsonValue] = {"durable_id": "018f2f00-0000-7000-8000-000000000001"}
+    trial = RaceTrialEvidence(
+        seed=7,
+        jitter_microseconds=(10, 20),
+        public_outcomes=("won", "lost"),
+        constraint_rows=1,
+        correlations=correlations,
+        observation=observation,
+        contender_process_ids=(101, 102),
+        overlap_barrier_observed=True,
+        observation_digest=race_trial_digest(
+            seed=7,
+            jitter_microseconds=(10, 20),
+            public_outcomes=("won", "lost"),
+            constraint_rows=1,
+            correlations=correlations,
+            observation=observation,
+            contender_process_ids=(101, 102),
+            overlap_barrier_observed=True,
+        ),
+    )
+    document = trial.model_dump(mode="python")
+    document["seed"] = 8
+
+    with pytest.raises(ValueError, match="digest does not match"):
+        RaceTrialEvidence.model_validate(document)
+
+
 def test_artifact_requires_all_negative_claims() -> None:
     with pytest.raises(ValueError, match="negative claims"):
         DeterministicArtifact(
@@ -341,7 +404,7 @@ def test_process_metrics_require_independent_roles_losses_and_drained_queues() -
         drained_queue=QueueDepth(pending_steps=0, pending_deliveries=0),
         initial_capacity={"api": 1, "workflow-worker": 1, "delivery-worker": 1},
         started_processes={"api": 1, "workflow-worker": 4, "delivery-worker": 3},
-        forced_losses={"workflow-worker": 1, "delivery-worker": 1},
+        forced_losses={"api": 1, "workflow-worker": 1, "delivery-worker": 1},
         fresh_interpreters=True,
         postgresql_only_reconstruction=True,
         elapsed_ms=250,
@@ -354,7 +417,7 @@ def test_process_metrics_require_independent_roles_losses_and_drained_queues() -
             maximum=10,
         ),
         recovery_time_ms=DistributionSummary(
-            count=2,
+            count=3,
             mean=20,
             median=20,
             sample_standard_deviation=0,
@@ -381,6 +444,17 @@ def test_process_metrics_require_independent_roles_losses_and_drained_queues() -
             metrics.model_copy(
                 update={"drained_queue": QueueDepth(pending_steps=0, pending_deliveries=1)}
             ).model_dump()
+        )
+
+
+def test_surface_verdict_cannot_hide_recorded_violations() -> None:
+    with pytest.raises(ValueError, match="derive from recorded violations"):
+        RepositorySurfaceEvidence(
+            audited_distributions=("openmagic-runtime",),
+            production_dependency_edges=(),
+            private_persistence_packages=("openmagic_runtime._persistence",),
+            violations=("unexpected public export",),
+            passed=True,
         )
 
 

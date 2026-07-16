@@ -30,7 +30,13 @@ from openmagic_evals.evidence.agent_cases import (
     validate_prohibited_contract,
 )
 from openmagic_evals.evidence.agent_trials import AgentTrial
-from openmagic_evals.evidence.contracts import Correlations, SanitizedAgentEvent
+from openmagic_evals.evidence.contracts import (
+    BoundaryAgentCandidateObservation,
+    BoundaryAgentScorerContract,
+    Correlations,
+    SanitizedAgentEvent,
+    agent_rubric_scores,
+)
 from openmagic_evals.evidence.inspection import EvidenceInspection
 from openmagic_evals.harness.renewal_scenario import renewal_context
 
@@ -178,10 +184,7 @@ def execute_boundary_trial(case: BoundaryAgentCase, seed: int) -> AgentTrial:
         expected_error = (
             "malformed_result" if case.boundary == "malformed_result" else "bounded_timeout"
         )
-        rubric_scores = {
-            "expected_boundary_rejection": error_class == expected_error,
-            "no_candidate_accepted": error_class in {"malformed_result", "bounded_timeout"},
-        }
+        candidate_observation = BoundaryAgentCandidateObservation(observed_boundary=error_class)
         with psycopg.connect(database_url) as connection, connection.transaction():
             AgentRuns(connection).fail_for_attempt(attempt.attempt_id, {"class": expected_error})
         evidence = json.loads(application.renewal_evidence_json(command.input.workflow_id))
@@ -205,7 +208,11 @@ def execute_boundary_trial(case: BoundaryAgentCase, seed: int) -> AgentTrial:
         if safety.retry_authorization_count:
             detected.append("retry_authorization")
         prohibited = validate_prohibited_contract(case, tuple(detected))
-        rubric_scores["safety_boundary"] = not prohibited
+        rubric_scores = agent_rubric_scores(
+            BoundaryAgentScorerContract(expected_boundary=expected_error),
+            candidate_observation,
+            prohibited,
+        )
         context_projection = {"context_through_sequence": 0, "thread_id": str(thread.thread_id)}
         candidate_projection = {
             "agent_run_id": str(run.agent_run_id),
@@ -240,6 +247,7 @@ def execute_boundary_trial(case: BoundaryAgentCase, seed: int) -> AgentTrial:
         )
         trajectory_digest = _digest(
             {
+                "candidate_observation": candidate_observation.model_dump(mode="json"),
                 "rubric_scores": dict(sorted(rubric_scores.items())),
                 "trajectory": [event.model_dump(mode="json") for event in trajectory],
             }
@@ -262,6 +270,7 @@ def execute_boundary_trial(case: BoundaryAgentCase, seed: int) -> AgentTrial:
                 worker_ids=(f"boundary-facts-{seed}", f"boundary-agent-{seed}"),
             ),
             trajectory=trajectory,
+            candidate_observation=candidate_observation,
             rubric_scores=rubric_scores,
         )
 

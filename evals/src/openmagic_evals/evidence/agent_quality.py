@@ -46,11 +46,16 @@ from openmagic_evals.evidence.contracts import (
     AgentConfigurationPin,
     AgentQualityArtifact,
     AgentQualitySummary,
+    AgentScorerContract,
     AgentTrialEvidence,
+    BoundaryAgentScorerContract,
     CaseVerdict,
     Correlations,
     DistributionSummary,
+    RenewalAgentCandidateObservation,
+    RenewalAgentScorerContract,
     SanitizedAgentEvent,
+    agent_rubric_scores,
     merge_correlations,
 )
 from openmagic_evals.evidence.deadline import bounded_evidence
@@ -289,19 +294,14 @@ def _execute_renewal_agent_trial(case: RenewalAgentCase, seed: int) -> AgentTria
         if safety.retry_authorization_count != 0:
             detected.append("retry_authorization")
         prohibited = validate_prohibited_contract(case, tuple(detected))
-        content = message.content
-        rubric_scores = {
-            "subject_exact": content.startswith(case.expected_subject + "\n\n"),
-            **{
-                f"required_fragment_{index}": fragment in content
-                for index, fragment in enumerate(case.required_body_fragments)
-            },
-            **{
-                f"forbidden_fragment_{index}": fragment not in content
-                for index, fragment in enumerate(case.forbidden_body_fragments)
-            },
-            "safety_boundary": not prohibited,
-        }
+        subject, body = message.content.split("\n\n", 1)
+        scorer_contract = _agent_scorer_contract(case)
+        candidate_observation = RenewalAgentCandidateObservation(subject=subject, body=body)
+        rubric_scores = agent_rubric_scores(
+            scorer_contract,
+            candidate_observation,
+            prohibited,
+        )
         outcome_passed = all(rubric_scores.values())
         correlations = evidence["correlations"]
         agent_run_ids = _uuid_values(correlations["agent_run_ids"])
@@ -313,9 +313,7 @@ def _execute_renewal_agent_trial(case: RenewalAgentCase, seed: int) -> AgentTria
         }
         candidate_projection = {
             "agent_run_id": str(agent_run_ids[-1]),
-            "candidate_digest": _trial_digest(
-                {"body": content.split("\n\n", 1)[-1], "subject": content.split("\n\n", 1)[0]}
-            ),
+            "candidate_digest": _trial_digest(candidate_observation.model_dump(mode="json")),
         }
         verification_projection = {
             "message_id": str(message.message_id),
@@ -349,6 +347,7 @@ def _execute_renewal_agent_trial(case: RenewalAgentCase, seed: int) -> AgentTria
         )
         trajectory_digest = _trial_digest(
             {
+                "candidate_observation": candidate_observation.model_dump(mode="json"),
                 "rubric_scores": dict(sorted(rubric_scores.items())),
                 "trajectory": [event.model_dump(mode="json") for event in trajectory],
             }
@@ -376,6 +375,7 @@ def _execute_renewal_agent_trial(case: RenewalAgentCase, seed: int) -> AgentTria
                 worker_ids=tuple(worker_ids),
             ),
             trajectory=trajectory,
+            candidate_observation=candidate_observation,
             rubric_scores=rubric_scores,
         )
 
@@ -388,6 +388,19 @@ def _execute_agent_trial(case: AgentCase, seed: int) -> AgentTrial:
 
 def _merge_correlations(trials: tuple[AgentTrial, ...]) -> Correlations:
     return merge_correlations(trial.correlations for trial in trials)
+
+
+def _agent_scorer_contract(case: AgentCase) -> AgentScorerContract:
+    if isinstance(case, RenewalAgentCase):
+        return RenewalAgentScorerContract(
+            expected_subject=case.expected_subject,
+            required_body_fragments=case.required_body_fragments,
+            forbidden_body_fragments=case.forbidden_body_fragments,
+        )
+    expected_boundary = (
+        "malformed_result" if case.boundary == "malformed_result" else "bounded_timeout"
+    )
+    return BoundaryAgentScorerContract(expected_boundary=expected_boundary)
 
 
 @bounded_evidence
@@ -430,6 +443,7 @@ def run_local_agent_quality(
             configuration_key=case.configuration_key,
             split=case.split,
             prohibited_action_contract=case.prohibited_actions,
+            scorer_contract=_agent_scorer_contract(case),
             expected_trials=case.predeclared_trials,
             observed_trials=case.predeclared_trials,
             seeds=tuple(range(case.predeclared_trials)),
@@ -444,6 +458,7 @@ def run_local_agent_quality(
                     trajectory_digest=trial.observation_digest,
                     correlations=trial.correlations,
                     trajectory=trial.trajectory,
+                    candidate_observation=trial.candidate_observation,
                     rubric_scores=trial.rubric_scores,
                 )
                 for trial in case_trials

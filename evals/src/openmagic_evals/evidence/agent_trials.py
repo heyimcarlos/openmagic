@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from openmagic_evals.evidence.contracts import Correlations, SanitizedAgentEvent
+from openmagic_evals.evidence.contracts import (
+    AgentCandidateObservation,
+    Correlations,
+    SanitizedAgentEvent,
+)
 
 
 @dataclass(frozen=True)
@@ -17,6 +21,7 @@ class AgentTrial:
     observation_digest: str
     correlations: Correlations
     trajectory: tuple[SanitizedAgentEvent, ...]
+    candidate_observation: AgentCandidateObservation
     rubric_scores: dict[str, bool]
 
 

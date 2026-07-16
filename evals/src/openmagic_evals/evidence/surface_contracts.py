@@ -1,6 +1,7 @@
 """Versioned exact installable-surface contracts for source and wheel audits."""
 
 RUNTIME_PUBLIC_EXPORTS = {
+    "__init__.py": ("__version__",),
     "agents.py": (
         "AgentAudience",
         "AgentConfiguration",
@@ -89,6 +90,7 @@ RUNTIME_PUBLIC_EXPORTS = {
         "StartInstanceReceipt",
         "start_instance",
     ),
+    "kernel/__init__.py": (),
     "kernel/definitions.py": (
         "DefinitionCatalog",
         "DefinitionConflict",
@@ -162,6 +164,7 @@ RUNTIME_PUBLIC_EXPORTS = {
 }
 
 APPLICATION_PUBLIC_EXPORTS = {
+    "__init__.py": ("__version__",),
     "application_event_records.py": ("actor_record", "cause_record"),
     "application_registry.py": ("application_command_dispatcher",),
     "migrations.py": ("AppliedMigrationBundle", "apply_migrations", "main"),

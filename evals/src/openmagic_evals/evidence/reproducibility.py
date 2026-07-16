@@ -2,22 +2,28 @@
 
 from __future__ import annotations
 
+import base64
+import csv
 import hashlib
+import io
 import json
 import subprocess
+import zipfile
 from datetime import datetime
 from importlib.metadata import distribution, version
 from importlib.util import find_spec
 from pathlib import Path
 from typing import Literal
+from urllib.parse import unquote, urlparse
 
 import psycopg
 from example_insurance.migrations import apply_migrations
 from example_insurance.renewal_definition import RENEWAL_DEFINITION
 from example_insurance.verification_definition import VERIFICATION_DEFINITION
 from openmagic_runtime.evidence import content_fingerprint
+from pydantic import JsonValue, TypeAdapter
 
-from openmagic_evals.evidence.contracts import BuildPin, ReproducibilityPin
+from openmagic_evals.evidence.contracts import BuildPin, ReproducibilityPin, WheelArchivePin
 from openmagic_evals.evidence.race_transitions import transition_race_definitions
 from openmagic_evals.harness._postgres import POSTGRES_IMAGE, postgres_container
 
@@ -75,7 +81,7 @@ def _distribution_digest(name: str) -> str:
     return _package_digest(Path(package_spec.origin).parent)
 
 
-def _installation_kind(name: str) -> Literal["wheel", "editable"]:
+def _direct_url(name: str) -> dict[str, JsonValue] | None:
     item = distribution(name)
     direct_url = next(
         (
@@ -86,14 +92,90 @@ def _installation_kind(name: str) -> Literal["wheel", "editable"]:
         None,
     )
     if direct_url is None or not direct_url.is_file():
+        return None
+    return TypeAdapter(dict[str, JsonValue]).validate_json(direct_url.read_text(encoding="utf-8"))
+
+
+def _installation_kind(name: str) -> Literal["wheel", "editable"]:
+    document = _direct_url(name)
+    if document is None:
         return "wheel"
-    document = json.loads(direct_url.read_text(encoding="utf-8"))
-    return "editable" if document.get("dir_info", {}).get("editable") is True else "wheel"
+    directory = document.get("dir_info")
+    return (
+        "editable" if isinstance(directory, dict) and directory.get("editable") is True else "wheel"
+    )
+
+
+def _member_digest(archive: zipfile.ZipFile, names: tuple[str, ...]) -> str:
+    content = hashlib.sha256()
+    for name in names:
+        content.update(name.encode())
+        content.update(b"\0")
+        content.update(archive.read(name))
+        content.update(b"\0")
+    return "sha256:" + content.hexdigest()
+
+
+def _wheel_archive_pin(name: str) -> WheelArchivePin:
+    document = _direct_url(name)
+    if document is None:
+        raise RuntimeError(f"wheel installation has no local archive provenance: {name}")
+    url = document.get("url")
+    if not isinstance(url, str):
+        raise RuntimeError(f"wheel installation has no local archive provenance: {name}")
+    parsed = urlparse(url)
+    if parsed.scheme != "file" or parsed.netloc not in {"", "localhost"}:
+        raise RuntimeError(f"wheel installation provenance is not a local file: {name}")
+    wheel = Path(unquote(parsed.path))
+    if not wheel.is_file() or wheel.suffix != ".whl":
+        raise RuntimeError(f"wheel installation archive is unavailable: {name}")
+    archive_digest = sha256(wheel.read_bytes())
+    archive_info = document.get("archive_info")
+    archive_hash = archive_info.get("hash") if isinstance(archive_info, dict) else None
+    if isinstance(archive_hash, str):
+        expected = archive_hash.replace("sha256=", "sha256:", 1)
+        if expected != archive_digest:
+            raise RuntimeError(f"wheel archive differs from its installer provenance: {name}")
+    with zipfile.ZipFile(wheel) as archive:
+        members = tuple(sorted(item.filename for item in archive.infolist() if not item.is_dir()))
+        records = tuple(member for member in members if member.endswith(".dist-info/RECORD"))
+        if len(records) != 1:
+            raise RuntimeError(f"wheel must contain exactly one RECORD: {name}")
+        record_name = records[0]
+        record_bytes = archive.read(record_name)
+        rows = {
+            row[0]: (row[1], row[2])
+            for row in csv.reader(io.StringIO(record_bytes.decode("utf-8")))
+        }
+        if set(rows) != set(members):
+            raise RuntimeError(f"wheel RECORD does not enumerate every archive member: {name}")
+        for member in members:
+            digest, size = rows[member]
+            if member == record_name:
+                if digest or size:
+                    raise RuntimeError(f"wheel RECORD must leave its own digest empty: {name}")
+                continue
+            data = archive.read(member)
+            encoded = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode()
+            if digest != f"sha256={encoded}" or size != str(len(data)):
+                raise RuntimeError(f"wheel RECORD hash or size mismatch: {name}:{member}")
+        metadata = tuple(
+            member for member in members if ".dist-info/" in member and member != record_name
+        )
+        if not metadata:
+            raise RuntimeError(f"wheel contains no distribution metadata: {name}")
+        return WheelArchivePin(
+            filename=wheel.name,
+            archive_digest=archive_digest,
+            record_digest=sha256(record_bytes),
+            metadata_digest=_member_digest(archive, metadata),
+        )
 
 
 def build_pin(root: Path) -> BuildPin:
     status = _git(root, "status", "--porcelain", "--untracked-files=normal")
     installed_digests = {name: _distribution_digest(name) for name in _DISTRIBUTIONS}
+    installation_kinds = {name: _installation_kind(name) for name in _DISTRIBUTIONS}
     return BuildPin(
         git_sha=_git(root, "rev-parse", "HEAD"),
         checkout_clean=not status,
@@ -104,7 +186,12 @@ def build_pin(root: Path) -> BuildPin:
             name: _package_digest(root / _DISTRIBUTION_SOURCE_ROOTS[name])
             for name in _DISTRIBUTIONS
         },
-        installation_kinds={name: _installation_kind(name) for name in _DISTRIBUTIONS},
+        installation_kinds=installation_kinds,
+        wheel_archives={
+            name: _wheel_archive_pin(name)
+            for name, kind in installation_kinds.items()
+            if kind == "wheel"
+        },
     )
 
 

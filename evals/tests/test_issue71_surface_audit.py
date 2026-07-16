@@ -9,7 +9,17 @@ from uuid import uuid4
 from example_insurance.migrations import apply_migrations
 from openmagic_evals.evidence.audit import audit_cold_schema, audit_repository
 from openmagic_evals.evidence.contracts import artifact_json_schema
+from openmagic_evals.evidence.surface_contracts import (
+    APPLICATION_PUBLIC_EXPORTS,
+    RUNTIME_PUBLIC_EXPORTS,
+)
 from openmagic_evals.harness._postgres import postgres_container
+from openmagic_runtime.kernel.inspection_types import (
+    RuntimeAttempt,
+    RuntimeInstance,
+    RuntimeStep,
+    RuntimeWait,
+)
 
 ROOT = Path(__file__).parents[2]
 
@@ -32,6 +42,13 @@ def test_repository_audit_closes_dependency_export_persistence_and_legacy_surfac
     assert report.private_persistence_packages == (
         "example_insurance._persistence",
         "openmagic_runtime._persistence",
+    )
+    assert RUNTIME_PUBLIC_EXPORTS["__init__.py"] == ("__version__",)
+    assert RUNTIME_PUBLIC_EXPORTS["kernel/__init__.py"] == ()
+    assert APPLICATION_PUBLIC_EXPORTS["__init__.py"] == ("__version__",)
+    assert all(
+        not hasattr(projection, "decode")
+        for projection in (RuntimeAttempt, RuntimeInstance, RuntimeStep, RuntimeWait)
     )
 
 
