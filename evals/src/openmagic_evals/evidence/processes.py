@@ -287,9 +287,9 @@ def _verify_workload_outcome(
         "workflow_lifecycle": outcomes.workflow_lifecycle,
         "instance_state": outcomes.instance_state,
         "approval_wait_state": outcomes.approval_wait_state,
-        "attempt_states": outcomes.attempt_states,
-        "delivery_states": outcomes.delivery_states,
-        "delivery_attempt_states": outcomes.delivery_attempt_states,
+        "attempt_states": list(outcomes.attempt_states),
+        "delivery_states": list(outcomes.delivery_states),
+        "delivery_attempt_states": [list(states) for states in outcomes.delivery_attempt_states],
         "external_email_effect_count": outcomes.external_email_effect_count,
         "message_count": len(values.message_ids),
     }
