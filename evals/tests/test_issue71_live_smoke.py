@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import json
-import subprocess
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Thread
 
 import pytest
+from evidence_repository import prepare_clean_evidence_repository
 from openmagic_evals.evidence.live_smoke import provider_configuration_digest, run_live_smoke
 
 
@@ -29,19 +29,9 @@ class _ResponsesHandler(BaseHTTPRequestHandler):
         del format, args
 
 
-def _clean_repository(path: Path) -> None:
-    path.mkdir()
-    (path / "uv.lock").write_text("synthetic lock\n", encoding="utf-8")
-    subprocess.run(["git", "init", "-q"], cwd=path, check=True)
-    subprocess.run(["git", "config", "user.email", "test@example.test"], cwd=path, check=True)
-    subprocess.run(["git", "config", "user.name", "Test"], cwd=path, check=True)
-    subprocess.run(["git", "add", "uv.lock"], cwd=path, check=True)
-    subprocess.run(["git", "commit", "-qm", "test fixture"], cwd=path, check=True)
-
-
 def test_live_smoke_posts_and_verifies_one_reversible_synthetic_case(tmp_path: Path) -> None:
     repository = tmp_path / "repository"
-    _clean_repository(repository)
+    prepare_clean_evidence_repository(repository)
     credential = tmp_path / "credential"
     credential.write_text("synthetic-credential", encoding="utf-8")
     credential.chmod(0o600)

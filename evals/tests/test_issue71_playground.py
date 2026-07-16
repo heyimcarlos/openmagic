@@ -1,26 +1,16 @@
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 
+from evidence_repository import prepare_clean_evidence_repository
 from openmagic_evals.evidence.playground import verify_playground
-
-
-def _clean_repository(path: Path) -> None:
-    path.mkdir()
-    (path / "uv.lock").write_text("synthetic lock\n", encoding="utf-8")
-    subprocess.run(["git", "init", "-q"], cwd=path, check=True)
-    subprocess.run(["git", "config", "user.email", "test@example.test"], cwd=path, check=True)
-    subprocess.run(["git", "config", "user.name", "Test"], cwd=path, check=True)
-    subprocess.run(["git", "add", "uv.lock"], cwd=path, check=True)
-    subprocess.run(["git", "commit", "-qm", "test fixture"], cwd=path, check=True)
 
 
 def test_playground_exercises_disabled_effects_process_restart_and_safe_reset(
     tmp_path: Path,
 ) -> None:
     repository = tmp_path / "repository"
-    _clean_repository(repository)
+    prepare_clean_evidence_repository(repository)
 
     artifact = verify_playground(
         repository_root=repository,

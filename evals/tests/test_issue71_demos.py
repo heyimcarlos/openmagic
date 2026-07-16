@@ -4,23 +4,14 @@ import subprocess
 import sys
 from pathlib import Path
 
+from evidence_repository import prepare_clean_evidence_repository
 from openmagic_evals.evidence.contracts import parse_artifact
 from openmagic_evals.evidence.demos import run_renewal_demo, run_verification_demo
 
 
-def _clean_repository(path: Path) -> None:
-    path.mkdir()
-    (path / "uv.lock").write_text("synthetic lock\n", encoding="utf-8")
-    subprocess.run(["git", "init", "-q"], cwd=path, check=True)
-    subprocess.run(["git", "config", "user.email", "test@example.test"], cwd=path, check=True)
-    subprocess.run(["git", "config", "user.name", "Test"], cwd=path, check=True)
-    subprocess.run(["git", "add", "uv.lock"], cwd=path, check=True)
-    subprocess.run(["git", "commit", "-qm", "test fixture"], cwd=path, check=True)
-
-
 def test_public_demonstrations_reproduce_from_reused_working_directory(tmp_path: Path) -> None:
     repository = tmp_path / "repository"
-    _clean_repository(repository)
+    prepare_clean_evidence_repository(repository)
     working_directory = tmp_path / "renewal"
 
     first = run_renewal_demo(
@@ -45,7 +36,7 @@ def test_public_demonstrations_reproduce_from_reused_working_directory(tmp_path:
 
 def test_renewal_demo_cli_records_its_explicit_timeout(tmp_path: Path) -> None:
     repository = tmp_path / "repository"
-    _clean_repository(repository)
+    prepare_clean_evidence_repository(repository)
     output = tmp_path / "renewal-cli.json"
 
     subprocess.run(
