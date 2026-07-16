@@ -730,7 +730,7 @@ def test_exact_attempt_result_replay_does_not_repeat_route_effects() -> None:
             )
 
 
-def test_workflow_worker_uses_one_executor_seam_for_facts_and_agent_draft() -> None:
+def test_workflow_worker_does_not_echo_untrusted_thread_context_into_agent_draft() -> None:
     with _renewal_postgres_context() as context:
         database_url = context.database_url
         application = context.application
@@ -797,7 +797,7 @@ def test_workflow_worker_uses_one_executor_seam_for_facts_and_agent_draft() -> N
         assert second_attempt.agent_run_id is not None
         assert second_attempt.agent_runtime_generation == 1
         assert agent_evidence is not None
-        assert "preferred formal greeting" in str(agent_evidence[0])
+        assert "preferred formal greeting" not in str(agent_evidence[0])
         assert agent_evidence[1]["configuration"] == {
             "agent_key": "example_insurance.renewal_draft",
             "agent_version": 1,
