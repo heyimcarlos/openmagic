@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import signal
 import time
 from dataclasses import dataclass
 from functools import partial
@@ -49,6 +51,16 @@ def _slow_candidate_factory(marker: Path):
     def run(execution: AgentExecutionInput) -> Candidate:
         time.sleep(1.5)
         marker.write_text(str(execution.run_input.task.input.value("value")))
+        return Candidate("late")
+
+    return run
+
+
+def _term_resistant_candidate_factory(pid_file: Path):
+    def run(_execution: AgentExecutionInput) -> Candidate:
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        pid_file.write_text(str(os.getpid()), encoding="utf-8")
+        time.sleep(10)
         return Candidate("late")
 
     return run
@@ -142,3 +154,20 @@ def test_fresh_agent_executor_terminates_work_after_timeout(tmp_path: Path) -> N
     time.sleep(0.7)
 
     assert not marker.exists()
+
+
+def test_fresh_agent_executor_kills_and_reaps_term_resistant_child(tmp_path: Path) -> None:
+    pid_file = tmp_path / "agent-pid"
+    executor = FreshAgentExecutor(
+        partial(_term_resistant_candidate_factory, pid_file),
+        result_class=Candidate,
+        encoder=lambda candidate: {"value": candidate.value},
+        timeout_seconds=1,
+    )
+
+    with pytest.raises(AgentExecutionFailure) as raised:
+        executor.execute(_execution(), CancellationToken())
+    assert raised.value.reason == "bounded_timeout"
+    pid = int(pid_file.read_text(encoding="utf-8"))
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from multiprocessing import get_context
 from threading import Event, Thread
@@ -172,6 +173,87 @@ def _run_agent_child(
         sender.close()
 
 
+def _cleanup_agent_process(
+    process: Any,
+    receiver: Any,
+    sender: Any,
+    *,
+    started: bool,
+) -> tuple[BaseException, ...]:
+    errors: list[BaseException] = []
+
+    def running() -> bool:
+        try:
+            return bool(process.is_alive())
+        except BaseException as error:
+            errors.append(error)
+            return True
+
+    for endpoint in (sender, receiver):
+        try:
+            endpoint.close()
+        except BaseException as error:
+            errors.append(error)
+    if started:
+        if running():
+            try:
+                process.terminate()
+            except BaseException as error:
+                errors.append(error)
+            try:
+                process.join(timeout=1)
+            except BaseException as error:
+                errors.append(error)
+        if running():
+            try:
+                process.kill()
+            except BaseException as error:
+                errors.append(error)
+            try:
+                process.join(timeout=1)
+            except BaseException as error:
+                errors.append(error)
+        if running():
+            errors.append(RuntimeError(f"Agent process {process.pid} survived cleanup"))
+    try:
+        process.close()
+    except BaseException as error:
+        errors.append(error)
+    return tuple(errors)
+
+
+@contextmanager
+def _agent_process_scope(process: Any, receiver: Any, sender: Any) -> Iterator[None]:
+    started = False
+    try:
+        process.start()
+        started = True
+        sender.close()
+        yield
+    except BaseException as execution_error:
+        cleanup_errors = _cleanup_agent_process(
+            process,
+            receiver,
+            sender,
+            started=started,
+        )
+        if cleanup_errors:
+            raise BaseExceptionGroup(
+                "Agent execution and cleanup failed",
+                [execution_error, *cleanup_errors],
+            ) from execution_error
+        raise
+    else:
+        cleanup_errors = _cleanup_agent_process(
+            process,
+            receiver,
+            sender,
+            started=started,
+        )
+        if cleanup_errors:
+            raise BaseExceptionGroup("Agent process cleanup failed", list(cleanup_errors))
+
+
 class FreshAgentExecutor(Generic[CandidateT]):
     def __init__(
         self,
@@ -204,18 +286,11 @@ class FreshAgentExecutor(Generic[CandidateT]):
             args=(self._factory, execution.agent_input, sender),
             name="openmagic-agent-attempt",
         )
-        process.start()
-        sender.close()
         deadline = monotonic() + self._timeout_seconds
-        try:
+        with _agent_process_scope(process, receiver, sender):
             while process.is_alive() and monotonic() < deadline and not cancellation.cancelled:
                 process.join(timeout=0.01)
             if process.is_alive():
-                process.terminate()
-                process.join(timeout=1)
-                if process.is_alive():
-                    process.kill()
-                    process.join(timeout=1)
                 if cancellation.cancelled:
                     raise AgentExecutionFailure("cancelled", "Attempt execution was cancelled")
                 raise AgentExecutionFailure(
@@ -234,11 +309,6 @@ class FreshAgentExecutor(Generic[CandidateT]):
             if message[0] == "failure":
                 raise AgentExecutionFailure(message[1], message[2])
             result = message[1]
-        finally:
-            receiver.close()
-            if process.is_alive():
-                process.kill()
-                process.join(timeout=1)
         if cancellation.cancelled:
             raise AgentExecutionFailure("cancelled", "Attempt execution was cancelled")
         if type(result) is not self._result_class:

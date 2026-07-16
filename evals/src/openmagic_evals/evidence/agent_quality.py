@@ -480,6 +480,13 @@ def load_sealed_held_out_cases(repository_root: Path) -> tuple[AgentCase, ...]:
         capture_output=True,
         text=True,
     )
+    current_blob = subprocess.run(
+        ["git", "hash-object", HELD_OUT_SEALED_PATH],
+        cwd=repository_root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
     unchanged = subprocess.run(
         ["git", "diff", "--quiet", HELD_OUT_SEALED_AT_COMMIT, "--", *TUNING_LOCKED_PATHS],
         cwd=repository_root,
@@ -500,6 +507,8 @@ def load_sealed_held_out_cases(repository_root: Path) -> tuple[AgentCase, ...]:
         ancestor.returncode != 0
         or sealed_blob.returncode != 0
         or sealed_blob.stdout.strip() != HELD_OUT_SEALED_BLOB
+        or current_blob.returncode != 0
+        or current_blob.stdout.strip() != HELD_OUT_SEALED_BLOB
         or unchanged.returncode != 0
         or tuple(TUNING_LOCKED_BLOBS) != TUNING_LOCKED_PATHS
         or any(

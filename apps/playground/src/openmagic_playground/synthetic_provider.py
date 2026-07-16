@@ -194,8 +194,19 @@ class SyntheticEmailProvider:
     def stop(self) -> None:
         errors: list[Exception] = []
         process = self._process
+        reaped = process is None
+
+        def running() -> bool:
+            if process is None:
+                return False
+            try:
+                return process.poll() is None
+            except Exception as error:
+                errors.append(error)
+                return True
+
         try:
-            if process is not None and process.poll() is None:
+            if process is not None and running():
                 try:
                     process.terminate()
                 except Exception as error:
@@ -206,20 +217,21 @@ class SyntheticEmailProvider:
                     pass
                 except Exception as error:
                     errors.append(error)
-                if process.poll() is None:
+                if running():
                     try:
                         process.kill()
                     except Exception as error:
                         errors.append(error)
-                if process.poll() is None:
+                if running():
                     try:
                         process.wait(timeout=self.shutdown_timeout)
                     except Exception as error:
                         errors.append(error)
-            if process is not None and process.poll() is None:
-                errors.append(RuntimeError(f"synthetic provider {process.pid} survived cleanup"))
+            reaped = not running()
+            if not reaped:
+                errors.append(RuntimeError("synthetic provider process survived cleanup"))
         finally:
-            if process is None or process.poll() is not None:
+            if reaped:
                 self._process = None
             if self._log is not None:
                 try:

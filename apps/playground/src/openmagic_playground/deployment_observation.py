@@ -31,6 +31,7 @@ def observe_postgres(database_url: str) -> dict[str, object]:
         connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
         row = connection.execute(
             "SELECT current_setting('server_version'), "
+            "current_setting('default_transaction_isolation'), "
             "current_setting('transaction_isolation'), "
             "current_setting('synchronous_commit'), "
             "current_setting('TimeZone'), "
@@ -44,14 +45,15 @@ def observe_postgres(database_url: str) -> dict[str, object]:
     if row is None:
         raise RuntimeError("PostgreSQL did not return playground provenance")
     configuration = {
-        "max_connections": str(row[4]),
-        "synchronous_commit": str(row[2]),
-        "timezone": str(row[3]),
-        "transaction_isolation": str(row[1]),
+        "default_transaction_isolation": str(row[1]),
+        "max_connections": str(row[5]),
+        "observer_transaction_isolation": str(row[2]),
+        "synchronous_commit": str(row[3]),
+        "timezone": str(row[4]),
     }
     return {
         "deployment_id": "sha256:"
-        + content_fingerprint({"database": str(row[5]), "system_identifier": str(row[6])}),
+        + content_fingerprint({"database": str(row[6]), "system_identifier": str(row[7])}),
         "postgres_version": str(row[0]),
         "postgres_image": POSTGRES_IMAGE,
         "postgres_configuration": configuration,

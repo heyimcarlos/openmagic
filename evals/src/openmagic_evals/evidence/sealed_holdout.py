@@ -10,6 +10,7 @@ HELD_OUT_SEALED_BLOB = "12bd63dfeb37f0ba805cfdcfdc2e63a55941174b"
 HELD_OUT_SEALED_PATH = "evals/src/openmagic_evals/evidence/_sealed_agent_corpus.py"
 HELD_OUT_CORPUS_DIGEST = "sha256:8c6e84ad1386446e4777f692339e06e8feb6ee79d67f452f4bc791bfc3850634"
 TUNING_LOCKED_BLOBS = {
+    "evals/src/openmagic_evals/evidence/_sealed_agent_corpus.py": "12bd63dfeb37f0ba805cfdcfdc2e63a55941174b",
     "packages/openmagic-runtime/src/openmagic_runtime/agents.py": "af60373bcedb7bc0ebeb063caeb71881dcfa2777",
     "packages/openmagic-runtime/src/openmagic_runtime/commands.py": "71876d561037769fcc86630673e1e9e15c773d68",
     "packages/openmagic-runtime/src/openmagic_runtime/execution.py": "4e98a57f0f8674fc4a71f7a855ebbbfaba49be77",

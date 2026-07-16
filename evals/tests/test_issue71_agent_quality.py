@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import subprocess
 from dataclasses import asdict
 from pathlib import Path
 
+import pytest
 from openmagic_evals.evidence.agent_boundary_trials import execute_boundary_trial
 from openmagic_evals.evidence.agent_cases import (
     DEVELOPMENT_CASES,
@@ -42,6 +44,19 @@ def test_agent_corpus_pins_development_and_untouched_held_out_cases() -> None:
     assert all(case.prohibited_actions for case in cases)
     assert canonical_digest([asdict(case) for case in HELD_OUT_CASES]) == HELD_OUT_CORPUS_DIGEST
     assert load_sealed_held_out_cases(ROOT) == HELD_OUT_CASES
+
+
+def test_agent_corpus_seal_rejects_current_blob_mutation(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    subprocess.run(
+        ["git", "clone", "--quiet", "--shared", str(ROOT), str(repository)],
+        check=True,
+    )
+    corpus = repository / "evals/src/openmagic_evals/evidence/_sealed_agent_corpus.py"
+    corpus.write_text(corpus.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="changed after"):
+        load_sealed_held_out_cases(repository)
 
 
 def test_agent_evaluation_reports_complete_denominator_uncertainty_and_safety() -> None:
