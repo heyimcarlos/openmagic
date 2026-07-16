@@ -27,6 +27,7 @@ from openmagic_evals.evidence.contracts import (
     ReproducibilityPin,
     SanitizedAgentEvent,
     canonical_artifact_json,
+    deterministic_observation_digest,
     parse_artifact,
 )
 from openmagic_evals.evidence.redaction import RedactionViolation, audit_redaction
@@ -50,6 +51,21 @@ def _pin() -> ReproducibilityPin:
                 "openmagic-evals": "sha256:" + "2" * 64,
                 "openmagic-runtime": "sha256:" + "3" * 64,
             },
+            source_distribution_digests={
+                "example-insurance": "sha256:" + "0" * 64,
+                "openmagic-api": "sha256:" + "1" * 64,
+                "openmagic-evals": "sha256:" + "2" * 64,
+                "openmagic-runtime": "sha256:" + "3" * 64,
+            },
+            installation_kinds=cast(
+                dict[str, Literal["wheel", "editable"]],
+                {
+                    "example-insurance": "wheel",
+                    "openmagic-api": "wheel",
+                    "openmagic-evals": "wheel",
+                    "openmagic-runtime": "wheel",
+                },
+            ),
         ),
         suite_version="issue-71.v1",
         command=("uv", "run", "openmagic-evidence", "deterministic"),
@@ -81,6 +97,14 @@ def _case(case_id: str = "command.exact_replay") -> ArtifactCase:
             json.dumps(observation, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
     )
+    scenarios = (
+        DeterministicScenarioEvidence(
+            scenario_id=case_id,
+            correlations=correlations,
+            observation=observation,
+            observation_digest=observation_digest,
+        ),
+    )
     return ArtifactCase(
         case_id=case_id,
         case_schema_version=1,
@@ -88,15 +112,9 @@ def _case(case_id: str = "command.exact_replay") -> ArtifactCase:
         observed_trials=1,
         seeds=(0,),
         correlations=correlations,
-        observation_digests=("sha256:" + "d" * 64,),
-        scenarios=(
-            DeterministicScenarioEvidence(
-                scenario_id=case_id,
-                correlations=correlations,
-                observation=observation,
-                observation_digest=observation_digest,
-            ),
-        ),
+        observation_digests=(deterministic_observation_digest(scenarios, {}),),
+        scenarios=scenarios,
+        test_results={},
         verdict=CaseVerdict(status="passed", invariant_violations=()),
     )
 
@@ -208,6 +226,7 @@ def test_artifacts_reject_incomplete_denominators_and_lane_substitution() -> Non
             correlations=Correlations(),
             observation_digests=("sha256:" + "e" * 64,) * 4,
             scenarios=_case().scenarios,
+            test_results={},
             verdict=CaseVerdict(status="passed", invariant_violations=()),
         )
 
@@ -250,6 +269,7 @@ def test_race_trial_requires_cardinality_one_and_durable_correlations() -> None:
             constraint_rows=2,
             correlations=Correlations(command_ids=("018f2f00-0000-7000-8000-000000000001",)),
             observation_digest="sha256:" + "1" * 64,
+            observation={"seed": 0},
             contender_process_ids=(101, 102),
             overlap_barrier_observed=True,
         )
@@ -262,6 +282,7 @@ def test_race_trial_requires_cardinality_one_and_durable_correlations() -> None:
             constraint_rows=1,
             correlations=Correlations(),
             observation_digest="sha256:" + "1" * 64,
+            observation={"seed": 0},
             contender_process_ids=(101, 102),
             overlap_barrier_observed=True,
         )
@@ -333,7 +354,7 @@ def test_process_metrics_require_independent_roles_losses_and_drained_queues() -
             maximum=10,
         ),
         recovery_time_ms=DistributionSummary(
-            count=1,
+            count=2,
             mean=20,
             median=20,
             sample_standard_deviation=0,

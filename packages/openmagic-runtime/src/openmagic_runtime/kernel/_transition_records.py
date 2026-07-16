@@ -10,7 +10,12 @@ from uuid import UUID
 from psycopg import Connection
 from psycopg.rows import dict_row
 
-from openmagic_runtime.kernel._records import AttemptState, StepState, attempt_state, step_state
+from openmagic_runtime.kernel.inspection_types import (
+    AttemptState,
+    StepState,
+    attempt_state,
+    step_state,
+)
 
 
 @dataclass(frozen=True)

@@ -19,6 +19,7 @@ from openmagic_evals.evidence.contracts import (
     DeterministicScenarioEvidence,
     LiveProviderPin,
     LiveSmokeArtifact,
+    deterministic_observation_digest,
 )
 from openmagic_evals.evidence.deadline import bounded_evidence
 from openmagic_evals.evidence.reproducibility import reproducibility_pin
@@ -158,6 +159,14 @@ def run_live_smoke(
     finished_at = datetime.now(UTC)
     status = "passed" if available else "unavailable" if not attempted else "infrastructure_error"
     correlations = Correlations(provider_request_ids=provider_request_ids)
+    scenarios = (
+        DeterministicScenarioEvidence(
+            scenario_id=synthetic_case_id,
+            correlations=correlations,
+            observation=observation,
+            observation_digest=_document_digest(observation),
+        ),
+    )
     artifact = LiveSmokeArtifact(
         reproducibility=reproducibility_pin(
             repository_root.resolve(),
@@ -183,15 +192,9 @@ def run_live_smoke(
                 observed_trials=1,
                 seeds=(0,),
                 correlations=correlations,
-                observation_digests=(_document_digest(observation),),
-                scenarios=(
-                    DeterministicScenarioEvidence(
-                        scenario_id=synthetic_case_id,
-                        correlations=correlations,
-                        observation=observation,
-                        observation_digest=_document_digest(observation),
-                    ),
-                ),
+                observation_digests=(deterministic_observation_digest(scenarios, {}),),
+                scenarios=scenarios,
+                test_results={},
                 verdict=CaseVerdict(status=status, invariant_violations=()),
             ),
         ),

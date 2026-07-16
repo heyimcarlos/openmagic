@@ -25,6 +25,7 @@ from openmagic_evals.evidence.race_models import (
     RaceSeedResult,
     jitter_pair,
     race_digest,
+    race_observation,
 )
 from openmagic_evals.evidence.race_processes import run_process_contenders
 from openmagic_evals.evidence.race_transitions import run_transition_races
@@ -66,6 +67,14 @@ def run_command_receipt_races(
         count = inspection.command_receipts(command.command_id)
         if count != 1:
             raise AssertionError(f"Command receipt constraint disagreed for seed {seed}")
+        observation = race_observation(
+            {
+                "seed": seed,
+                "same_receipt": True,
+                "constraint_rows": count,
+                "command_id": str(command.command_id),
+            }
+        )
         results.append(
             RaceSeedResult(
                 seed=seed,
@@ -78,14 +87,8 @@ def run_command_receipt_races(
                     instance_ids=(receipt.result.instance_id,),
                     process_ids=contenders.process_ids,
                 ),
-                observation_digest=race_digest(
-                    {
-                        "seed": seed,
-                        "same_receipt": True,
-                        "constraint_rows": count,
-                        "command_id": str(command.command_id),
-                    }
-                ),
+                observation=observation,
+                observation_digest=race_digest(observation),
                 contender_process_ids=contenders.process_ids,
                 overlap_barrier_observed=contenders.overlap_barrier_observed,
             )
@@ -156,6 +159,14 @@ def run_verification_submission_races(
         count = inspection.verification_sessions(challenge_id)
         if count != 1:
             raise AssertionError(f"Verification session constraint disagreed for seed {seed}")
+        observation = race_observation(
+            {
+                "seed": seed,
+                "outcomes": outcomes,
+                "constraint_rows": count,
+                "challenge_id": str(challenge_id),
+            }
+        )
         results.append(
             RaceSeedResult(
                 seed=seed,
@@ -173,14 +184,8 @@ def run_verification_submission_races(
                     ),
                     process_ids=contenders.process_ids,
                 ),
-                observation_digest=race_digest(
-                    {
-                        "seed": seed,
-                        "outcomes": outcomes,
-                        "constraint_rows": count,
-                        "challenge_id": str(challenge_id),
-                    }
-                ),
+                observation=observation,
+                observation_digest=race_digest(observation),
                 contender_process_ids=contenders.process_ids,
                 overlap_barrier_observed=contenders.overlap_barrier_observed,
             )

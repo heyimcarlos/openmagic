@@ -18,16 +18,23 @@ from openmagic_evals.evidence.contracts import (
     ArtifactCase,
     BuildPin,
     CaseVerdict,
+    ColdSchemaEvidence,
     Correlations,
     DeterministicArtifact,
     DeterministicScenarioEvidence,
     DeterministicSummary,
     DistributionSummary,
+    InstalledSurfaceEvidence,
     RaceCase,
     RaceTrialEvidence,
+    RepositorySurfaceEvidence,
     ReproducibilityPin,
     SanitizedAgentEvent,
+    SurfaceAuditArtifact,
+    SurfaceAuditSummary,
     canonical_artifact_json,
+    canonical_digest,
+    deterministic_observation_digest,
 )
 from openmagic_evals.evidence.matrix import DETERMINISTIC_RELEASE_MATRIX, cardinality_one_races
 
@@ -40,6 +47,10 @@ def _pin(git_sha: str) -> ReproducibilityPin:
             lock_digest="sha256:" + "1" * 64,
             distributions={"openmagic-evals": "0.1.0"},
             distribution_digests={"openmagic-evals": "sha256:" + "0" * 64},
+            source_distribution_digests={"openmagic-evals": "sha256:" + "0" * 64},
+            installation_kinds=cast(
+                dict[str, Literal["wheel", "editable"]], {"openmagic-evals": "wheel"}
+            ),
         ),
         suite_version="issue-71.v1",
         command=("openmagic-evidence", "test"),
@@ -98,6 +109,14 @@ def _case(
                 json.dumps(observation, sort_keys=True, separators=(",", ":")).encode()
             ).hexdigest()
         )
+        scenarios = (
+            DeterministicScenarioEvidence(
+                scenario_id=case_id,
+                correlations=correlations,
+                observation=observation,
+                observation_digest=scenario_digest,
+            ),
+        )
         return ArtifactCase(
             case_id=case_id,
             case_schema_version=1,
@@ -105,15 +124,9 @@ def _case(
             observed_trials=1,
             seeds=(0,),
             correlations=correlations,
-            observation_digests=("sha256:" + "7" * 64,),
-            scenarios=(
-                DeterministicScenarioEvidence(
-                    scenario_id=case_id,
-                    correlations=correlations,
-                    observation=observation,
-                    observation_digest=scenario_digest,
-                ),
-            ),
+            observation_digests=(deterministic_observation_digest(scenarios, {}),),
+            scenarios=scenarios,
+            test_results={},
             verdict=CaseVerdict(status="passed", invariant_violations=()),
         )
     return AgentCaseEvidence(
@@ -156,7 +169,8 @@ def _race_case(case_id: str) -> RaceCase:
             public_outcomes=contract.expected_public_outcomes,
             constraint_rows=1,
             correlations=correlations,
-            observation_digest="sha256:" + f"{seed:064x}",
+            observation_digest=canonical_digest({"seed": seed}),
+            observation={"seed": seed},
             contender_process_ids=(1000 + seed * 2, 1001 + seed * 2),
             overlap_barrier_observed=True,
         )
@@ -238,14 +252,50 @@ def test_claim_report_rejects_artifacts_from_different_builds(tmp_path: Path) ->
         ),
         limitations=("test",),
     )
+    surface = SurfaceAuditArtifact(
+        reproducibility=_pin("1" * 40),
+        repository=RepositorySurfaceEvidence(
+            audited_distributions=("openmagic-runtime",),
+            production_dependency_edges=(),
+            private_persistence_packages=("openmagic_runtime._persistence",),
+            violations=(),
+            passed=True,
+        ),
+        installed=InstalledSurfaceEvidence(
+            distributions={"openmagic-runtime": "0.1.0"},
+            production_dependency_edges=(),
+            private_persistence_packages=("openmagic_runtime._persistence",),
+            audited_files=1,
+            violations=(),
+            passed=True,
+        ),
+        cold_schema=ColdSchemaEvidence(
+            schemas=("openmagic_runtime", "public"),
+            tables={"openmagic_runtime": ("migration_history",), "public": ()},
+            migration_heads={"openmagic_runtime": "0003"},
+            legacy_relations=(),
+            violations=(),
+            passed=True,
+        ),
+        summary=SurfaceAuditSummary(
+            repository_passed=True,
+            installed_surface_passed=True,
+            cold_schema_passed=True,
+            strict_pass=True,
+        ),
+        limitations=("test",),
+    )
     deterministic_path = tmp_path / "deterministic.json"
     agent_path = tmp_path / "agent.json"
+    surface_path = tmp_path / "surface.json"
     deterministic_path.write_text(canonical_artifact_json(deterministic), encoding="utf-8")
     agent_path.write_text(canonical_artifact_json(agent), encoding="utf-8")
+    surface_path.write_text(canonical_artifact_json(surface), encoding="utf-8")
 
     with pytest.raises(ValueError, match="reproducibility pin"):
         write_claim_report(
             deterministic_path=deterministic_path,
+            surface_path=surface_path,
             agent_path=agent_path,
             output=tmp_path / "claims.md",
         )

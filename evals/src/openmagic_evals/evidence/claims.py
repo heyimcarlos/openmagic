@@ -15,12 +15,14 @@ from openmagic_evals.evidence.contracts import (
     ProcessArtifact,
     RaceArtifact,
     RaceCase,
+    SurfaceAuditArtifact,
     parse_artifact,
 )
 from openmagic_evals.evidence.matrix import DETERMINISTIC_RELEASE_MATRIX, cardinality_one_races
 
 _SUPPORTED_CLAIMS = (
     "The tested single-PostgreSQL kernel preserved the pinned Definition, transaction, replay, race, lease, recovery, and retry contracts.",
+    "The pinned source, installed wheel module and export surfaces, and cold schemas matched their exact allowlists.",
     "Deterministic and Agent Executors used the same tested Step and Attempt interface.",
     "Application Policy retained authority, completion, retry-safety, and External Effect decisions in the tested cases.",
     "The tested Domain Event and Delivery path recovered to at most one Message in one exact Thread.",
@@ -88,6 +90,7 @@ def _validate_release_matrix(artifact: DeterministicArtifact) -> None:
 def write_claim_report(
     *,
     deterministic_path: Path,
+    surface_path: Path,
     output: Path,
     agent_path: Path | None = None,
     live_path: Path | None = None,
@@ -106,6 +109,10 @@ def write_claim_report(
     related: list[tuple[str, Path, Artifact]] = [
         ("deterministic", deterministic_path, deterministic)
     ]
+    surface = parse_artifact(surface_path.read_bytes())
+    if not isinstance(surface, SurfaceAuditArtifact) or not surface.summary.strict_pass:
+        raise TypeError("claim report requires a passing surface and cold-schema artifact")
+    related.append(("surface-audit", surface_path, surface))
     if agent_path is not None:
         agent = parse_artifact(agent_path.read_bytes())
         if not isinstance(agent, AgentQualityArtifact):
@@ -151,6 +158,12 @@ def write_claim_report(
     expected_pin = _common_reproducibility_pin(deterministic)
     if any(_common_reproducibility_pin(artifact) != expected_pin for _, _, artifact in related):
         raise ValueError("claim report artifacts do not share one reproducibility pin")
+    if any(
+        installation_kind != "wheel"
+        for _, _, artifact in related
+        for installation_kind in artifact.reproducibility.build.installation_kinds.values()
+    ):
+        raise ValueError("claim report requires every evidence product from clean wheel installs")
 
     lines = [
         "# OpenMagic tested claim report",

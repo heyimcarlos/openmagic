@@ -1,14 +1,12 @@
-"""Destructive reset restricted to explicitly named synthetic databases."""
+"""Private destructive reset for explicitly marked synthetic databases."""
 
 from __future__ import annotations
 
-import argparse
 from dataclasses import dataclass
 
 import psycopg
+from example_insurance.migrations import apply_migrations
 from psycopg import Connection, sql
-
-from example_insurance.migrations import _apply_migrations
 
 
 class ResetPreflightBlocked(RuntimeError):
@@ -22,6 +20,7 @@ class ResetAssessment:
 
 
 _SYNTHETIC_DATABASE_PREFIXES = ("openmagic_playground_", "openmagic_test_")
+_SYNTHETIC_MARKER = "openmagic:synthetic:issue-71.v1"
 _OWNED_SCHEMAS = ("example_insurance", "openmagic_runtime")
 
 
@@ -49,27 +48,30 @@ def _public_tables(connection: Connection[tuple[object, ...]]) -> tuple[str, ...
     return tuple(str(row[0]) for row in rows)
 
 
+def _database_marker(connection: Connection[tuple[object, ...]]) -> str | None:
+    row = connection.execute(
+        "SELECT description FROM pg_shdescription AS d "
+        "JOIN pg_database AS db ON db.oid = d.objoid "
+        "WHERE db.datname = current_database() AND d.classoid = 'pg_database'::regclass"
+    ).fetchone()
+    return str(row[0]) if row is not None else None
+
+
 def _assess_connection(connection: Connection[tuple[object, ...]]) -> ResetAssessment:
     conditions: list[str] = []
     database = _database_name(connection)
     if not database.startswith(_SYNTHETIC_DATABASE_PREFIXES):
         conditions.append("database name is not explicitly synthetic")
-    unknown_schemas = set(_user_schemas(connection)).difference(_OWNED_SCHEMAS)
-    if unknown_schemas:
+    if set(_user_schemas(connection)).difference(_OWNED_SCHEMAS):
         conditions.append("database contains an unowned schema")
     if _public_tables(connection):
         conditions.append("public schema contains application tables")
-    purpose = connection.execute(
-        "SELECT deployment_purpose FROM example_insurance.deployment_metadata WHERE singleton"
-    ).fetchone()
-    if purpose != ("synthetic",):
+    if _database_marker(connection) != _SYNTHETIC_MARKER:
         conditions.append("deployment is not durably marked synthetic")
     return ResetAssessment(accepted=not conditions, blocking_conditions=tuple(conditions))
 
 
 def assess_reset(database_url: str) -> ResetAssessment:
-    """Confirm that reset is limited to the named synthetic deployment shape."""
-
     with psycopg.connect(database_url) as connection, connection.transaction():
         connection.execute("SET TRANSACTION READ ONLY")
         return _assess_connection(connection)
@@ -88,12 +90,13 @@ def mark_synthetic_deployment(database_url: str) -> None:
     """Mark one empty, explicitly named deployment as synthetic and resettable."""
 
     with psycopg.connect(database_url) as connection, connection.transaction():
-        if not _database_name(connection).startswith(_SYNTHETIC_DATABASE_PREFIXES):
+        database = _database_name(connection)
+        if not database.startswith(_SYNTHETIC_DATABASE_PREFIXES):
             raise ResetPreflightBlocked("database name is not explicitly synthetic")
         tables = tuple(
             (schema, table)
             for schema, table in _owned_tables(connection)
-            if table not in {"deployment_metadata", "migration_history"}
+            if table != "migration_history"
         )
         for schema, table in tables:
             row = connection.execute(
@@ -104,8 +107,9 @@ def mark_synthetic_deployment(database_url: str) -> None:
             if row is not None:
                 raise ResetPreflightBlocked("synthetic marker requires an empty deployment")
         connection.execute(
-            "UPDATE example_insurance.deployment_metadata "
-            "SET deployment_purpose = 'synthetic' WHERE singleton"
+            sql.SQL("COMMENT ON DATABASE {} IS {}").format(
+                sql.Identifier(database), sql.Literal(_SYNTHETIC_MARKER)
+            )
         )
 
 
@@ -126,28 +130,13 @@ def reset_synthetic_deployment(database_url: str) -> None:
             connection.execute(sql.SQL("LOCK TABLE {} IN ACCESS EXCLUSIVE MODE").format(targets))
         connection.execute("DROP SCHEMA IF EXISTS example_insurance CASCADE")
         connection.execute("DROP SCHEMA IF EXISTS openmagic_runtime CASCADE")
-        _apply_migrations(connection)
-        connection.execute(
-            "UPDATE example_insurance.deployment_metadata "
-            "SET deployment_purpose = 'synthetic' WHERE singleton"
-        )
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(prog="example-insurance-reset")
-    parser.add_argument("--database-url", required=True)
-    parser.add_argument("--accept-destructive-reset", action="store_true")
-    arguments = parser.parse_args()
-    if not arguments.accept_destructive_reset:
-        parser.error("--accept-destructive-reset is required")
-    reset_synthetic_deployment(arguments.database_url)
+    apply_migrations(database_url)
 
 
 __all__ = [
     "ResetAssessment",
     "ResetPreflightBlocked",
     "assess_reset",
-    "main",
     "mark_synthetic_deployment",
     "reset_synthetic_deployment",
 ]

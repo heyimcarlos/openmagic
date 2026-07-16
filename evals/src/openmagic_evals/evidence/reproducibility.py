@@ -9,6 +9,7 @@ from datetime import datetime
 from importlib.metadata import distribution, version
 from importlib.util import find_spec
 from pathlib import Path
+from typing import Literal
 
 import psycopg
 from example_insurance.migrations import apply_migrations
@@ -32,6 +33,12 @@ _DISTRIBUTION_PACKAGES = {
     "openmagic-evals": "openmagic_evals",
     "openmagic-runtime": "openmagic_runtime",
 }
+_DISTRIBUTION_SOURCE_ROOTS = {
+    "example-insurance": Path("reference-apps/example-insurance/src/example_insurance"),
+    "openmagic-api": Path("apps/api/src/openmagic_api"),
+    "openmagic-evals": Path("evals/src/openmagic_evals"),
+    "openmagic-runtime": Path("packages/openmagic-runtime/src/openmagic_runtime"),
+}
 
 
 def sha256(value: bytes) -> str:
@@ -45,27 +52,8 @@ def _git(root: Path, *arguments: str) -> str:
     return completed.stdout.strip()
 
 
-def _distribution_digest(name: str) -> str:
-    item = distribution(name)
+def _package_digest(package_root: Path) -> str:
     content = hashlib.sha256()
-    for file in sorted(item.files or (), key=str):
-        relative = Path(str(file))
-        is_selected_metadata = any(
-            part.endswith(".dist-info") for part in relative.parts
-        ) and relative.name in {"METADATA", "WHEEL", "entry_points.txt", "top_level.txt"}
-        if not is_selected_metadata:
-            continue
-        path = Path(str(item.locate_file(file)))
-        if path.is_file():
-            content.update(relative.as_posix().encode())
-            content.update(b"\0")
-            content.update(path.read_bytes())
-            content.update(b"\0")
-    package_name = _DISTRIBUTION_PACKAGES[name]
-    package_spec = find_spec(package_name)
-    if package_spec is None or package_spec.origin is None:
-        raise RuntimeError(f"installed distribution package is unavailable: {package_name}")
-    package_root = Path(package_spec.origin).parent
     for path in sorted(package_root.rglob("*")):
         if not path.is_file() or any(
             part == "__pycache__" or part.startswith(".") for part in path.parts
@@ -79,14 +67,44 @@ def _distribution_digest(name: str) -> str:
     return "sha256:" + content.hexdigest()
 
 
+def _distribution_digest(name: str) -> str:
+    package_name = _DISTRIBUTION_PACKAGES[name]
+    package_spec = find_spec(package_name)
+    if package_spec is None or package_spec.origin is None:
+        raise RuntimeError(f"installed distribution package is unavailable: {package_name}")
+    return _package_digest(Path(package_spec.origin).parent)
+
+
+def _installation_kind(name: str) -> Literal["wheel", "editable"]:
+    item = distribution(name)
+    direct_url = next(
+        (
+            Path(str(item.locate_file(file)))
+            for file in (item.files or ())
+            if Path(str(file)).name == "direct_url.json"
+        ),
+        None,
+    )
+    if direct_url is None or not direct_url.is_file():
+        return "wheel"
+    document = json.loads(direct_url.read_text(encoding="utf-8"))
+    return "editable" if document.get("dir_info", {}).get("editable") is True else "wheel"
+
+
 def build_pin(root: Path) -> BuildPin:
     status = _git(root, "status", "--porcelain", "--untracked-files=normal")
+    installed_digests = {name: _distribution_digest(name) for name in _DISTRIBUTIONS}
     return BuildPin(
         git_sha=_git(root, "rev-parse", "HEAD"),
         checkout_clean=not status,
         lock_digest=sha256((root / "uv.lock").read_bytes()),
         distributions={name: version(name) for name in _DISTRIBUTIONS},
-        distribution_digests={name: _distribution_digest(name) for name in _DISTRIBUTIONS},
+        distribution_digests=installed_digests,
+        source_distribution_digests={
+            name: _package_digest(root / _DISTRIBUTION_SOURCE_ROOTS[name])
+            for name in _DISTRIBUTIONS
+        },
+        installation_kinds={name: _installation_kind(name) for name in _DISTRIBUTIONS},
     )
 
 

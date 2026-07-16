@@ -47,33 +47,43 @@ database URL, host, and port as explicit arguments.
 
 ## Enterprise evidence
 
-The private eval distribution owns four separate evidence products. Only the
+The private eval distribution owns five separate evidence products. Only the
 deterministic product can pass or fail the release gate.
 
 ```text
 deterministic correctness -> strict release verdict
+installable surface        -> source, wheel, and cold-schema closure
 Agent quality             -> measured development and held-out outcomes
 provider availability     -> opt-in live smoke
 playground behavior       -> synthetic demonstration only
 ```
 
-Generate the versioned JSON schema and the complete deterministic package from
-a clean checkout:
+Build all four distributions as wheels, install them into an isolated environment,
+then generate the complete package from that exact clean checkout:
 
 ```bash
 mkdir -p .artifacts/issue71
-uv run openmagic-evidence schema --output .artifacts/issue71/schema.json
-uv run openmagic-evidence audit-surface --repository-root .
+mkdir -p .artifacts/issue71/wheels
+uv build --all-packages --wheel --out-dir .artifacts/issue71/wheels
+uv venv --python 3.13 .artifacts/issue71/evidence-env
+uv pip install --python .artifacts/issue71/evidence-env/bin/python \
+  .artifacts/issue71/wheels/*.whl pytest pytest-timeout
+EVIDENCE=.artifacts/issue71/evidence-env/bin/openmagic-evidence
+$EVIDENCE schema --output .artifacts/issue71/schema.json
+$EVIDENCE audit-surface \
+  --repository-root . \
+  --output .artifacts/issue71/surface-audit.json \
+  --timeout-seconds 120
 uv run pytest evals/tests/test_foundation_wheels.py
-uv run openmagic-evidence deterministic \
+$EVIDENCE deterministic \
   --repository-root . \
   --output .artifacts/issue71/deterministic-release.json \
   --timeout-seconds 1800
-uv run openmagic-evidence races \
+$EVIDENCE races \
   --repository-root . \
   --output .artifacts/issue71/races.json \
   --timeout-seconds 900
-uv run openmagic-evidence processes \
+$EVIDENCE processes \
   --repository-root . \
   --working-directory .artifacts/issue71/processes \
   --output .artifacts/issue71/processes.json \
@@ -83,16 +93,16 @@ uv run openmagic-evidence processes \
 Generate the other evidence products and final claim report:
 
 ```bash
-uv run openmagic-evidence agent-quality \
+$EVIDENCE agent-quality \
   --repository-root . \
   --output .artifacts/issue71/agent-quality.json \
   --timeout-seconds 300
-uv run openmagic-evidence playground \
+$EVIDENCE playground \
   --repository-root . \
   --working-directory .artifacts/issue71/playground \
   --output .artifacts/issue71/playground.json \
   --timeout-seconds 120
-uv run openmagic-evidence live-smoke \
+$EVIDENCE live-smoke \
   --repository-root . \
   --provider openai-responses \
   --model unavailable \
@@ -110,15 +120,16 @@ are never included in commands, logs, or artifacts.
 The public synthetic demonstrations use a fresh database and local provider:
 
 ```bash
-uv run openmagic-evidence demo-renewal \
+$EVIDENCE demo-renewal \
   --repository-root . \
   --working-directory .artifacts/issue71/renewal-demo \
   --output .artifacts/issue71/renewal-demo.json
-uv run openmagic-evidence demo-verification \
+$EVIDENCE demo-verification \
   --repository-root . \
   --output .artifacts/issue71/verification-demo.json
-uv run openmagic-evidence claim-report \
+$EVIDENCE claim-report \
   --deterministic .artifacts/issue71/deterministic-release.json \
+  --surface-audit .artifacts/issue71/surface-audit.json \
   --agent-quality .artifacts/issue71/agent-quality.json \
   --live-smoke .artifacts/issue71/live-smoke.json \
   --playground .artifacts/issue71/playground.json \

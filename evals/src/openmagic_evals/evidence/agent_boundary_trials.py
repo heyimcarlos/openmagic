@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import time
 from dataclasses import dataclass
@@ -24,6 +25,7 @@ from openmagic_runtime.execution import AttemptExecution, CancellationToken, Fre
 from openmagic_runtime.threads import CreateThread
 
 from openmagic_evals.evidence.agent_cases import (
+    BOUNDARY_AGENT_KEY,
     BoundaryAgentCase,
     validate_prohibited_contract,
 )
@@ -31,6 +33,9 @@ from openmagic_evals.evidence.agent_trials import AgentTrial
 from openmagic_evals.evidence.contracts import Correlations, SanitizedAgentEvent
 from openmagic_evals.evidence.inspection import EvidenceInspection
 from openmagic_evals.harness.renewal_scenario import renewal_context
+
+_BOUNDARY_INSTRUCTION_KEY = "openmagic.executor_boundary.contract.v1"
+_BOUNDARY_TIMEOUT_SECONDS = 1
 
 
 @dataclass(frozen=True)
@@ -48,6 +53,19 @@ def _slow_factory():
         return _BoundaryCandidate("late-candidate")
 
     return run
+
+
+def boundary_configuration_document() -> dict[str, object]:
+    return {
+        "agent_key": BOUNDARY_AGENT_KEY,
+        "agent_version": 1,
+        "instruction_key": _BOUNDARY_INSTRUCTION_KEY,
+        "malformed_factory_source": inspect.getsource(_malformed_factory),
+        "slow_factory_source": inspect.getsource(_slow_factory),
+        "result_contract_source": inspect.getsource(_BoundaryCandidate),
+        "executor_source": inspect.getsource(FreshAgentExecutor),
+        "timeout_seconds": _BOUNDARY_TIMEOUT_SECONDS,
+    }
 
 
 def _digest(value: object) -> str:
@@ -94,9 +112,9 @@ def execute_boundary_trial(case: BoundaryAgentCase, seed: int) -> AgentTrial:
             raise AssertionError("Agent boundary case did not claim its durable Agent Attempt")
         run_input = AgentRunInput(
             configuration=AgentConfiguration(
-                "example_insurance.renewal_draft",
+                BOUNDARY_AGENT_KEY,
                 1,
-                "example_insurance.renewal_draft.en_ca.v1",
+                _BOUNDARY_INSTRUCTION_KEY,
             ),
             task=AgentTask(
                 "renewal.draft",
@@ -130,7 +148,7 @@ def execute_boundary_trial(case: BoundaryAgentCase, seed: int) -> AgentTrial:
             _malformed_factory if case.boundary == "malformed_result" else _slow_factory,
             result_class=_BoundaryCandidate,
             encoder=lambda candidate: {"value": candidate.value},
-            timeout_seconds=1,
+            timeout_seconds=_BOUNDARY_TIMEOUT_SECONDS,
         )
         started = time.monotonic()
         error_class = ""
@@ -248,4 +266,4 @@ def execute_boundary_trial(case: BoundaryAgentCase, seed: int) -> AgentTrial:
         )
 
 
-__all__ = ["execute_boundary_trial"]
+__all__ = ["boundary_configuration_document", "execute_boundary_trial"]

@@ -34,6 +34,7 @@ from openmagic_evals.evidence.race_models import (
     RaceSeedResult,
     jitter_pair,
     race_digest,
+    race_observation,
 )
 from openmagic_evals.evidence.race_processes import ProcessRaceResult, run_process_contenders
 
@@ -276,13 +277,15 @@ def _signal_trial(
     constraint_rows = inspection.accepted_signals(wait_id)
     if public.count("accepted") != 1 or constraint_rows != 1:
         raise AssertionError(f"Signal constraint disagreed for seed {seed}")
-    document = {
-        "seed": seed,
-        "jitter_microseconds": jitters,
-        "public_outcomes": public,
-        "constraint_rows": constraint_rows,
-        "signal_id": winner.signal_id,
-    }
+    document = race_observation(
+        {
+            "seed": seed,
+            "jitter_microseconds": jitters,
+            "public_outcomes": public,
+            "constraint_rows": constraint_rows,
+            "signal_id": str(winner.signal_id),
+        }
+    )
     return RaceSeedResult(
         seed=seed,
         jitter_microseconds=jitters,
@@ -296,6 +299,7 @@ def _signal_trial(
             trace_event_ids=(started.trace_event_id, winner.trace_event_id),
             process_ids=contenders.process_ids,
         ),
+        observation=document,
         observation_digest=race_digest(document),
         contender_process_ids=contenders.process_ids,
         overlap_barrier_observed=contenders.overlap_barrier_observed,
@@ -344,13 +348,15 @@ def _attempt_and_route_trial(
     attempt_count = inspection.completed_attempts(claim.attempt_id)
     if sorted(attempt_public) != ["accepted", "replayed"] or attempt_count != 1:
         raise AssertionError(f"Attempt-result constraint disagreed for seed {seed}")
-    attempt_document = {
-        "seed": seed,
-        "jitter_microseconds": attempt_jitters,
-        "public_outcomes": attempt_public,
-        "constraint_rows": attempt_count,
-        "attempt_id": claim.attempt_id,
-    }
+    attempt_document = race_observation(
+        {
+            "seed": seed,
+            "jitter_microseconds": attempt_jitters,
+            "public_outcomes": attempt_public,
+            "constraint_rows": attempt_count,
+            "attempt_id": str(claim.attempt_id),
+        }
+    )
     attempt_result = RaceSeedResult(
         seed=seed,
         jitter_microseconds=attempt_jitters,
@@ -364,6 +370,7 @@ def _attempt_and_route_trial(
             worker_ids=(f"attempt-result-{seed}",),
             process_ids=attempt_contenders.process_ids,
         ),
+        observation=attempt_document,
         observation_digest=race_digest(attempt_document),
         contender_process_ids=attempt_contenders.process_ids,
         overlap_barrier_observed=attempt_contenders.overlap_barrier_observed,
@@ -421,13 +428,15 @@ def _attempt_and_route_trial(
     ):
         raise AssertionError(f"Route activation constraint disagreed for seed {seed}")
     finish_step_ids = tuple(route_outcomes[0][0].values())
-    route_document = {
-        "seed": seed,
-        "jitter_microseconds": route_jitters,
-        "public_outcomes": route_public,
-        "constraint_rows": route_count,
-        "step_ids": finish_step_ids,
-    }
+    route_document = race_observation(
+        {
+            "seed": seed,
+            "jitter_microseconds": route_jitters,
+            "public_outcomes": route_public,
+            "constraint_rows": route_count,
+            "step_ids": [str(step_id) for step_id in finish_step_ids],
+        }
+    )
     route_result = RaceSeedResult(
         seed=seed,
         jitter_microseconds=route_jitters,
@@ -439,6 +448,7 @@ def _attempt_and_route_trial(
             attempt_ids=(route_claim.attempt_id,),
             process_ids=route_contenders.process_ids,
         ),
+        observation=route_document,
         observation_digest=race_digest(route_document),
         contender_process_ids=route_contenders.process_ids,
         overlap_barrier_observed=route_contenders.overlap_barrier_observed,

@@ -130,6 +130,11 @@ def test_built_wheels_install_and_boot_in_clean_environments(tmp_path) -> None:
         assert artifact["reproducibility"]["command"][0] == "openmagic-evidence"
         assert artifact["reproducibility"]["build"]["checkout_clean"] is True
         assert artifact["reproducibility"]["build"]["git_sha"] == source_sha
+        assert set(artifact["reproducibility"]["build"]["installation_kinds"].values()) == {"wheel"}
+        assert (
+            artifact["reproducibility"]["build"]["source_distribution_digests"]
+            == artifact["reproducibility"]["build"]["distribution_digests"]
+        )
         assert set(artifact["reproducibility"]["build"]["distribution_digests"]) == {
             package for package, _, _ in distributions
         }

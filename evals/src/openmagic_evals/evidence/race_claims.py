@@ -17,6 +17,7 @@ from openmagic_evals.evidence.race_models import (
     RaceSeedResult,
     jitter_pair,
     race_digest,
+    race_observation,
 )
 from openmagic_evals.evidence.race_processes import run_process_contenders
 from openmagic_evals.harness import prepare_synthetic_renewal_start
@@ -62,13 +63,15 @@ def run_claim_races(
         step_outcomes = tuple(
             "claimed" if item is not None else "not_claimed" for item in step_claims
         )
-        step_result = {
-            "seed": seed,
-            "jitter_microseconds": step_jitters,
-            "public_outcomes": step_outcomes,
-            "constraint_rows": step_count,
-            "attempt_id": step_winner.attempt_id,
-        }
+        step_result = race_observation(
+            {
+                "seed": seed,
+                "jitter_microseconds": step_jitters,
+                "public_outcomes": step_outcomes,
+                "constraint_rows": step_count,
+                "attempt_id": str(step_winner.attempt_id),
+            }
+        )
         step_results.append(
             RaceSeedResult(
                 seed=seed,
@@ -84,6 +87,7 @@ def run_claim_races(
                     worker_ids=step_workers,
                     process_ids=step_contenders.process_ids,
                 ),
+                observation=step_result,
                 observation_digest=race_digest(step_result),
                 contender_process_ids=step_contenders.process_ids,
                 overlap_barrier_observed=step_contenders.overlap_barrier_observed,
@@ -127,13 +131,15 @@ def run_claim_races(
         delivery_outcomes = tuple(
             "claimed" if item is not None else "not_claimed" for item in delivery_claims
         )
-        delivery_result = {
-            "seed": seed,
-            "jitter_microseconds": delivery_jitters,
-            "public_outcomes": delivery_outcomes,
-            "constraint_rows": delivery_count,
-            "delivery_attempt_id": delivery_winner.delivery_attempt_id,
-        }
+        delivery_result = race_observation(
+            {
+                "seed": seed,
+                "jitter_microseconds": delivery_jitters,
+                "public_outcomes": delivery_outcomes,
+                "constraint_rows": delivery_count,
+                "delivery_attempt_id": str(delivery_winner.delivery_attempt_id),
+            }
+        )
         delivery_results.append(
             RaceSeedResult(
                 seed=seed,
@@ -147,6 +153,7 @@ def run_claim_races(
                     worker_ids=delivery_workers,
                     process_ids=delivery_contenders.process_ids,
                 ),
+                observation=delivery_result,
                 observation_digest=race_digest(delivery_result),
                 contender_process_ids=delivery_contenders.process_ids,
                 overlap_barrier_observed=delivery_contenders.overlap_barrier_observed,

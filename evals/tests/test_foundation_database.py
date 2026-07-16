@@ -5,14 +5,14 @@ from uuid import uuid4
 import psycopg
 import pytest
 from example_insurance.migrations import apply_migrations
-from example_insurance.reset import (
+from openmagic_evals.evidence.audit import audit_cold_schema
+from openmagic_evals.harness._postgres import postgres_container
+from openmagic_evals.harness.synthetic_reset import (
     ResetPreflightBlocked,
     assess_reset,
     mark_synthetic_deployment,
     reset_synthetic_deployment,
 )
-from openmagic_evals.evidence.audit import audit_cold_schema
-from openmagic_evals.harness._postgres import postgres_container
 
 
 @pytest.mark.integration

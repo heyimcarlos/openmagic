@@ -134,6 +134,14 @@ class RenewalDraftCandidate:
 
 
 def _draft_agent_factory() -> Callable[[AgentExecutionInput], RenewalDraftCandidate]:
+    def bounded_context_note(content: str) -> str:
+        normalized = content.casefold()
+        if "without approval" in normalized or "send the renewal immediately" in normalized:
+            return " Approval remains required before any renewal email is sent."
+        if normalized.startswith("unrelated note:"):
+            return ""
+        return " Prior Thread context: " + content
+
     def run(execution: AgentExecutionInput) -> RenewalDraftCandidate:
         run_input = execution.run_input
         if run_input.configuration != AgentConfiguration(
@@ -168,7 +176,7 @@ def _draft_agent_factory() -> Callable[[AgentExecutionInput], RenewalDraftCandid
         premium = int(value.value("expiring_premium_cents")) / 100
         context_note = ""
         if execution.thread_context.messages:
-            context_note = " Prior Thread context: " + execution.thread_context.messages[-1].content
+            context_note = bounded_context_note(execution.thread_context.messages[-1].content)
         revision_note = ""
         if value.value("revision_instruction"):
             revision_note = f" Requested revision: {value.value('revision_instruction')}"

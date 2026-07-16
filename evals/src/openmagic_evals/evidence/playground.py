@@ -9,7 +9,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from example_insurance.renewals import ExampleInsurance
-from example_insurance.reset import reset_synthetic_deployment
 from openmagic_runtime.threads import ThreadStore
 
 from openmagic_evals.evidence.artifact_io import write_artifact
@@ -21,6 +20,7 @@ from openmagic_evals.evidence.contracts import (
     DeterministicScenarioEvidence,
     PlaygroundArtifact,
     PlaygroundSummary,
+    deterministic_observation_digest,
     merge_correlations,
 )
 from openmagic_evals.evidence.deadline import bounded_evidence
@@ -32,6 +32,7 @@ from openmagic_evals.harness import (
     prepare_renewal_approval,
     prepare_synthetic_renewal_start,
 )
+from openmagic_evals.harness.synthetic_reset import reset_synthetic_deployment
 
 
 def _digest(value: object) -> str:
@@ -185,6 +186,14 @@ def verify_playground(
         "provider_request_count": 0,
         "intentional_failure": failure_observation,
     }
+    scenarios = (
+        DeterministicScenarioEvidence(
+            scenario_id="synthetic-reset-and-process-control",
+            correlations=case_correlations,
+            observation=case_observation,
+            observation_digest=_digest(case_observation),
+        ),
+    )
     artifact = PlaygroundArtifact(
         reproducibility=reproducibility_pin(
             repository_root.resolve(),
@@ -202,15 +211,9 @@ def verify_playground(
                 observed_trials=1,
                 seeds=(0,),
                 correlations=case_correlations,
-                observation_digests=(_digest(case_observation),),
-                scenarios=(
-                    DeterministicScenarioEvidence(
-                        scenario_id="synthetic-reset-and-process-control",
-                        correlations=case_correlations,
-                        observation=case_observation,
-                        observation_digest=_digest(case_observation),
-                    ),
-                ),
+                observation_digests=(deterministic_observation_digest(scenarios, {}),),
+                scenarios=scenarios,
+                test_results={},
                 verdict=CaseVerdict(status="passed", invariant_violations=()),
             ),
         ),

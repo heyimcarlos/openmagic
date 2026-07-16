@@ -10,7 +10,6 @@ dependencies = [
 
 [project.scripts]
 example-insurance-migrate = "example_insurance.migrations:main"
-example-insurance-reset = "example_insurance.reset:main"
 openmagic-workflow-worker = "example_insurance.workers:workflow_worker_main"
 openmagic-delivery-worker = "example_insurance.workers:delivery_worker_main"
 

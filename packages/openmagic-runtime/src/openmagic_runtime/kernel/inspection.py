@@ -10,6 +10,10 @@ from psycopg import Connection
 
 from openmagic_runtime.kernel._inspection_records import read_instance_inspection
 from openmagic_runtime.kernel._records import (
+    steps_for_instance,
+    waits_for_instance,
+)
+from openmagic_runtime.kernel.inspection_types import (
     ActivatedOccurrences,
     InstanceState,
     RuntimeAttempt,
@@ -18,8 +22,6 @@ from openmagic_runtime.kernel._records import (
     RuntimeWait,
     StepState,
     WaitState,
-    steps_for_instance,
-    waits_for_instance,
 )
 
 
@@ -119,10 +121,14 @@ class KernelTransactionInspection:
 
 
 __all__ = [
+    "ActivatedOccurrences",
     "InstanceSnapshot",
     "InstanceState",
     "KernelInspection",
     "KernelTransactionInspection",
+    "RuntimeAttempt",
+    "RuntimeInstance",
+    "RuntimeStep",
     "RuntimeWait",
     "StepState",
     "StepView",

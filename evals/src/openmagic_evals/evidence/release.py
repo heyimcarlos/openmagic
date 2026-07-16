@@ -29,6 +29,7 @@ from openmagic_evals.evidence.contracts import (
     RaceArtifact,
     RaceCase,
     RaceTrialEvidence,
+    deterministic_observation_digest,
     merge_correlations,
 )
 from openmagic_evals.evidence.deadline import bounded_evidence
@@ -45,19 +46,6 @@ from openmagic_evals.evidence.reproducibility import reproducibility_pin, sha256
 
 def _sha256(value: bytes) -> str:
     return sha256(value)
-
-
-def _case_digest(case_id: str, results: dict[str, Any], seeds: tuple[int, ...]) -> tuple[str, ...]:
-    return tuple(
-        _sha256(
-            json.dumps(
-                {"case_id": case_id, "seed": seed, "results": results},
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode()
-        )
-        for seed in seeds
-    )
 
 
 def _release_corpus_digest(
@@ -138,10 +126,7 @@ def _release_case(
     else:
         status = "infrastructure_error"
         violations = ("release case did not complete",)
-    digest_input = {
-        "durable_observation": observation.document,
-        "tests": {node: matched[node] for node in sorted(matched)},
-    }
+    test_results = {node: matched[node] for node in sorted(matched)}
     return ArtifactCase(
         case_id=case.case_id,
         case_schema_version=1,
@@ -149,8 +134,11 @@ def _release_case(
         observed_trials=1,
         seeds=(0,),
         correlations=observation.correlations,
-        observation_digests=_case_digest(case.case_id, digest_input, (0,)),
+        observation_digests=(
+            deterministic_observation_digest(observation.scenarios, test_results),
+        ),
         scenarios=observation.scenarios,
+        test_results=test_results,
         verdict=CaseVerdict(status=status, invariant_violations=violations),
     )
 
@@ -250,6 +238,7 @@ def _race_case(case: RaceContract, corpus: RaceCorpus) -> RaceCase:
             constraint_rows=result.constraint_rows,
             correlations=result.correlations,
             observation_digest=result.observation_digest,
+            observation=result.observation,
             contender_process_ids=result.contender_process_ids,
             overlap_barrier_observed=result.overlap_barrier_observed,
         )

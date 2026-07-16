@@ -15,11 +15,11 @@ from urllib.request import urlopen
 from uuid import uuid4
 
 from example_insurance.migrations import apply_migrations
-from example_insurance.reset import mark_synthetic_deployment
 from testcontainers.postgres import PostgresContainer
 
 from openmagic_evals.harness._network import free_port
 from openmagic_evals.harness._postgres import postgres_container
+from openmagic_evals.harness.synthetic_reset import mark_synthetic_deployment
 
 _SYNTHETIC_VERIFICATION_SECRET = "openmagic-evals-verification-secret"
 

@@ -12,7 +12,7 @@ from datetime import datetime
 from typing import Annotated, Literal, TypeVar
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter, model_validator
 
 SCHEMA_VERSION = "openmagic.enterprise-evidence.v1"
 REQUIRED_NEGATIVE_CLAIMS = (
@@ -34,12 +34,30 @@ class EvidenceModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
+def canonical_digest(value: object) -> str:
+    document = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    return "sha256:" + hashlib.sha256(document).hexdigest()
+
+
+class SanitizedObservation(EvidenceModel):
+    document: dict[str, JsonValue]
+    digest: str
+
+    @model_validator(mode="after")
+    def validate_digest(self) -> SanitizedObservation:
+        if self.digest != canonical_digest(self.document):
+            raise ValueError("sanitized observation digest does not match its canonical document")
+        return self
+
+
 class BuildPin(EvidenceModel):
     git_sha: str
     checkout_clean: bool
     lock_digest: str
     distributions: dict[str, str]
     distribution_digests: dict[str, str]
+    source_distribution_digests: dict[str, str]
+    installation_kinds: dict[str, Literal["wheel", "editable"]]
 
     @model_validator(mode="after")
     def validate_build(self) -> BuildPin:
@@ -52,6 +70,10 @@ class BuildPin(EvidenceModel):
             raise ValueError("distribution versions must be pinned")
         if set(self.distribution_digests) != set(self.distributions):
             raise ValueError("every installed distribution must have one content digest")
+        if self.source_distribution_digests != self.distribution_digests:
+            raise ValueError("installed distribution contents must match the pinned source tree")
+        if set(self.installation_kinds) != set(self.distributions):
+            raise ValueError("every installed distribution must declare its installation kind")
         for digest in self.distribution_digests.values():
             _require_digest(digest, "distribution digest")
         return self
@@ -199,14 +221,92 @@ class ProcessMetrics(EvidenceModel):
         roles = set(PROCESS_ROLES)
         if set(self.initial_capacity) != roles or set(self.started_processes) != roles:
             raise ValueError("process evidence must report every independent role")
+        if any(self.initial_capacity[role] < 1 for role in PROCESS_ROLES):
+            raise ValueError("process evidence requires positive initial capacity for every role")
         if any(self.started_processes[role] < 1 for role in PROCESS_ROLES):
             raise ValueError("process evidence must restart every role in a fresh interpreter")
         if set(self.forced_losses) != {"workflow-worker", "delivery-worker"}:
             raise ValueError("process evidence must report both forced Worker losses")
+        if any(value < 1 for value in self.forced_losses.values()):
+            raise ValueError("process evidence must force loss in both Worker roles")
         if self.initial_queue.pending_steps != self.queued_workflows:
             raise ValueError("initial Step queue must match the submitted Workflow denominator")
         if self.drained_queue.pending_steps or self.drained_queue.pending_deliveries:
             raise ValueError("process evidence must finish with both durable queues drained")
+        if (
+            self.claim_latency_ms.count != 1
+            or self.recovery_time_ms.count != sum(self.forced_losses.values())
+            or self.lock_wait_lower_bound_ms.count != 1
+        ):
+            raise ValueError("process timing distributions must retain their exact denominators")
+        return self
+
+
+class ProcessIdentityEvidence(EvidenceModel):
+    role: ProcessRole
+    pid: int = Field(gt=0)
+    worker_id: str | None
+
+
+class AttemptAuthorityEvidence(EvidenceModel):
+    instance_id: UUID
+    step_id: UUID
+    attempt_id: UUID
+    worker_id: str
+
+
+class DeliveryAuthorityEvidence(EvidenceModel):
+    delivery_id: UUID
+    delivery_attempt_id: UUID
+    thread_id: UUID
+    worker_id: str
+
+
+class ProcessObservation(EvidenceModel):
+    initial_processes: tuple[ProcessIdentityEvidence, ...]
+    replacement_processes: tuple[ProcessIdentityEvidence, ...]
+    forced_loss_process_ids: tuple[int, int]
+    lost_attempt: AttemptAuthorityEvidence
+    lost_delivery: DeliveryAuthorityEvidence
+    workload_observations: tuple[SanitizedObservation, ...] = Field(min_length=1)
+    api_observations: tuple[SanitizedObservation, SanitizedObservation]
+
+    @model_validator(mode="after")
+    def validate_process_observation(self) -> ProcessObservation:
+        initial_pids = {item.pid for item in self.initial_processes}
+        replacement_pids = {item.pid for item in self.replacement_processes}
+        if initial_pids & replacement_pids:
+            raise ValueError("replacement process evidence requires fresh interpreter identities")
+        if len(set(self.forced_loss_process_ids)) != 2:
+            raise ValueError("process evidence requires two distinct forced-loss identities")
+        return self
+
+
+class ProcessContract(EvidenceModel):
+    scenario_version: Literal["process.loss-backpressure-recovery.v1"]
+    queued_workflows: int = Field(gt=3)
+    initial_capacity: dict[ProcessRole, int]
+    burst_capacity: dict[ProcessRole, int]
+    provider_behavior: Literal["slow_success"]
+    provider_delay_seconds: int = Field(gt=0)
+    forced_loss_points: tuple[
+        Literal["workflow-worker-provider-io"], Literal["delivery-worker-message-lock"]
+    ]
+    queue_predicates: tuple[
+        Literal["pending-steps-equal-workflow-denominator"],
+        Literal["pending-steps-and-deliveries-drain-to-zero"],
+    ]
+    recovery_timeout_seconds: int = Field(gt=0)
+
+    @model_validator(mode="after")
+    def validate_process_contract(self) -> ProcessContract:
+        roles = set(PROCESS_ROLES)
+        if set(self.initial_capacity) != roles or set(self.burst_capacity) != roles:
+            raise ValueError("process contract must pin capacity for all process roles")
+        if any(value < 1 for value in self.initial_capacity.values()):
+            raise ValueError("process contract initial capacities must be positive")
+        if any(self.burst_capacity[role] < self.initial_capacity[role] for role in PROCESS_ROLES):
+            raise ValueError("process contract burst capacity cannot shrink a role")
         return self
 
 
@@ -217,6 +317,7 @@ class RaceTrialEvidence(EvidenceModel):
     constraint_rows: int = Field(ge=0)
     correlations: Correlations
     observation_digest: str
+    observation: dict[str, JsonValue]
     contender_process_ids: tuple[int, int]
     overlap_barrier_observed: Literal[True]
 
@@ -245,7 +346,8 @@ class RaceTrialEvidence(EvidenceModel):
         )
         if not any(durable_ids):
             raise ValueError("race trial must correlate its public and PostgreSQL outcomes")
-        _require_digest(self.observation_digest, "race observation digest")
+        if self.observation_digest != canonical_digest(self.observation):
+            raise ValueError("race trial digest does not match its canonical observation")
         return self
 
 
@@ -313,15 +415,22 @@ class DeterministicScenarioEvidence(EvidenceModel):
     def validate_observation(self) -> DeterministicScenarioEvidence:
         if not self.scenario_id:
             raise ValueError("deterministic scenario identity is required")
-        document = json.dumps(
-            self.observation,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode()
-        expected = "sha256:" + hashlib.sha256(document).hexdigest()
+        expected = canonical_digest(self.observation)
         if self.observation_digest != expected:
             raise ValueError("deterministic scenario digest does not match its observation")
         return self
+
+
+def deterministic_observation_digest(
+    scenarios: tuple[DeterministicScenarioEvidence, ...],
+    test_results: dict[str, dict[str, JsonValue]],
+) -> str:
+    return canonical_digest(
+        {
+            "scenarios": [scenario.model_dump(mode="json") for scenario in scenarios],
+            "test_results": test_results,
+        }
+    )
 
 
 class _ArtifactCaseBase(EvidenceModel):
@@ -352,6 +461,7 @@ class _ArtifactCaseBase(EvidenceModel):
 class ArtifactCase(_ArtifactCaseBase):
     case_kind: Literal["deterministic"] = "deterministic"
     scenarios: tuple[DeterministicScenarioEvidence, ...] = Field(min_length=1)
+    test_results: dict[str, dict[str, JsonValue]]
 
     @model_validator(mode="after")
     def validate_scenarios(self) -> ArtifactCase:
@@ -362,6 +472,10 @@ class ArtifactCase(_ArtifactCaseBase):
             scenario.correlations for scenario in self.scenarios
         ):
             raise ValueError("deterministic case correlations must derive from its scenarios")
+        if self.observation_digests != (
+            deterministic_observation_digest(self.scenarios, self.test_results),
+        ):
+            raise ValueError("deterministic case digest must derive from its canonical payload")
         return self
 
 
@@ -383,6 +497,25 @@ class RaceCase(_ArtifactCaseBase):
 class ProcessCase(_ArtifactCaseBase):
     case_kind: Literal["process"] = "process"
     process_metrics: ProcessMetrics
+    process_contract: ProcessContract
+    process_observation: ProcessObservation
+
+    @model_validator(mode="after")
+    def validate_process_observation(self) -> ProcessCase:
+        document = self.process_observation.model_dump(mode="json")
+        if self.observation_digests != (canonical_digest(document),):
+            raise ValueError("process case digest must derive from its canonical observation")
+        if (
+            len(self.process_observation.workload_observations)
+            != self.process_metrics.queued_workflows
+        ):
+            raise ValueError("process observation must retain every queued Workflow result")
+        if (
+            self.process_contract.queued_workflows != self.process_metrics.queued_workflows
+            or self.process_contract.initial_capacity != self.process_metrics.initial_capacity
+        ):
+            raise ValueError("process contract must match the executed process metrics")
+        return self
 
 
 class AgentCaseEvidence(_ArtifactCaseBase):
@@ -502,6 +635,47 @@ class PlaygroundSummary(EvidenceModel):
     reset_verified: bool
     process_controls_verified: bool
     contributes_to_correctness: Literal[False]
+
+
+class RepositorySurfaceEvidence(EvidenceModel):
+    audited_distributions: tuple[str, ...]
+    production_dependency_edges: tuple[str, ...]
+    private_persistence_packages: tuple[str, ...]
+    violations: tuple[str, ...]
+    passed: bool
+
+
+class InstalledSurfaceEvidence(EvidenceModel):
+    distributions: dict[str, str]
+    production_dependency_edges: tuple[str, ...]
+    private_persistence_packages: tuple[str, ...]
+    audited_files: int = Field(gt=0)
+    violations: tuple[str, ...]
+    passed: bool
+
+
+class ColdSchemaEvidence(EvidenceModel):
+    schemas: tuple[str, ...]
+    tables: dict[str, tuple[str, ...]]
+    migration_heads: dict[str, str]
+    legacy_relations: tuple[str, ...]
+    violations: tuple[str, ...]
+    passed: bool
+
+
+class SurfaceAuditSummary(EvidenceModel):
+    repository_passed: bool
+    installed_surface_passed: bool
+    cold_schema_passed: bool
+    strict_pass: bool
+
+    @model_validator(mode="after")
+    def validate_summary(self) -> SurfaceAuditSummary:
+        if self.strict_pass != (
+            self.repository_passed and self.installed_surface_passed and self.cold_schema_passed
+        ):
+            raise ValueError("surface audit strict verdict must derive from every audit")
+        return self
 
 
 DeterministicEvidenceCase = Annotated[ArtifactCase | RaceCase, Field(discriminator="case_kind")]
@@ -694,13 +868,36 @@ class PlaygroundArtifact(EvidenceModel):
         return self
 
 
+class SurfaceAuditArtifact(EvidenceModel):
+    schema_version: Literal["openmagic.enterprise-evidence.v1"] = SCHEMA_VERSION
+    artifact_kind: Literal["surface_audit"] = "surface_audit"
+    lane: Literal["installable_surface"] = "installable_surface"
+    reproducibility: ReproducibilityPin
+    repository: RepositorySurfaceEvidence
+    installed: InstalledSurfaceEvidence
+    cold_schema: ColdSchemaEvidence
+    summary: SurfaceAuditSummary
+    limitations: tuple[str, ...]
+
+    @model_validator(mode="after")
+    def validate_surface_audit(self) -> SurfaceAuditArtifact:
+        if self.summary.repository_passed != self.repository.passed:
+            raise ValueError("repository audit summary contradicts its evidence")
+        if self.summary.installed_surface_passed != self.installed.passed:
+            raise ValueError("installed audit summary contradicts its evidence")
+        if self.summary.cold_schema_passed != self.cold_schema.passed:
+            raise ValueError("cold schema summary contradicts its evidence")
+        return self
+
+
 Artifact = Annotated[
     DeterministicArtifact
     | RaceArtifact
     | ProcessArtifact
     | AgentQualityArtifact
     | LiveSmokeArtifact
-    | PlaygroundArtifact,
+    | PlaygroundArtifact
+    | SurfaceAuditArtifact,
     Field(discriminator="artifact_kind"),
 ]
 _ARTIFACT_ADAPTER = TypeAdapter(Artifact)
@@ -734,29 +931,42 @@ __all__ = [
     "AgentTrialEvidence",
     "Artifact",
     "ArtifactCase",
+    "AttemptAuthorityEvidence",
     "AvailabilitySummary",
     "BuildPin",
     "CaseVerdict",
+    "ColdSchemaEvidence",
     "Correlations",
+    "DeliveryAuthorityEvidence",
     "DeterministicArtifact",
     "DeterministicScenarioEvidence",
     "DeterministicSummary",
     "DistributionSummary",
+    "InstalledSurfaceEvidence",
     "LiveProviderPin",
     "LiveSmokeArtifact",
     "PlaygroundArtifact",
     "PlaygroundSummary",
     "ProcessArtifact",
     "ProcessCase",
+    "ProcessContract",
+    "ProcessIdentityEvidence",
     "ProcessMetrics",
+    "ProcessObservation",
     "QueueDepth",
     "RaceArtifact",
     "RaceCase",
     "RaceTrialEvidence",
+    "RepositorySurfaceEvidence",
     "ReproducibilityPin",
     "SanitizedAgentEvent",
+    "SanitizedObservation",
+    "SurfaceAuditArtifact",
+    "SurfaceAuditSummary",
     "artifact_json_schema",
     "canonical_artifact_json",
+    "canonical_digest",
+    "deterministic_observation_digest",
     "merge_correlations",
     "parse_artifact",
 ]

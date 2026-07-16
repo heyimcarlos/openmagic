@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import statistics
 import time
 from collections.abc import Callable
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.request import urlopen
@@ -19,14 +18,21 @@ from openmagic_runtime.threads import ThreadStore
 from openmagic_evals.evidence.artifact_io import write_artifact
 from openmagic_evals.evidence.contracts import (
     REQUIRED_NEGATIVE_CLAIMS,
+    AttemptAuthorityEvidence,
     CaseVerdict,
     Correlations,
+    DeliveryAuthorityEvidence,
     DeterministicSummary,
     DistributionSummary,
     ProcessArtifact,
     ProcessCase,
+    ProcessContract,
+    ProcessIdentityEvidence,
     ProcessMetrics,
+    ProcessObservation,
     QueueDepth,
+    SanitizedObservation,
+    canonical_digest,
     merge_correlations,
 )
 from openmagic_evals.evidence.deadline import bounded_evidence
@@ -52,6 +58,20 @@ _PROCESS_ROLES: tuple[ProcessRole, ...] = (
     "workflow-worker",
     "delivery-worker",
 )
+_PROCESS_CONTRACT = ProcessContract(
+    scenario_version="process.loss-backpressure-recovery.v1",
+    queued_workflows=12,
+    initial_capacity={"api": 1, "workflow-worker": 1, "delivery-worker": 1},
+    burst_capacity={"api": 1, "workflow-worker": 3, "delivery-worker": 2},
+    provider_behavior="slow_success",
+    provider_delay_seconds=3,
+    forced_loss_points=("workflow-worker-provider-io", "delivery-worker-message-lock"),
+    queue_predicates=(
+        "pending-steps-equal-workflow-denominator",
+        "pending-steps-and-deliveries-drain-to-zero",
+    ),
+    recovery_timeout_seconds=30,
+)
 
 
 @dataclass(frozen=True)
@@ -65,8 +85,8 @@ class ProcessEvidence:
     lost_attempt: AttemptAuthority
     lost_delivery: DeliveryAuthority
     workload_correlations: Correlations
-    workload_observation_digests: tuple[str, ...]
-    api_observation_digests: tuple[str, str]
+    workload_observations: tuple[SanitizedObservation, ...]
+    api_observations: tuple[SanitizedObservation, SanitizedObservation]
     claim_latency_ms: int
     recovery_times_ms: tuple[int, int]
     lock_wait_lower_bound_ms: int
@@ -85,16 +105,19 @@ def _distribution(values: tuple[int, ...]) -> DistributionSummary:
     )
 
 
-def _api_database_observation(process: ManagedProcess) -> str:
+def _api_database_observation(process: ManagedProcess) -> SanitizedObservation:
     with urlopen(process.health_url, timeout=2) as response:
         payload = json.load(response)
     if payload.get("role") != "api" or payload.get("status") != "ready":
         raise AssertionError("API did not reconstruct its readiness from PostgreSQL")
-    return (
-        "sha256:"
-        + hashlib.sha256(
-            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest()
+    document = {
+        "role": "api",
+        "status": "ready",
+        "postgresql_authority_reconstructed": True,
+    }
+    return SanitizedObservation(
+        document=document,
+        digest=canonical_digest(document),
     )
 
 
@@ -104,7 +127,7 @@ def _uuid_tuple(values: object) -> tuple[UUID, ...]:
 
 def _verify_workload_outcome(
     application: ExampleInsurance, workflow_id: UUID
-) -> tuple[Correlations, str]:
+) -> tuple[Correlations, SanitizedObservation]:
     evidence = json.loads(application.renewal_evidence_json(workflow_id))
     outcomes = evidence["outcomes"]
     values = evidence["correlations"]
@@ -150,17 +173,21 @@ def _verify_workload_outcome(
         domain_event_ids=_uuid_tuple(values["domain_event_ids"]),
         delivery_ids=_uuid_tuple(values["delivery_ids"]),
     )
-    digest = (
-        "sha256:"
-        + hashlib.sha256(
-            json.dumps(
-                {"correlations": values, "outcomes": outcomes},
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode()
-        ).hexdigest()
+    document = {
+        "workflow_id": str(workflow_id),
+        "workflow_lifecycle": outcomes["workflow_lifecycle"],
+        "instance_state": outcomes["instance_state"],
+        "approval_wait_state": outcomes["approval_wait_state"],
+        "attempt_states": outcomes["attempt_states"],
+        "delivery_states": outcomes["delivery_states"],
+        "delivery_attempt_states": outcomes["delivery_attempt_states"],
+        "external_email_effect_count": outcomes["external_email_effect_count"],
+        "message_count": len(values["message_ids"]),
+    }
+    return correlations, SanitizedObservation(
+        document=document,
+        digest=canonical_digest(document),
     )
-    return correlations, digest
 
 
 def _wait_for(
@@ -329,10 +356,10 @@ def run_process_evidence(*, working_directory: Path, workflow_count: int = 12) -
             workload_correlations=merge_correlations(
                 correlations for correlations, _digest in workload_observations
             ),
-            workload_observation_digests=tuple(
-                digest for _correlations, digest in workload_observations
+            workload_observations=tuple(
+                observation for _correlations, observation in workload_observations
             ),
-            api_observation_digests=(
+            api_observations=(
                 initial_api_observation,
                 replacement_api_observation,
             ),
@@ -368,18 +395,6 @@ def run_process_release(
     started_at = datetime.now(UTC)
     report = run_process_evidence(working_directory=working_directory)
     finished_at = datetime.now(UTC)
-    observation = asdict(report)
-    digest = (
-        "sha256:"
-        + hashlib.sha256(
-            json.dumps(
-                observation,
-                sort_keys=True,
-                separators=(",", ":"),
-                default=str,
-            ).encode()
-        ).hexdigest()
-    )
     process_ids = tuple(
         dict.fromkeys(
             (
@@ -397,6 +412,31 @@ def run_process_release(
         role: sum(process.role == role for process in report.replacement_processes)
         for role in _PROCESS_ROLES
     }
+    process_observation = ProcessObservation(
+        initial_processes=tuple(
+            ProcessIdentityEvidence(role=item.role, pid=item.pid, worker_id=item.worker_id)
+            for item in report.initial_processes
+        ),
+        replacement_processes=tuple(
+            ProcessIdentityEvidence(role=item.role, pid=item.pid, worker_id=item.worker_id)
+            for item in report.replacement_processes
+        ),
+        forced_loss_process_ids=report.forced_loss_pids,
+        lost_attempt=AttemptAuthorityEvidence(
+            instance_id=report.lost_attempt.instance_id,
+            step_id=report.lost_attempt.step_id,
+            attempt_id=report.lost_attempt.attempt_id,
+            worker_id=report.lost_attempt.worker_id,
+        ),
+        lost_delivery=DeliveryAuthorityEvidence(
+            delivery_id=report.lost_delivery.delivery_id,
+            delivery_attempt_id=report.lost_delivery.delivery_attempt_id,
+            thread_id=report.lost_delivery.thread_id,
+            worker_id=report.lost_delivery.worker_id,
+        ),
+        workload_observations=report.workload_observations,
+        api_observations=report.api_observations,
+    )
     case = ProcessCase(
         case_id="process.loss-backpressure-recovery",
         case_schema_version=1,
@@ -418,7 +458,7 @@ def run_process_release(
                 ),
             )
         ),
-        observation_digests=(digest,),
+        observation_digests=(canonical_digest(process_observation.model_dump(mode="json")),),
         verdict=CaseVerdict(status="passed", invariant_violations=()),
         process_metrics=ProcessMetrics(
             queued_workflows=report.queued_workflows,
@@ -441,13 +481,10 @@ def run_process_release(
             lock_wait_lower_bound_ms=_distribution((report.lock_wait_lower_bound_ms,)),
             observed_throughput_per_second=report.observed_throughput_per_second,
         ),
+        process_contract=_PROCESS_CONTRACT,
+        process_observation=process_observation,
     )
-    corpus_digest = (
-        "sha256:"
-        + hashlib.sha256(
-            b"process.loss-backpressure-recovery:12:api=1:workflow=1->3:delivery=1->2"
-        ).hexdigest()
-    )
+    corpus_digest = canonical_digest(_PROCESS_CONTRACT.model_dump(mode="json"))
     artifact = ProcessArtifact(
         reproducibility=reproducibility_pin(
             repository_root.resolve(),

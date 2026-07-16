@@ -13,6 +13,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
 
+import example_insurance.renewal_attempts as renewal_attempts_module
+import example_insurance.renewals as renewals_module
 from example_insurance.renewals import (
     ExampleInsurance,
     RenewalFacts,
@@ -24,7 +26,10 @@ from example_insurance.renewals import (
 from openmagic_runtime.commands import Actor, Cause
 from openmagic_runtime.threads import AppendMessage, CreateThread
 
-from openmagic_evals.evidence.agent_boundary_trials import execute_boundary_trial
+from openmagic_evals.evidence.agent_boundary_trials import (
+    boundary_configuration_document,
+    execute_boundary_trial,
+)
 from openmagic_evals.evidence.agent_cases import (
     AGENT_CASES,
     BOUNDARY_AGENT_KEY,
@@ -159,11 +164,25 @@ def _trial_digest(value: object) -> str:
     return "sha256:" + hashlib.sha256(document).hexdigest()
 
 
-def _installed_agent_source() -> str:
-    source_path = inspect.getsourcefile(ExampleInsurance)
-    if source_path is None:
-        raise RuntimeError("installed Agent implementation source is unavailable")
-    return Path(source_path).read_text(encoding="utf-8")
+def _renewal_agent_configuration_documents() -> tuple[dict[str, object], dict[str, object]]:
+    factory = renewals_module._draft_agent_factory
+    candidate = renewals_module.RenewalDraftCandidate
+    instruction = {
+        "agent_key": RENEWAL_AGENT_KEY,
+        "agent_version": 1,
+        "instruction_key": "example_insurance.renewal_draft.en_ca.v1",
+        "factory_source": inspect.getsource(factory),
+        "result_contract_source": inspect.getsource(candidate),
+        "executor_registration_source": inspect.getsource(ExampleInsurance.__init__),
+    }
+    tool_schema = {
+        "durable_input_construction_source": inspect.getsource(
+            renewal_attempts_module.prepare_workflow_attempt
+        ),
+        "execution_input_type": "openmagic_runtime.agents.AgentExecutionInput",
+        "result_type": "example_insurance.renewals.RenewalDraftCandidate",
+    }
+    return instruction, tool_schema
 
 
 def _uuid_values(values: object) -> tuple[UUID, ...]:
@@ -276,6 +295,10 @@ def _execute_renewal_agent_trial(case: RenewalAgentCase, seed: int) -> AgentTria
             **{
                 f"required_fragment_{index}": fragment in content
                 for index, fragment in enumerate(case.required_body_fragments)
+            },
+            **{
+                f"forbidden_fragment_{index}": fragment not in content
+                for index, fragment in enumerate(case.forbidden_body_fragments)
             },
             "safety_boundary": not prohibited,
         }
@@ -438,6 +461,8 @@ def run_local_agent_quality(
 
     artifact_cases = tuple(artifact_case(case) for case in AGENT_CASES)
     corpus_digest = _trial_digest([asdict(case) for case in AGENT_CASES])
+    renewal_instruction, renewal_tool_schema = _renewal_agent_configuration_documents()
+    boundary_configuration = boundary_configuration_document()
     artifact = AgentQualityArtifact(
         reproducibility=reproducibility_pin(
             repository_root.resolve(),
@@ -451,32 +476,9 @@ def run_local_agent_quality(
             AgentConfigurationPin(
                 agent_key=RENEWAL_AGENT_KEY,
                 agent_version=1,
-                instruction_digest=_trial_digest(
-                    {
-                        "instruction_key": "example_insurance.renewal_draft.en_ca.v1",
-                        "installed_module_source": _installed_agent_source(),
-                    }
-                ),
-                tool_schema_digest=_trial_digest(
-                    {
-                        "input": tuple(
-                            sorted(
-                                {
-                                    "expiring_premium_cents",
-                                    "policy_number",
-                                    "policyholder_name",
-                                    "policyholder_email",
-                                    "renewal_date",
-                                    "revision_instruction",
-                                    "thread_id",
-                                    "workflow_id",
-                                }
-                            )
-                        ),
-                        "output": ("body", "subject"),
-                    }
-                ),
-                provider="openmagic-local",
+                instruction_digest=_trial_digest(renewal_instruction),
+                tool_schema_digest=_trial_digest(renewal_tool_schema),
+                provider="openmagic-fresh-interpreter",
                 model="deterministic-reference-agent-v1",
                 reasoning="deterministic",
                 temperature=0.0,
@@ -484,14 +486,13 @@ def run_local_agent_quality(
             AgentConfigurationPin(
                 agent_key=BOUNDARY_AGENT_KEY,
                 agent_version=1,
-                instruction_digest=_trial_digest(
-                    {
-                        "malformed_result": "reject candidates outside the typed result contract",
-                        "timeout": "terminate candidates at the configured process boundary",
-                    }
-                ),
+                instruction_digest=_trial_digest(boundary_configuration),
                 tool_schema_digest=_trial_digest(
-                    {"input": "durable AgentRunInput", "output": "_BoundaryCandidate"}
+                    {
+                        "input": "openmagic_runtime.agents.AgentRunInput",
+                        "output": "openmagic_evals.evidence.agent_boundary_trials._BoundaryCandidate",
+                        "timeout_seconds": boundary_configuration["timeout_seconds"],
+                    }
                 ),
                 provider="openmagic-fresh-interpreter",
                 model="deterministic-boundary-harness-v1",

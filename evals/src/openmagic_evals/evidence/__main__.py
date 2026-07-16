@@ -6,7 +6,6 @@ from dataclasses import asdict
 from pathlib import Path
 
 from openmagic_evals.evidence.agent_quality import run_local_agent_quality
-from openmagic_evals.evidence.audit import audit_repository
 from openmagic_evals.evidence.claims import write_claim_report
 from openmagic_evals.evidence.contracts import artifact_json_schema
 from openmagic_evals.evidence.demos import run_renewal_demo, run_verification_demo
@@ -15,6 +14,7 @@ from openmagic_evals.evidence.live_smoke import run_live_smoke
 from openmagic_evals.evidence.playground import verify_playground
 from openmagic_evals.evidence.processes import run_process_release
 from openmagic_evals.evidence.release import run_deterministic_release, run_race_release
+from openmagic_evals.evidence.surface import run_surface_audit
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -24,6 +24,8 @@ def _parser() -> argparse.ArgumentParser:
     schema.add_argument("--output", type=Path)
     audit = subcommands.add_parser("audit-surface", help="audit repository public surfaces")
     audit.add_argument("--repository-root", type=Path, required=True)
+    audit.add_argument("--output", type=Path, required=True)
+    audit.add_argument("--timeout-seconds", type=int, default=120)
     subcommands.add_parser("audit-installed", help="audit the installed wheel surface")
     release_commands = {"deterministic", "races"}
     for name, help_text in (
@@ -73,6 +75,7 @@ def _parser() -> argparse.ArgumentParser:
             command.add_argument("--timeout-seconds", type=int, default=120)
         elif name == "claim-report":
             command.add_argument("--deterministic", type=Path, required=True)
+            command.add_argument("--surface-audit", type=Path, required=True)
             command.add_argument("--agent-quality", type=Path)
             command.add_argument("--live-smoke", type=Path)
             command.add_argument("--playground", type=Path)
@@ -106,10 +109,12 @@ def main() -> None:
             print(json.dumps({"schema": str(arguments.output.resolve())}, sort_keys=True))
         return
     if arguments.command == "audit-surface":
-        report = audit_repository(arguments.repository_root)
-        print(json.dumps(asdict(report), sort_keys=True, separators=(",", ":")))
-        if not report.passed:
-            raise SystemExit(1)
+        artifact = run_surface_audit(
+            repository_root=arguments.repository_root,
+            output=arguments.output,
+            timeout_seconds=arguments.timeout_seconds,
+        )
+        print(json.dumps(artifact.summary.model_dump(mode="json"), sort_keys=True))
         return
     if arguments.command == "audit-installed":
         report = audit_installed_environment()
@@ -193,6 +198,7 @@ def main() -> None:
     if arguments.command == "claim-report":
         write_claim_report(
             deterministic_path=arguments.deterministic,
+            surface_path=arguments.surface_audit,
             agent_path=arguments.agent_quality,
             live_path=arguments.live_smoke,
             playground_path=arguments.playground,
@@ -209,6 +215,7 @@ def main() -> None:
             repository_root=arguments.repository_root,
             working_directory=arguments.working_directory,
             output=arguments.output,
+            timeout_seconds=arguments.timeout_seconds,
         )
         print(json.dumps(artifact.summary.model_dump(mode="json"), sort_keys=True))
         return

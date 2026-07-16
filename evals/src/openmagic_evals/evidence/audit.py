@@ -11,10 +11,10 @@ import psycopg
 from psycopg import sql
 
 from openmagic_evals.evidence.surface_contracts import (
+    APPLICATION_PUBLIC_EXPORTS,
     DELETED_IDENTIFIERS,
     EXPECTED_PRODUCTION_EDGES,
-    FORBIDDEN_EXPORTS,
-    RUNTIME_PUBLIC_MODULES,
+    RUNTIME_PUBLIC_EXPORTS,
 )
 
 _FORBIDDEN_PRODUCT_IMPORTS = {
@@ -25,7 +25,6 @@ _EXPECTED_TABLES = {
     "public": set(),
     "example_insurance": {
         "approval_grants",
-        "deployment_metadata",
         "domain_events",
         "external_effect_evidence",
         "external_effects",
@@ -51,7 +50,6 @@ _EXPECTED_TABLES = {
         "command_receipts",
         "deliveries",
         "delivery_attempts",
-        "deployment_metadata",
         "instances",
         "messages",
         "migration_history",
@@ -136,6 +134,22 @@ def _declared_exports(path: Path) -> set[str] | None:
     return None
 
 
+def _public_exports(source_root: Path) -> dict[str, tuple[str, ...]]:
+    modules = (
+        path
+        for path in source_root.rglob("*.py")
+        if path.name != "__init__.py"
+        and all(not part.startswith("_") for part in path.relative_to(source_root).parts)
+    )
+    result: dict[str, tuple[str, ...]] = {}
+    for path in modules:
+        exports = _declared_exports(path)
+        if exports is None:
+            raise ValueError(f"public module has no explicit exports: {path}")
+        result[path.relative_to(source_root).as_posix()] = tuple(sorted(exports))
+    return dict(sorted(result.items()))
+
+
 def audit_repository(root: Path) -> RepositoryAudit:
     root = root.resolve()
     violations: list[str] = []
@@ -175,22 +189,10 @@ def audit_repository(root: Path) -> RepositoryAudit:
     root_exports = _declared_exports(runtime_root / "__init__.py")
     if root_exports != {"__version__"}:
         violations.append("runtime root exports more than package metadata")
-    actual_public_modules = tuple(
-        sorted(
-            path.relative_to(runtime_root).as_posix()
-            for path in runtime_root.rglob("*.py")
-            if path.name != "__init__.py"
-            and all(not part.startswith("_") for part in path.relative_to(runtime_root).parts)
-        )
-    )
-    if actual_public_modules != tuple(sorted(RUNTIME_PUBLIC_MODULES)):
-        violations.append("runtime modules differ from the exact accepted public surface")
-    for relative in RUNTIME_PUBLIC_MODULES:
-        exports = _declared_exports(runtime_root / relative)
-        if exports is None:
-            violations.append(f"runtime public module has no explicit exports: {relative}")
-        elif exports & FORBIDDEN_EXPORTS:
-            violations.append(f"runtime public module exports persistence details: {relative}")
+    if _public_exports(runtime_root) != RUNTIME_PUBLIC_EXPORTS:
+        violations.append("runtime modules or exports differ from the exact accepted surface")
+    if _public_exports(application_root) != APPLICATION_PUBLIC_EXPORTS:
+        violations.append("application modules or exports differ from the exact accepted surface")
 
     scan_roots = (
         root / "packages/openmagic-runtime",

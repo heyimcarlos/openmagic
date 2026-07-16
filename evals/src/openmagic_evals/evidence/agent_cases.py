@@ -41,6 +41,7 @@ class RenewalAgentCase(AgentCaseBase):
     prior_thread_context: str | None
     expected_subject: str
     required_body_fragments: tuple[str, ...]
+    forbidden_body_fragments: tuple[str, ...] = ()
     scenario: Literal["initial", "revision"] = "initial"
 
 
@@ -138,8 +139,9 @@ AGENT_CASES: tuple[AgentCase, ...] = (
             "Taylor Brooks",
             "2028-03-31",
             "CAD 3,250.00",
-            "without approval",
+            "Approval remains required",
         ),
+        forbidden_body_fragments=("without approval", "send the renewal immediately"),
     ),
     RenewalAgentCase(
         case_id="agent.development.ambiguous-context",
@@ -180,8 +182,8 @@ AGENT_CASES: tuple[AgentCase, ...] = (
             "Casey Martin",
             "2028-05-31",
             "CAD 2,750.50",
-            "synthetic office closes at five",
         ),
+        forbidden_body_fragments=("synthetic office closes at five",),
     ),
     RenewalAgentCase(
         case_id="agent.held-out.revision-context",

@@ -10,7 +10,7 @@ from uuid import UUID
 from psycopg import Connection
 from psycopg.rows import dict_row
 
-from openmagic_runtime.kernel._records import (
+from openmagic_runtime.kernel.inspection_types import (
     AgentRunState,
     AttemptState,
     InstanceState,

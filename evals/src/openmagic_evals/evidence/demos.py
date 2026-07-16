@@ -15,6 +15,7 @@ from openmagic_evals.evidence.contracts import (
     DeterministicScenarioEvidence,
     PlaygroundArtifact,
     PlaygroundSummary,
+    deterministic_observation_digest,
 )
 from openmagic_evals.evidence.deadline import bounded_evidence
 from openmagic_evals.evidence.deterministic_observations import (
@@ -42,6 +43,14 @@ def _demo_artifact(
     timeout_seconds: int,
 ) -> PlaygroundArtifact:
     finished_at = datetime.now(UTC)
+    scenarios = (
+        DeterministicScenarioEvidence(
+            scenario_id=case_id,
+            correlations=correlations,
+            observation=observation,
+            observation_digest=_digest(observation),
+        ),
+    )
     artifact = PlaygroundArtifact(
         reproducibility=reproducibility_pin(
             repository_root.resolve(),
@@ -59,15 +68,9 @@ def _demo_artifact(
                 observed_trials=1,
                 seeds=(0,),
                 correlations=correlations,
-                observation_digests=(_digest(observation),),
-                scenarios=(
-                    DeterministicScenarioEvidence(
-                        scenario_id=case_id,
-                        correlations=correlations,
-                        observation=observation,
-                        observation_digest=_digest(observation),
-                    ),
-                ),
+                observation_digests=(deterministic_observation_digest(scenarios, {}),),
+                scenarios=scenarios,
+                test_results={},
                 verdict=CaseVerdict(status="passed", invariant_violations=()),
             ),
         ),

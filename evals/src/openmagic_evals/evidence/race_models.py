@@ -8,7 +8,17 @@ import random
 from dataclasses import dataclass
 from typing import Literal
 
+from pydantic import JsonValue, TypeAdapter
+
 from openmagic_evals.evidence.contracts import Correlations
+
+_OBSERVATION_ADAPTER = TypeAdapter(dict[str, JsonValue])
+
+
+def race_observation(value: object) -> dict[str, JsonValue]:
+    return _OBSERVATION_ADAPTER.validate_json(
+        json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+    )
 
 
 def race_digest(value: object) -> str:
@@ -30,6 +40,7 @@ class RaceSeedResult:
     public_outcomes: tuple[str, ...]
     constraint_rows: int
     correlations: Correlations
+    observation: dict[str, JsonValue]
     observation_digest: str
     contender_process_ids: tuple[int, int]
     overlap_barrier_observed: Literal[True]
@@ -45,4 +56,4 @@ class RaceCorpus:
     results: tuple[RaceSeedResult, ...]
 
 
-__all__ = ["RaceCorpus", "RaceSeedResult", "jitter_pair", "race_digest"]
+__all__ = ["RaceCorpus", "RaceSeedResult", "jitter_pair", "race_digest", "race_observation"]
