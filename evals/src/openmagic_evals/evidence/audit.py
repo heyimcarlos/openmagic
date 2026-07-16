@@ -225,6 +225,7 @@ def audit_repository(root: Path) -> RepositoryAudit:
         private_persistence_packages=(
             "example_insurance._persistence",
             "openmagic_runtime._persistence",
+            "openmagic_runtime.kernel._persistence",
         ),
     )
 

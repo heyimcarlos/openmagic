@@ -9,14 +9,14 @@ from psycopg import Connection
 from psycopg.types.json import Jsonb
 
 from openmagic_runtime._canonical import canonical_digest
-from openmagic_runtime.kernel._control_support import (
+from openmagic_runtime.kernel._persistence.control_support import (
     instance_definition,
     lock_source_identity,
     materialize_route,
     require_open_instance,
 )
-from openmagic_runtime.kernel._records import lock_instance, lock_wait
-from openmagic_runtime.kernel._trace import append_trace, read_trace_replay
+from openmagic_runtime.kernel._persistence.records import lock_instance, lock_wait
+from openmagic_runtime.kernel._persistence.trace import append_trace, read_trace_replay
 from openmagic_runtime.kernel._transitions import (
     AcceptSignal,
     SignalConflict,

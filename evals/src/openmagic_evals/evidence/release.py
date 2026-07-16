@@ -53,16 +53,12 @@ from openmagic_evals.evidence.reproducibility import (
 )
 
 
-def _sha256(value: bytes) -> str:
-    return sha256(value)
-
-
 def _release_corpus_digest(
     release_cases: tuple[ReleaseCase, ...],
     race_contracts: tuple[RaceContract, ...],
     pytest_nodes: tuple[str, ...],
 ) -> str:
-    return _sha256(
+    return sha256(
         json.dumps(
             {
                 "matrix": [asdict(case) for case in release_cases],
@@ -76,7 +72,7 @@ def _release_corpus_digest(
 
 
 def _race_corpus_digest(contracts: tuple[RaceContract, ...]) -> str:
-    return _sha256(
+    return sha256(
         json.dumps(
             {"races": [asdict(case) for case in contracts]},
             sort_keys=True,
@@ -92,19 +88,12 @@ class _ExactCaseObservation:
     scenarios: tuple[DeterministicScenarioEvidence, ...]
 
 
-def _matching_results(
-    tests: dict[str, dict[str, Any]],
-    nodes: tuple[str, ...],
-) -> dict[str, dict[str, Any]]:
-    return select_pytest_results(tests, nodes)
-
-
 def _release_case(
     case: ReleaseCase,
     tests: dict[str, dict[str, Any]],
     observation: _ExactCaseObservation,
 ) -> ArtifactCase:
-    matched = _matching_results(tests, case.pytest_nodes)
+    matched = select_pytest_results(tests, case.pytest_nodes)
     statuses = tuple(result["status"] for result in matched.values())
     missing_nodes = tuple(
         node
@@ -161,7 +150,7 @@ def _exact_observation(
             scenario_id=item.scenario_id,
             correlations=item.correlations,
             observation=item.document,
-            observation_digest=_sha256(
+            observation_digest=sha256(
                 json.dumps(
                     item.document,
                     sort_keys=True,

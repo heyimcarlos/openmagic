@@ -9,7 +9,7 @@ from uuid import UUID
 
 from psycopg import sql
 
-from openmagic_evals.evidence._inspection_base import InspectionDatabase
+from openmagic_evals.evidence._inspection_base import InspectionDatabase, uuid_column
 from openmagic_evals.evidence.core_models import InstanceDefinitionCorrelation
 
 
@@ -82,10 +82,6 @@ class _ChainRoot:
             verification_definition_key=str(record["verification_definition_key"]),
             verification_definition_version=int(record["verification_definition_version"]),
         )
-
-
-def _uuid_column(records: list[dict[str, Any]], column: str) -> tuple[UUID, ...]:
-    return tuple(UUID(str(record[column])) for record in records)
 
 
 class DurableChainInspection(InspectionDatabase):
@@ -189,7 +185,7 @@ class DurableChainInspection(InspectionDatabase):
                 ") AS related ORDER BY delivery_id",
                 (renewal_workflow_id, challenge_id),
             ).fetchall()
-            delivery_ids = _uuid_column(delivery_records, "delivery_id")
+            delivery_ids = uuid_column(delivery_records, "delivery_id")
             delivery_attempt_records = cursor.execute(
                 "SELECT delivery_attempt_id FROM openmagic_runtime.delivery_attempts "
                 "WHERE delivery_id = ANY(%s) ORDER BY delivery_attempt_id",
@@ -224,11 +220,11 @@ class DurableChainInspection(InspectionDatabase):
             signal_ids=(root.signal_id,),
             trace_event_ids=trace_event_ids,
             thread_ids=(root.renewal_thread_id, root.destination_thread_id),
-            message_ids=_uuid_column(message_records, "message_id"),
-            agent_run_ids=_uuid_column(agent_records, "agent_run_id"),
-            domain_event_ids=_uuid_column(event_records, "event_id"),
+            message_ids=uuid_column(message_records, "message_id"),
+            agent_run_ids=uuid_column(agent_records, "agent_run_id"),
+            domain_event_ids=uuid_column(event_records, "event_id"),
             delivery_ids=delivery_ids,
-            delivery_attempt_ids=_uuid_column(delivery_attempt_records, "delivery_attempt_id"),
+            delivery_attempt_ids=uuid_column(delivery_attempt_records, "delivery_attempt_id"),
             approval_grant_ids=(root.approval_grant_id,),
             external_effect_ids=(root.logical_effect_id,),
             provider_request_ids=(root.provider_request_id,),
@@ -265,7 +261,7 @@ class DurableChainInspection(InspectionDatabase):
             ).format(column=sql.Identifier(column), table=sql.Identifier(table)),
             (list(instance_ids),),
         ).fetchall()
-        return _uuid_column(records, column)
+        return uuid_column(records, column)
 
     @staticmethod
     def _validate(observation: DurableChainObservation) -> None:

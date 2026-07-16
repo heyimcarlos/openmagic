@@ -164,6 +164,7 @@ def audit_installed_environment() -> InstalledSurfaceAudit:
     private_packages = (
         "example_insurance._persistence",
         "openmagic_runtime._persistence",
+        "openmagic_runtime.kernel._persistence",
     )
     for package in private_packages:
         prefix = package.replace(".", "/") + "/"

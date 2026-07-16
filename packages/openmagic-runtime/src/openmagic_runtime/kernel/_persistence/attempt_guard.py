@@ -11,7 +11,7 @@ from psycopg import Connection
 from psycopg.pq import TransactionStatus
 from psycopg.rows import dict_row
 
-from openmagic_runtime.kernel._control_support import lock_open_instance
+from openmagic_runtime.kernel._persistence.control_support import lock_open_instance
 from openmagic_runtime.kernel._transitions import GuardCurrentAttempt
 
 

@@ -9,12 +9,12 @@ from psycopg import Connection
 from psycopg.rows import dict_row
 
 from openmagic_runtime._canonical import canonical_digest
-from openmagic_runtime.kernel._control_support import (
+from openmagic_runtime.kernel._persistence.control_support import (
     lock_instance,
     lock_source_identity,
     require_open_instance,
 )
-from openmagic_runtime.kernel._trace import append_trace, read_trace_replay
+from openmagic_runtime.kernel._persistence.trace import append_trace, read_trace_replay
 from openmagic_runtime.kernel._transitions import CloseInstance, CloseInstanceReceipt
 
 

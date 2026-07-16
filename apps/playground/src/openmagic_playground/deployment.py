@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import socket
 import subprocess
 import sys
 import time
@@ -23,10 +22,8 @@ from example_insurance.migrations import apply_migrations
 from openmagic_runtime.processes import OwnedProcess, ProcessCleanup, finish_owned_cleanup
 from testcontainers.postgres import PostgresContainer
 
-from openmagic_playground.process_launching import (
-    ProcessCommand,
-    launch_owned_process,
-)
+from openmagic_playground._network import free_loopback_port
+from openmagic_playground.process_launching import ProcessCommand, launch_owned_process
 from openmagic_playground.reset import mark_synthetic_deployment, reset_synthetic_deployment
 
 POSTGRES_IMAGE = "postgres@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193"
@@ -52,12 +49,6 @@ def _require_local_provider_url(provider_url: str) -> None:
         local = False
     if not local:
         raise ValueError("Email provider URL must use HTTP on a local loopback host")
-
-
-def _free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as candidate:
-        candidate.bind(("127.0.0.1", 0))
-        return int(candidate.getsockname()[1])
 
 
 @dataclass(frozen=True)
@@ -294,7 +285,7 @@ class PlaygroundDeployment:
         )
 
     def _start_process(self, role: ProcessRole) -> None:
-        port = _free_port()
+        port = free_loopback_port()
         script = Path(sys.executable).parent / _SCRIPTS[role]
         if not script.is_file():
             raise RuntimeError(f"installed process entry point is missing: {_SCRIPTS[role]}")

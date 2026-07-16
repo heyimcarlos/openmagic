@@ -11,8 +11,8 @@ import psycopg
 from psycopg import Connection
 from psycopg.rows import dict_row
 
+from openmagic_runtime.kernel._persistence.records import steps_for_instance, waits_for_instance
 from openmagic_runtime.kernel._record_decoding import instance_state
-from openmagic_runtime.kernel._records import steps_for_instance, waits_for_instance
 from openmagic_runtime.kernel.inspection_types import InstanceState, RuntimeStep, RuntimeWait
 
 

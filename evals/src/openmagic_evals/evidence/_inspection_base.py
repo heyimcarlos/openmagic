@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
+from uuid import UUID
 
 import psycopg
 from psycopg import Cursor
@@ -28,4 +29,8 @@ class InspectionDatabase:
             yield cursor
 
 
-__all__ = ["InspectionDatabase"]
+def uuid_column(records: list[dict[str, Any]], column: str) -> tuple[UUID, ...]:
+    return tuple(UUID(str(record[column])) for record in records)
+
+
+__all__ = ["InspectionDatabase", "uuid_column"]

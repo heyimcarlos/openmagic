@@ -17,7 +17,13 @@ from openmagic_runtime._delivery_contracts import (
     DeliveryRetryPolicy,
     StaleDeliveryAuthority,
 )
-from openmagic_runtime._delivery_records import (
+from openmagic_runtime._persistence.delivery_control import (
+    DeliveryControlTransaction,
+    DeliveryWorkTransaction,
+    acknowledge_delivery_record,
+    claim_delivery_once_record,
+)
+from openmagic_runtime._persistence.delivery_records import (
     DeliveredMessage,
     DeliveryAttemptState,
     DeliveryPresentation,
@@ -28,12 +34,6 @@ from openmagic_runtime._delivery_records import (
     delivery_status,
     lock_delivery_presentation,
     read_delivery_presentation,
-)
-from openmagic_runtime._persistence.delivery_control import (
-    DeliveryControlTransaction,
-    DeliveryWorkTransaction,
-    acknowledge_delivery_record,
-    claim_delivery_once_record,
 )
 
 

@@ -46,6 +46,7 @@ def test_repository_audit_closes_dependency_export_persistence_and_legacy_surfac
     assert report.private_persistence_packages == (
         "example_insurance._persistence",
         "openmagic_runtime._persistence",
+        "openmagic_runtime.kernel._persistence",
     )
     assert RUNTIME_PUBLIC_EXPORTS["__init__.py"] == ("__version__",)
     assert RUNTIME_PUBLIC_EXPORTS["kernel/__init__.py"] == ()

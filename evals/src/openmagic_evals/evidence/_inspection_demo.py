@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
-from openmagic_evals.evidence._inspection_base import InspectionDatabase
+from openmagic_evals.evidence._inspection_base import InspectionDatabase, uuid_column
 
 
 @dataclass(frozen=True)
@@ -43,10 +43,6 @@ class VerificationDemoObservation:
         )
 
 
-def _uuid_column(records: list[dict[str, Any]], column: str) -> tuple[UUID, ...]:
-    return tuple(UUID(str(record[column])) for record in records)
-
-
 class DemoInspection(InspectionDatabase):
     def agent_safety(self, thread_id: UUID, instance_id: UUID) -> AgentSafetyObservation:
         with self.read_snapshot() as cursor:
@@ -77,9 +73,9 @@ class DemoInspection(InspectionDatabase):
             ).fetchone()
         return AgentSafetyObservation(
             message_source_kinds=tuple(str(record["source_kind"]) for record in source_records),
-            delivery_attempt_ids=_uuid_column(delivery_attempt_records, "delivery_attempt_id"),
+            delivery_attempt_ids=uuid_column(delivery_attempt_records, "delivery_attempt_id"),
             command_count=0 if command_record is None else int(command_record["command_count"]),
-            delivery_thread_ids=_uuid_column(delivery_records, "thread_id"),
+            delivery_thread_ids=uuid_column(delivery_records, "thread_id"),
             retry_authorization_count=0
             if retry_record is None
             else int(retry_record["retry_count"]),
@@ -101,8 +97,8 @@ class DemoInspection(InspectionDatabase):
                 (instance_id,),
             ).fetchall()
         return (
-            _uuid_column(trace_records, "trace_event_id"),
-            _uuid_column(delivery_records, "delivery_attempt_id"),
+            uuid_column(trace_records, "trace_event_id"),
+            uuid_column(delivery_records, "delivery_attempt_id"),
         )
 
     def verification_demo(self, challenge_id: UUID) -> VerificationDemoObservation | None:

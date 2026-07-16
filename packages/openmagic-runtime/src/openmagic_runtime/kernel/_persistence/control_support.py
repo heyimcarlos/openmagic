@@ -9,10 +9,10 @@ from psycopg import Connection
 from psycopg.types.json import Jsonb
 
 from openmagic_runtime._canonical import canonical_digest
-from openmagic_runtime.kernel._records import (
+from openmagic_runtime.kernel._persistence.records import (
     lock_instance as lock_instance_record,
 )
-from openmagic_runtime.kernel._transition_records import (
+from openmagic_runtime.kernel._persistence.transition_records import (
     lock_disposition_source,
     read_instance_definition,
 )

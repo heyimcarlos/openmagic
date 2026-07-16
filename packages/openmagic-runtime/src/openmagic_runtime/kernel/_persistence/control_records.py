@@ -7,31 +7,33 @@ from uuid import UUID, uuid4
 
 import psycopg
 from psycopg import Connection
+from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from openmagic_runtime._canonical import canonical_digest
-from openmagic_runtime.kernel._attempt_guard import (
+from openmagic_runtime.kernel._control_contracts import StartInstance, StartInstanceReceipt
+from openmagic_runtime.kernel._persistence.attempt_guard import (
     CurrentAttemptGuard,
     guard_current_attempt,
 )
-from openmagic_runtime.kernel._closure import close_instance
-from openmagic_runtime.kernel._control_contracts import StartInstance, StartInstanceReceipt
-from openmagic_runtime.kernel._control_support import (
+from openmagic_runtime.kernel._persistence.closure import close_instance
+from openmagic_runtime.kernel._persistence.control_support import (
     instance_definition,
     lock_open_instance,
     materialize_route,
     materialize_step_route,
     validate_disposition,
 )
-from openmagic_runtime.kernel._deferred import defer_step, resolve_deferred_step
-from openmagic_runtime.kernel._signals import accept_signal
-from openmagic_runtime.kernel._step_mutations import (
+from openmagic_runtime.kernel._persistence.deferred import defer_step, resolve_deferred_step
+from openmagic_runtime.kernel._persistence.signals import accept_signal
+from openmagic_runtime.kernel._persistence.step_mutations import (
     CurrentStep,
     fail_step,
     retry_step,
     succeed_step,
 )
-from openmagic_runtime.kernel._trace import append_trace, read_trace_replay
+from openmagic_runtime.kernel._persistence.trace import append_trace, read_trace_replay
+from openmagic_runtime.kernel._persistence.transition_records import RuntimeDefinitionRecord
 from openmagic_runtime.kernel._transitions import (
     AcceptSignal,
     CloseInstance,
@@ -73,14 +75,20 @@ class KernelControlTransaction:
                 trace_event_id=UUID(receipt["trace_event_id"]),
                 trace_sequence=receipt["trace_sequence"],
             )
-        row = self._connection.execute(
-            "SELECT manifest, manifest_digest FROM openmagic_runtime.workflow_definitions "
-            "WHERE definition_key = %s AND definition_version = %s",
-            (request.definition_key, request.definition_version),
-        ).fetchone()
-        if row is None:
+        with self._connection.cursor(row_factory=dict_row) as cursor:
+            record = cursor.execute(
+                "SELECT manifest, manifest_digest "
+                "FROM openmagic_runtime.workflow_definitions "
+                "WHERE definition_key = %s AND definition_version = %s",
+                (request.definition_key, request.definition_version),
+            ).fetchone()
+        if record is None:
             raise ValueError("pinned Workflow Definition is unavailable")
-        definition = verified_definition(dict(row[0]), str(row[1]))
+        definition_record = RuntimeDefinitionRecord.decode(record)
+        definition = verified_definition(
+            definition_record.manifest,
+            definition_record.manifest_digest,
+        )
         validate_payload(request.instance_input, definition.instance_input_contract)
         route = next(item for item in definition.routes if item.key == "start")
         validate_payload(request.route_input, route.activation_contract)

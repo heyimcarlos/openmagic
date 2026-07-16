@@ -8,7 +8,7 @@ from uuid import UUID
 from psycopg import Connection
 
 from openmagic_runtime._canonical import canonical_digest
-from openmagic_runtime.kernel._control_support import (
+from openmagic_runtime.kernel._persistence.control_support import (
     instance_definition,
     lock_open_instance,
     lock_source_identity,
@@ -16,15 +16,15 @@ from openmagic_runtime.kernel._control_support import (
     require_open_instance,
     validate_disposition,
 )
-from openmagic_runtime.kernel._records import lock_instance
-from openmagic_runtime.kernel._step_mutations import (
+from openmagic_runtime.kernel._persistence.records import lock_instance
+from openmagic_runtime.kernel._persistence.step_mutations import (
     DeferredStep,
     fail_step,
     retry_step,
     succeed_step,
 )
-from openmagic_runtime.kernel._trace import append_trace, read_trace_replay
-from openmagic_runtime.kernel._transition_records import (
+from openmagic_runtime.kernel._persistence.trace import append_trace, read_trace_replay
+from openmagic_runtime.kernel._persistence.transition_records import (
     attempt_count_for_step,
     lock_deferred_step,
 )

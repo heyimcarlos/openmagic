@@ -7,8 +7,8 @@ from uuid import UUID
 
 from psycopg import Connection
 
-from openmagic_runtime.kernel._attempt_guard import CurrentAttemptGuard
 from openmagic_runtime.kernel._control_contracts import StartInstance, StartInstanceReceipt
+from openmagic_runtime.kernel._persistence.attempt_guard import CurrentAttemptGuard
 from openmagic_runtime.kernel._persistence.control_records import (
     KernelControlTransaction,
     start_instance_record,

@@ -164,7 +164,7 @@ def test_sql_ownership_policy_rejects_public_application_sql(tmp_path: Path, sou
 
 def test_runtime_declares_private_sql_owners_and_rejects_public_sql(tmp_path: Path) -> None:
     role = next(role for role in PACKAGE_ROLES if role.distribution == "openmagic-runtime")
-    assert role.sql_owner_roots
+    assert role.sql_owner_roots == (Path("_persistence"), Path("kernel/_persistence"))
 
     package = tmp_path / "openmagic_runtime"
     package.mkdir()
@@ -204,6 +204,7 @@ def test_runtime_transaction_owners_do_not_import_public_control_facades() -> No
     runtime = ROOT / "packages/openmagic-runtime/src/openmagic_runtime"
     owners = (
         runtime / "_persistence/delivery_control.py",
+        runtime / "_persistence/delivery_records.py",
         runtime / "kernel/_persistence/control_records.py",
         runtime / "kernel/_persistence/work_records.py",
     )
@@ -213,6 +214,21 @@ def test_runtime_transaction_owners_do_not_import_public_control_facades() -> No
     assert "openmagic_runtime.delivery" not in imports
     assert "openmagic_runtime.kernel.control" not in imports
     assert "openmagic_runtime.kernel.work" not in imports
+
+
+def test_runtime_persistence_uses_named_rows() -> None:
+    runtime = ROOT / "packages/openmagic-runtime/src/openmagic_runtime"
+    for owner in (runtime / "_persistence", runtime / "kernel/_persistence"):
+        for path in owner.rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            positional_rows = tuple(
+                node
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Subscript)
+                and isinstance(node.slice, ast.Constant)
+                and isinstance(node.slice.value, int)
+            )
+            assert positional_rows == (), path
 
 
 def test_sql_ownership_policy_allows_non_sql_execute_protocol(tmp_path: Path) -> None:

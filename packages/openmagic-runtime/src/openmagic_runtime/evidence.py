@@ -12,7 +12,7 @@ from psycopg import Connection
 from openmagic_runtime._canonical import canonical_bytes, canonical_digest
 from openmagic_runtime._persistence.health_records import read_database_health
 from openmagic_runtime.delivery import RuntimeDeliveryEvidence, deliveries_for_domain_event
-from openmagic_runtime.kernel._evidence_records import (
+from openmagic_runtime.kernel._persistence.evidence_records import (
     RuntimeAgentRunEvidence,
     RuntimeAttemptEvidence,
     RuntimeInstanceEvidence,

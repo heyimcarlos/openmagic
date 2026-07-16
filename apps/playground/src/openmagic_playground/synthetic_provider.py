@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import socket
 import subprocess
 import sys
 import time
@@ -20,18 +19,10 @@ from urllib.request import urlopen
 
 from openmagic_runtime.processes import OwnedProcess, finish_owned_cleanup
 
-from openmagic_playground.process_launching import (
-    ProcessCommand,
-    launch_owned_process,
-)
+from openmagic_playground._network import free_loopback_port
+from openmagic_playground.process_launching import ProcessCommand, launch_owned_process
 
 ProviderBehavior = Literal["success", "not_applied"]
-
-
-def _free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
-        listener.bind(("127.0.0.1", 0))
-        return int(listener.getsockname()[1])
 
 
 @dataclass(frozen=True)
@@ -132,7 +123,7 @@ class SyntheticEmailProvider:
         ):
             raise TypeError("Process command override must be immutable ProcessCommand data")
         self._process_command_override = process_command_override
-        self.port = _free_port()
+        self.port = free_loopback_port()
         self.url = f"http://127.0.0.1:{self.port}"
         self.request_log = self.working_directory / "requests.jsonl"
         self._process: subprocess.Popen[bytes] | None = None
