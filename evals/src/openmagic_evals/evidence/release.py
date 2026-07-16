@@ -10,6 +10,7 @@ import sys
 import tempfile
 from datetime import UTC, datetime
 from importlib.metadata import distribution, version
+from importlib.util import find_spec
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,11 @@ from example_insurance.verification_definition import VERIFICATION_DEFINITION
 from openmagic_runtime.evidence import content_fingerprint
 
 from openmagic_evals.evidence.artifact_io import write_artifact
+from openmagic_evals.evidence.case_recording import (
+    RecordedCaseObservation,
+    load_case_observations,
+    merge_case_observations,
+)
 from openmagic_evals.evidence.contracts import (
     REQUIRED_NEGATIVE_CLAIMS,
     ArtifactCase,
@@ -28,15 +34,13 @@ from openmagic_evals.evidence.contracts import (
     DeterministicArtifact,
     DeterministicSummary,
     RaceArtifact,
+    RaceCase,
     RaceTrialEvidence,
     ReproducibilityPin,
     merge_correlations,
 )
 from openmagic_evals.evidence.deadline import bounded_evidence
-from openmagic_evals.evidence.deterministic_observations import (
-    DeterministicObservation,
-    release_observations,
-)
+from openmagic_evals.evidence.deterministic_observations import DeterministicObservation
 from openmagic_evals.evidence.matrix import (
     DETERMINISTIC_RELEASE_MATRIX,
     RaceContract,
@@ -54,11 +58,11 @@ _DISTRIBUTIONS = (
     "openmagic-evals",
     "openmagic-runtime",
 )
-_DISTRIBUTION_ROOTS = {
-    "example-insurance": Path("reference-apps/example-insurance"),
-    "openmagic-api": Path("apps/api"),
-    "openmagic-evals": Path("evals"),
-    "openmagic-runtime": Path("packages/openmagic-runtime"),
+_DISTRIBUTION_PACKAGES = {
+    "example-insurance": "example_insurance",
+    "openmagic-api": "openmagic_api",
+    "openmagic-evals": "openmagic_evals",
+    "openmagic-runtime": "openmagic_runtime",
 }
 
 
@@ -88,24 +92,36 @@ def _build_pin(root: Path) -> BuildPin:
     )
 
 
-def _distribution_digest(root: Path, name: str) -> str:
+def _distribution_digest(_root: Path, name: str) -> str:
     item = distribution(name)
     content = hashlib.sha256()
     for file in sorted(item.files or (), key=str):
+        relative = Path(str(file))
+        if not any(part.endswith(".dist-info") for part in relative.parts) or relative.name not in {
+            "METADATA",
+            "WHEEL",
+            "entry_points.txt",
+            "top_level.txt",
+        }:
+            continue
         path = Path(str(item.locate_file(file)))
         if not path.is_file():
             continue
-        content.update(str(file).encode())
+        content.update(relative.as_posix().encode())
         content.update(b"\0")
         content.update(path.read_bytes())
         content.update(b"\0")
-    source_root = root / _DISTRIBUTION_ROOTS[name]
-    for path in sorted(source_root.rglob("*")):
+    package_name = _DISTRIBUTION_PACKAGES[name]
+    package_spec = find_spec(package_name)
+    if package_spec is None or package_spec.origin is None:
+        raise RuntimeError(f"installed distribution package is unavailable: {package_name}")
+    package_root = Path(package_spec.origin).parent
+    for path in sorted(package_root.rglob("*")):
         if not path.is_file() or any(
             part == "__pycache__" or part.startswith(".") for part in path.parts
         ):
             continue
-        relative = path.relative_to(root)
+        relative = path.relative_to(package_root.parent)
         content.update(relative.as_posix().encode())
         content.update(b"\0")
         content.update(path.read_bytes())
@@ -261,6 +277,21 @@ def _release_case(
     )
 
 
+def _exact_observation(
+    case: ReleaseCase,
+    recorded: dict[str, tuple[RecordedCaseObservation, ...]],
+) -> DeterministicObservation:
+    observations = recorded.get(case.case_id, ())
+    observed_scenarios = tuple(item.scenario_id for item in observations)
+    if observed_scenarios != tuple(sorted(case.required_scenarios)):
+        raise RuntimeError(
+            f"deterministic case {case.case_id} recorded {observed_scenarios!r}, "
+            f"expected {tuple(sorted(case.required_scenarios))!r}"
+        )
+    correlations, document = merge_case_observations(observations)
+    return DeterministicObservation(correlations=correlations, document=document)
+
+
 def _trace_completeness_case(
     case: ReleaseCase,
     tests: dict[str, dict[str, Any]],
@@ -296,7 +327,7 @@ def _trace_completeness_case(
     return contract
 
 
-def _race_case(case: RaceContract, corpus: RaceCorpus) -> ArtifactCase:
+def _race_case(case: RaceContract, corpus: RaceCorpus) -> RaceCase:
     if (
         corpus.case_id != case.case_id
         or corpus.database_constraint != case.database_constraint
@@ -323,11 +354,11 @@ def _race_case(case: RaceContract, corpus: RaceCorpus) -> ArtifactCase:
             correlations=result.correlations,
             observation_digest=result.observation_digest,
             contender_process_ids=result.contender_process_ids,
-            database_overlap_observed=result.database_overlap_observed,
+            overlap_barrier_observed=result.overlap_barrier_observed,
         )
         for result in corpus.results
     )
-    return ArtifactCase(
+    return RaceCase(
         case_id=case.case_id,
         case_schema_version=1,
         expected_trials=100,
@@ -372,8 +403,6 @@ def run_deterministic_release(
         "openmagic_evals.evidence.pytest_plugin",
     )
     public_command = (
-        "uv",
-        "run",
         "openmagic-evidence",
         "deterministic",
         "--repository-root",
@@ -397,12 +426,14 @@ def run_deterministic_release(
     started_at = datetime.now(UTC)
     with tempfile.TemporaryDirectory(prefix="openmagic-evidence-") as directory:
         result_path = Path(directory) / "pytest-results.json"
+        observation_directory = Path(directory) / "case-observations"
         process_command = [
             *process_command_base,
             "--openmagic-evidence-results",
             str(result_path),
         ]
         environment = {
+            "OPENMAGIC_EVIDENCE_OBSERVATION_DIRECTORY": str(observation_directory),
             "PATH": os.environ.get("PATH", os.defpath),
             "PYTHONNOUSERSITE": "1",
         }
@@ -416,12 +447,40 @@ def run_deterministic_release(
         if not result_path.is_file():
             raise RuntimeError("pytest did not produce its explicit evidence result file")
         test_document = json.loads(result_path.read_text(encoding="utf-8"))
-        observations = release_observations(Path(directory) / "observations")
+        recorded = load_case_observations(observation_directory)
     tests = dict(test_document["tests"])
+    case_observations = {
+        case.case_id: _exact_observation(case, recorded)
+        for case in selected_release_cases
+        if case.case_id not in {"release.complete-suite", "trace.complete-durable-chain"}
+    }
+    all_correlations = merge_correlations(
+        observation.correlations for observation in case_observations.values()
+    )
+    all_document: dict[str, object] = {
+        case_id: observation.document for case_id, observation in sorted(case_observations.items())
+    }
+    for aggregate_case_id, scenario_id in (
+        ("release.complete-suite", "all-predeclared-cases"),
+        ("trace.complete-durable-chain", "all-accepted-scenarios"),
+    ):
+        if not any(case.case_id == aggregate_case_id for case in selected_release_cases):
+            continue
+        aggregate = RecordedCaseObservation(
+            case_id=aggregate_case_id,
+            scenario_id=scenario_id,
+            correlations=all_correlations,
+            document=all_document,
+        )
+        recorded[aggregate_case_id] = (aggregate,)
+        aggregate_case = next(
+            case for case in selected_release_cases if case.case_id == aggregate_case_id
+        )
+        case_observations[aggregate_case_id] = _exact_observation(aggregate_case, recorded)
     cases = tuple(
-        _trace_completeness_case(case, tests, observations[case.family])
+        _trace_completeness_case(case, tests, case_observations[case.case_id])
         if case.family == "trace_completeness"
-        else _release_case(case, tests, observations[case.family])
+        else _release_case(case, tests, case_observations[case.case_id])
         for case in selected_release_cases
     )
     corpora = {corpus.case_id: corpus for corpus in run_all_races()}
@@ -474,8 +533,6 @@ def run_race_release(
     root = repository_root.resolve()
     contracts = cardinality_one_races()
     command = (
-        "uv",
-        "run",
         "openmagic-evidence",
         "races",
         "--repository-root",

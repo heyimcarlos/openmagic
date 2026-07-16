@@ -32,7 +32,7 @@ class RaceSeedResult:
     correlations: Correlations
     observation_digest: str
     contender_process_ids: tuple[int, int]
-    database_overlap_observed: Literal[True]
+    overlap_barrier_observed: Literal[True]
 
 
 @dataclass(frozen=True)

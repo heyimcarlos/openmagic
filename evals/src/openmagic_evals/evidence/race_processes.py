@@ -50,7 +50,7 @@ class ProcessRaceResult:
 @dataclass(frozen=True)
 class ProcessRacePair:
     results: tuple[ProcessRaceResult, ProcessRaceResult]
-    database_overlap_observed: Literal[True]
+    overlap_barrier_observed: Literal[True]
 
     @property
     def process_ids(self) -> tuple[int, int]:
@@ -242,7 +242,7 @@ def run_process_contenders(
                 raise AssertionError("race contenders did not use distinct fresh interpreters")
             return ProcessRacePair(
                 results=(results[0], results[1]),
-                database_overlap_observed=True,
+                overlap_barrier_observed=True,
             )
         finally:
             coordinator.execute("SELECT pg_advisory_unlock(%s)", (key,))

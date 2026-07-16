@@ -87,7 +87,7 @@ def run_command_receipt_races(
                     }
                 ),
                 contender_process_ids=contenders.process_ids,
-                database_overlap_observed=contenders.database_overlap_observed,
+                overlap_barrier_observed=contenders.overlap_barrier_observed,
             )
         )
     return RaceCorpus(
@@ -182,7 +182,7 @@ def run_verification_submission_races(
                     }
                 ),
                 contender_process_ids=contenders.process_ids,
-                database_overlap_observed=contenders.database_overlap_observed,
+                overlap_barrier_observed=contenders.overlap_barrier_observed,
             )
         )
         protected_delivery = application.run_delivery_worker_once(

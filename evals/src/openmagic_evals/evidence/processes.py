@@ -19,12 +19,12 @@ from openmagic_runtime.threads import ThreadStore
 from openmagic_evals.evidence.artifact_io import write_artifact
 from openmagic_evals.evidence.contracts import (
     REQUIRED_NEGATIVE_CLAIMS,
-    ArtifactCase,
     CaseVerdict,
     Correlations,
     DeterministicSummary,
     DistributionSummary,
     ProcessArtifact,
+    ProcessCase,
     ProcessMetrics,
     QueueDepth,
     merge_correlations,
@@ -69,7 +69,7 @@ class ProcessEvidence:
     api_observation_digests: tuple[str, str]
     claim_latency_ms: int
     recovery_times_ms: tuple[int, int]
-    lock_wait_ms: int
+    lock_wait_lower_bound_ms: int
     observed_throughput_per_second: float
     elapsed_ms: int
 
@@ -283,11 +283,18 @@ def run_process_evidence(*, working_directory: Path, workflow_count: int = 12) -
         with lock_message_append(deployment.database_url):
             lost_delivery_process = deployment.scale_role("delivery-worker", capacity=1)[0]
             lost_delivery_authority = _wait_delivery(inspection, lost_delivery_process)
-            lock_wait_started = time.monotonic()
+            lock_wait_deadline = time.monotonic() + 5
+            while time.monotonic() < lock_wait_deadline and not inspection.query_is_lock_waiting(
+                "openmagic_runtime.messages"
+            ):
+                time.sleep(0.01)
+            if time.monotonic() >= lock_wait_deadline:
+                raise AssertionError("Delivery Worker did not enter the observed lock wait")
+            observed_lock_wait_started = time.monotonic()
             time.sleep(0.25)
             if not inspection.query_is_lock_waiting("openmagic_runtime.messages"):
                 raise AssertionError("Delivery Worker did not remain in the observed lock wait")
-            lock_wait_ms = round((time.monotonic() - lock_wait_started) * 1000)
+            lock_wait_lower_bound_ms = round((time.monotonic() - observed_lock_wait_started) * 1000)
             lost_delivery = deployment.terminate_role("delivery-worker")
             if lost_delivery.pid != lost_delivery_process.pid:
                 raise AssertionError("Delivery loss did not target the observed authority holder")
@@ -331,7 +338,7 @@ def run_process_evidence(*, working_directory: Path, workflow_count: int = 12) -
             ),
             claim_latency_ms=claim_latency_ms,
             recovery_times_ms=(workflow_recovery_ms, delivery_recovery_ms),
-            lock_wait_ms=lock_wait_ms,
+            lock_wait_lower_bound_ms=lock_wait_lower_bound_ms,
             observed_throughput_per_second=workflow_count / workflow_drain_seconds,
             elapsed_ms=round((time.monotonic() - started_at) * 1000),
         )
@@ -347,8 +354,6 @@ def run_process_release(
 ) -> ProcessArtifact:
     """Record one canonical process-loss and backpressure evidence artifact."""
     command = (
-        "uv",
-        "run",
         "openmagic-evidence",
         "processes",
         "--repository-root",
@@ -392,7 +397,7 @@ def run_process_release(
         role: sum(process.role == role for process in report.replacement_processes)
         for role in _PROCESS_ROLES
     }
-    case = ArtifactCase(
+    case = ProcessCase(
         case_id="process.loss-backpressure-recovery",
         case_schema_version=1,
         expected_trials=1,
@@ -433,7 +438,7 @@ def run_process_release(
             elapsed_ms=report.elapsed_ms,
             claim_latency_ms=_distribution((report.claim_latency_ms,)),
             recovery_time_ms=_distribution(report.recovery_times_ms),
-            lock_wait_ms=_distribution((report.lock_wait_ms,)),
+            lock_wait_lower_bound_ms=_distribution((report.lock_wait_lower_bound_ms,)),
             observed_throughput_per_second=report.observed_throughput_per_second,
         ),
     )

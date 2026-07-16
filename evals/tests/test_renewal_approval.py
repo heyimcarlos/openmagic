@@ -20,6 +20,7 @@ from example_insurance.renewals import (
     StartRenewalOutreach,
     StartRenewalOutreachInput,
 )
+from openmagic_evals.evidence.case_recording import record_renewal_case
 from openmagic_evals.harness import prepare_renewal_approval, renewal_context
 from openmagic_runtime.commands import Actor, Cause, CommandReceipt
 from openmagic_runtime.evidence import content_fingerprint
@@ -89,6 +90,17 @@ def test_approval_presentation_requires_acknowledged_delivery() -> None:
         with pytest.raises(KeyError, match="presentation"):
             application.renewal_approval_presentation(command.input.workflow_id)
         assert before_delivery.result.outcome == "stale_presentation"
+        record_renewal_case(
+            case_id="wait.one-shot",
+            scenario_id="early-input-rejected",
+            application=application,
+            database_url=database_url,
+            workflow_id=command.input.workflow_id,
+            document={
+                "outcome": before_delivery.result.outcome,
+                "wait_state": snapshot.waits[-1].state,
+            },
+        )
 
 
 def test_exact_approval_satisfies_one_wait_and_materializes_the_fenced_email_step() -> None:
@@ -155,6 +167,27 @@ def test_exact_approval_satisfies_one_wait_and_materializes_the_fenced_email_ste
         assert [(step.template_key, step.state) for step in snapshot.steps][-1] == (
             "send_renewal_email",
             "pending",
+        )
+        record_renewal_case(
+            case_id="wait.one-shot",
+            scenario_id="exact-one-shot",
+            application=application,
+            database_url=database_url,
+            workflow_id=start.input.workflow_id,
+            document={
+                "replayed_value_identically": replay == receipt,
+                "wait_state": snapshot.waits[0].state,
+                "effect_step_id": str(receipt.result.effect_step_id),
+            },
+            worker_ids=("facts", "draft", "delivery"),
+        )
+        record_renewal_case(
+            case_id="domain-event.atomic-correlation",
+            scenario_id="approval",
+            application=application,
+            database_url=database_url,
+            workflow_id=start.input.workflow_id,
+            document={"approval_outcome": receipt.result.outcome},
         )
 
 
@@ -257,6 +290,19 @@ def test_revision_creates_another_bounded_draft_and_exact_approval_wait() -> Non
         assert [item["template_key"] for item in step_states.values()].count(
             "draft_renewal_email"
         ) == 2
+        record_renewal_case(
+            case_id="domain-event.atomic-correlation",
+            scenario_id="revision",
+            application=application,
+            database_url=database_url,
+            workflow_id=command.input.workflow_id,
+            document={
+                "revision_outcome": receipt.result.outcome,
+                "draft_count": 2,
+                "wait_states": [wait.state for wait in snapshot.waits],
+            },
+            worker_ids=("revision", "revision-delivery"),
+        )
 
         cross_wired = application.approve_renewal_draft(
             ApproveRenewalDraft(

@@ -10,6 +10,7 @@ import pytest
 from openmagic_evals.evidence.claims import write_claim_report
 from openmagic_evals.evidence.contracts import (
     REQUIRED_NEGATIVE_CLAIMS,
+    AgentCaseEvidence,
     AgentConfigurationPin,
     AgentQualityArtifact,
     AgentQualitySummary,
@@ -21,6 +22,7 @@ from openmagic_evals.evidence.contracts import (
     DeterministicArtifact,
     DeterministicSummary,
     DistributionSummary,
+    RaceCase,
     RaceTrialEvidence,
     ReproducibilityPin,
     SanitizedAgentEvent,
@@ -55,7 +57,9 @@ def _pin(git_sha: str) -> ReproducibilityPin:
     )
 
 
-def _case(*, agent: bool = False, case_id: str = "release.test") -> ArtifactCase:
+def _case(
+    *, agent: bool = False, case_id: str = "release.test"
+) -> ArtifactCase | AgentCaseEvidence:
     correlations = Correlations(command_ids=("018f2f00-0000-7000-8000-000000000001",))
     trajectory = tuple(
         SanitizedAgentEvent(
@@ -85,38 +89,46 @@ def _case(*, agent: bool = False, case_id: str = "release.test") -> ArtifactCase
             ).encode()
         ).hexdigest()
     )
-    return ArtifactCase(
-        case_id="agent.development.test" if agent else case_id,
+    if not agent:
+        return ArtifactCase(
+            case_id=case_id,
+            case_schema_version=1,
+            expected_trials=1,
+            observed_trials=1,
+            seeds=(0,),
+            correlations=correlations,
+            observation_digests=("sha256:" + "7" * 64,),
+            verdict=CaseVerdict(status="passed", invariant_violations=()),
+        )
+    return AgentCaseEvidence(
+        case_id="agent.development.test",
         case_schema_version=1,
-        split="development" if agent else None,
+        split="development",
         expected_trials=1,
         observed_trials=1,
         seeds=(0,),
         correlations=correlations,
-        observation_digests=(trajectory_digest,) if agent else ("sha256:" + "7" * 64,),
-        pass_threshold=1.0 if agent else None,
-        passed_trials=1 if agent else None,
+        observation_digests=(trajectory_digest,),
+        pass_threshold=1.0,
+        passed_trials=1,
+        prohibited_actions=0,
         agent_trials=(
-            (
-                AgentTrialEvidence(
-                    seed=0,
-                    outcome_passed=True,
-                    prohibited_actions=(),
-                    latency_ms=1,
-                    trajectory_digest=trajectory_digest,
-                    correlations=correlations,
-                    trajectory=trajectory,
-                    rubric_scores={"quality": True},
-                ),
-            )
-            if agent
-            else ()
+            AgentTrialEvidence(
+                seed=0,
+                outcome_passed=True,
+                prohibited_actions=(),
+                latency_ms=1,
+                trajectory_digest=trajectory_digest,
+                correlations=correlations,
+                trajectory=trajectory,
+                rubric_scores={"quality": True},
+            ),
         ),
         verdict=CaseVerdict(status="passed", invariant_violations=()),
     )
 
 
-def _race_case(case_id: str) -> ArtifactCase:
+def _race_case(case_id: str) -> RaceCase:
     contract = next(case for case in cardinality_one_races() if case.case_id == case_id)
     correlations = Correlations(command_ids=("018f2f00-0000-7000-8000-000000000001",))
     trials = tuple(
@@ -128,11 +140,11 @@ def _race_case(case_id: str) -> ArtifactCase:
             correlations=correlations,
             observation_digest="sha256:" + f"{seed:064x}",
             contender_process_ids=(1000 + seed * 2, 1001 + seed * 2),
-            database_overlap_observed=True,
+            overlap_barrier_observed=True,
         )
         for seed in contract.seeds
     )
-    return ArtifactCase(
+    return RaceCase(
         case_id=case_id,
         case_schema_version=1,
         expected_trials=100,

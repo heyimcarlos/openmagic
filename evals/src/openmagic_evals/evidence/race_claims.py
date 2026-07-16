@@ -86,7 +86,7 @@ def run_claim_races(
                 ),
                 observation_digest=race_digest(step_result),
                 contender_process_ids=step_contenders.process_ids,
-                database_overlap_observed=step_contenders.database_overlap_observed,
+                overlap_barrier_observed=step_contenders.overlap_barrier_observed,
             )
         )
         step_worker = next(
@@ -149,7 +149,7 @@ def run_claim_races(
                 ),
                 observation_digest=race_digest(delivery_result),
                 contender_process_ids=delivery_contenders.process_ids,
-                database_overlap_observed=delivery_contenders.database_overlap_observed,
+                overlap_barrier_observed=delivery_contenders.overlap_barrier_observed,
             )
         )
         delivery_worker = next(

@@ -17,7 +17,7 @@ from example_insurance.renewals import (
 from openmagic_runtime.commands import Cause
 from openmagic_runtime.threads import ThreadStore
 
-from openmagic_evals.evidence.contracts import Correlations, merge_correlations
+from openmagic_evals.evidence.contracts import Correlations
 from openmagic_evals.evidence.inspection import EvidenceInspection
 from openmagic_evals.harness import (
     LocalEmailProvider,
@@ -166,42 +166,8 @@ def collect_verification_observation() -> DeterministicObservation:
     return DeterministicObservation(correlations=correlations, document=document)
 
 
-def release_observations(working_directory: Path) -> dict[str, DeterministicObservation]:
-    """Build family-specific projections without consuming demonstration artifacts."""
-
-    renewal = collect_renewal_observation(working_directory / "renewal")
-    verification = collect_verification_observation()
-    combined = DeterministicObservation(
-        correlations=merge_correlations((renewal.correlations, verification.correlations)),
-        document={
-            "renewal": renewal.document,
-            "verification": verification.document,
-        },
-    )
-    families = {
-        "acknowledgement": renewal,
-        "completion": renewal,
-        "definition": combined,
-        "domain_event": renewal,
-        "exact_thread_delivery": renewal,
-        "external_effect": renewal,
-        "executor": combined,
-        "lease": renewal,
-        "recovery": renewal,
-        "replay": verification,
-        "retry": renewal,
-        "route": renewal,
-        "signal": renewal,
-        "transaction": renewal,
-        "trace_completeness": combined,
-        "wait": renewal,
-    }
-    return families
-
-
 __all__ = [
     "DeterministicObservation",
     "collect_renewal_observation",
     "collect_verification_observation",
-    "release_observations",
 ]

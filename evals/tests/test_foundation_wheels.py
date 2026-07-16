@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -118,6 +119,9 @@ def test_built_wheels_install_and_boot_in_clean_environments(tmp_path) -> None:
             str(tmp_path / "wheel-renewal-demo.json"),
         ]
     )
+    renewal_artifact = json.loads(
+        (tmp_path / "wheel-renewal-demo.json").read_text(encoding="utf-8")
+    )
     _run(
         [
             str(evidence_command),
@@ -128,3 +132,12 @@ def test_built_wheels_install_and_boot_in_clean_environments(tmp_path) -> None:
             str(tmp_path / "wheel-verification-demo.json"),
         ]
     )
+    verification_artifact = json.loads(
+        (tmp_path / "wheel-verification-demo.json").read_text(encoding="utf-8")
+    )
+    for artifact in (renewal_artifact, verification_artifact):
+        assert artifact["reproducibility"]["command"][0] == "openmagic-evidence"
+        assert artifact["reproducibility"]["build"]["checkout_clean"] is True
+        assert set(artifact["reproducibility"]["build"]["distribution_digests"]) == {
+            package for package, _, _ in distributions
+        }

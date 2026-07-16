@@ -4,15 +4,19 @@ import random
 import time
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
+from typing import cast
 from uuid import uuid4
 
 import psycopg
 from example_insurance.migrations import apply_migrations
+from openmagic_evals.evidence.case_recording import record_case_observation
+from openmagic_evals.evidence.contracts import Correlations
 from openmagic_evals.harness._postgres import postgres_container
 from openmagic_runtime.kernel.control import (
     AcceptSignal,
     CloseInstance,
     KernelControl,
+    SignalReceipt,
     StartInstance,
     start_instance,
 )
@@ -104,6 +108,10 @@ def test_competing_signals_have_one_winner_in_100_seeded_real_transaction_races(
         database_url = postgres.get_connection_url(driver=None)
         apply_migrations(database_url)
         DefinitionCatalog(database_url=database_url).register(signal_race_definition())
+        instance_ids = []
+        step_ids = []
+        wait_ids = []
+        signal_ids = []
         for seed in range(100):
             subject_id = uuid4()
             started = start_instance(
@@ -170,6 +178,29 @@ def test_competing_signals_have_one_winner_in_100_seeded_real_transaction_races(
             assert sum(isinstance(outcome, RuntimeError) for outcome in outcomes) == 1, seed
             assert len(snapshot.steps) == 1, seed
             assert snapshot.waits[0].state == "satisfied", seed
+            winner = cast(
+                SignalReceipt,
+                next(outcome for outcome in outcomes if not isinstance(outcome, RuntimeError)),
+            )
+            instance_ids.append(started.instance_id)
+            step_ids.append(snapshot.steps[0].step_id)
+            wait_ids.append(wait_id)
+            signal_ids.append(winner.signal_id)
+        record_case_observation(
+            case_id="signal.competing",
+            scenario_id="100-seed-competing-signals",
+            correlations=Correlations(
+                instance_ids=tuple(instance_ids),
+                step_ids=tuple(step_ids),
+                wait_ids=tuple(wait_ids),
+                signal_ids=tuple(signal_ids),
+            ),
+            document={
+                "seeds": list(range(100)),
+                "winner_count": len(signal_ids),
+                "accepted_signals_per_wait": 1,
+            },
+        )
 
 
 def test_concurrent_exact_signal_and_closure_replays_return_one_receipt() -> None:

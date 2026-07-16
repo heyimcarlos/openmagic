@@ -6,6 +6,7 @@ from uuid import uuid4
 import psycopg
 import pytest
 from example_insurance.renewals import CancelRenewalOutreach, CancelRenewalOutreachInput
+from openmagic_evals.evidence.case_recording import record_renewal_case
 from openmagic_evals.harness import prepare_synthetic_renewal_start, renewal_context
 from openmagic_runtime.commands import Cause
 from openmagic_runtime.kernel.work import KernelWork, StaleAuthority
@@ -33,6 +34,15 @@ def test_lease_authority_boundaries_use_database_time_without_a_grace_period() -
                 worker_id="lease-boundary",
             )
             assert authority.directive == "execute"
+        record_renewal_case(
+            case_id="lease.authoritative-time",
+            scenario_id="before-expiry",
+            application=application,
+            database_url=database_url,
+            workflow_id=command.input.workflow_id,
+            document={"directive": authority.directive, "attempt_id": str(claim.attempt_id)},
+            worker_ids=("lease-boundary",),
+        )
 
         with psycopg.connect(database_url) as connection, connection.transaction():
             connection.execute(
@@ -46,6 +56,15 @@ def test_lease_authority_boundaries_use_database_time_without_a_grace_period() -
                     claim,
                     worker_id="lease-boundary",
                 )
+        record_renewal_case(
+            case_id="lease.authoritative-time",
+            scenario_id="at-expiry",
+            application=application,
+            database_url=database_url,
+            workflow_id=command.input.workflow_id,
+            document={"rejected": True, "attempt_id": str(claim.attempt_id)},
+            worker_ids=("lease-boundary",),
+        )
 
         time.sleep(0.05)
         with (
@@ -54,6 +73,15 @@ def test_lease_authority_boundaries_use_database_time_without_a_grace_period() -
             pytest.raises(StaleAuthority, match="stale"),
         ):
             KernelWork(connection).execution_authority(claim, worker_id="lease-boundary")
+        record_renewal_case(
+            case_id="lease.authoritative-time",
+            scenario_id="after-expiry",
+            application=application,
+            database_url=database_url,
+            workflow_id=command.input.workflow_id,
+            document={"rejected": True, "attempt_id": str(claim.attempt_id)},
+            worker_ids=("lease-boundary",),
+        )
 
         assert application.recover_expired_workflow_attempt()
         with (
@@ -62,6 +90,15 @@ def test_lease_authority_boundaries_use_database_time_without_a_grace_period() -
             pytest.raises(StaleAuthority, match="stale"),
         ):
             KernelWork(connection).execution_authority(claim, worker_id="lease-boundary")
+        record_renewal_case(
+            case_id="lease.authoritative-time",
+            scenario_id="after-abandonment",
+            application=application,
+            database_url=database_url,
+            workflow_id=command.input.workflow_id,
+            document={"rejected": True, "attempt_id": str(claim.attempt_id)},
+            worker_ids=("lease-boundary",),
+        )
 
         cancelled = application.cancel_renewal_outreach(
             CancelRenewalOutreach(
@@ -72,6 +109,14 @@ def test_lease_authority_boundaries_use_database_time_without_a_grace_period() -
             )
         )
         assert cancelled.result.outcome == "cancelled"
+        record_renewal_case(
+            case_id="domain-event.atomic-correlation",
+            scenario_id="cancellation",
+            application=application,
+            database_url=database_url,
+            workflow_id=command.input.workflow_id,
+            document={"outcome": cancelled.result.outcome},
+        )
 
         closure_command = prepare_synthetic_renewal_start(application, threads, 10_002)
         application.start_renewal_outreach(closure_command)
@@ -98,3 +143,16 @@ def test_lease_authority_boundaries_use_database_time_without_a_grace_period() -
                 closure_claim,
                 worker_id="closure-boundary",
             )
+        record_renewal_case(
+            case_id="lease.authoritative-time",
+            scenario_id="after-instance-close",
+            application=application,
+            database_url=database_url,
+            workflow_id=closure_command.input.workflow_id,
+            document={
+                "rejected": True,
+                "attempt_id": str(closure_claim.attempt_id),
+                "closure_outcome": closed.result.outcome,
+            },
+            worker_ids=("closure-boundary",),
+        )

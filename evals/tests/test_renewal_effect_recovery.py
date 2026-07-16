@@ -10,6 +10,7 @@ from uuid import UUID
 import psycopg
 import pytest
 from example_insurance.renewals import ExampleInsurance
+from openmagic_evals.evidence.case_recording import record_renewal_case
 from openmagic_evals.harness import (
     LocalEmailProvider,
     TestDeployment,
@@ -72,6 +73,19 @@ def test_fresh_process_recovers_after_fence_commit_before_provider_io(tmp_path) 
         assert evidence["outcomes"]["external_effect_certainties"] == ["applied"]
         assert len(provider.reconciliations()) >= 1
         assert len(provider.requests()) == 1
+        record_renewal_case(
+            case_id="external-effect.fenced-uncertainty",
+            scenario_id="after-dispatch-record-before-io",
+            application=application,
+            database_url=deployment.database_url,
+            workflow_id=command.input.workflow_id,
+            document={
+                "fenced_attempt_id": fenced["attempt_id"],
+                "requests_before_recovery": 0,
+                "requests_after_recovery": len(provider.requests()),
+            },
+            process_ids=(recovery_process.pid,),
+        )
 
 
 @pytest.mark.integration
@@ -124,6 +138,19 @@ def test_fresh_process_loss_before_fence_allows_only_safe_retry(tmp_path) -> Non
         assert recovered.pid != lost.pid
         assert evidence["outcomes"]["attempt_states"].count("abandoned") == 1
         assert len(provider.requests()) == 1
+        record_renewal_case(
+            case_id="external-effect.fenced-uncertainty",
+            scenario_id="before-dispatch-record",
+            application=application,
+            database_url=deployment.database_url,
+            workflow_id=command.input.workflow_id,
+            document={
+                "lost_process_id": lost.pid,
+                "recovered_process_id": recovered.pid,
+                "provider_requests": len(provider.requests()),
+            },
+            process_ids=(lost.pid, recovered.pid),
+        )
 
 
 @pytest.mark.integration
@@ -212,6 +239,20 @@ def test_fresh_process_loss_during_provider_io_reconciles_without_redispatch(tmp
         assert len(provider.requests()) == 1
         assert len(provider.reconciliations()) >= 1
         assert evidence["outcomes"]["external_effect_certainties"] == ["applied"]
+        record_renewal_case(
+            case_id="recovery.fresh-process",
+            scenario_id="during-provider-io",
+            application=application,
+            database_url=deployment.database_url,
+            workflow_id=command.input.workflow_id,
+            document={
+                "lost_process_id": lost.pid,
+                "recovered_process_id": recovered.pid,
+                "provider_requests": len(provider.requests()),
+                "reconciliations": len(provider.reconciliations()),
+            },
+            process_ids=(lost.pid, recovered.pid),
+        )
 
 
 @pytest.mark.integration
@@ -272,3 +313,18 @@ def test_completion_event_and_instance_closure_recover_atomically(tmp_path) -> N
         assert evidence["outcomes"]["instance_state"] == "closed"
         assert evidence["outcomes"]["completion_event_count"] == 1
         assert len(provider.requests()) == 1
+        record_renewal_case(
+            case_id="completion.evidence-backed",
+            scenario_id="completion-loss-recovery",
+            application=application,
+            database_url=deployment.database_url,
+            workflow_id=command.input.workflow_id,
+            document={
+                "lost_process_id": lost.pid,
+                "recovered_process_id": recovered.pid,
+                "after_commit_process_id": after_commit.pid,
+                "completion_event_count": evidence["outcomes"]["completion_event_count"],
+                "instance_state": evidence["outcomes"]["instance_state"],
+            },
+            process_ids=(lost.pid, recovered.pid, after_commit.pid),
+        )

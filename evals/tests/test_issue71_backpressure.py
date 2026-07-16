@@ -24,7 +24,7 @@ def test_separate_process_pools_drain_backpressure_after_forced_loss(tmp_path) -
     assert len(report.workload_observation_digests) == report.queued_workflows
     assert report.claim_latency_ms >= 0
     assert all(value > 0 for value in report.recovery_times_ms)
-    assert report.lock_wait_ms >= 0
+    assert report.lock_wait_lower_bound_ms >= 250
     assert report.observed_throughput_per_second > 0
     assert len(report.api_observation_digests) == 2
     initial_pids = {process.pid for process in report.initial_processes}

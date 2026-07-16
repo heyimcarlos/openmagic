@@ -48,6 +48,16 @@ class VerificationDemoObservation:
     step_attempt_ids: tuple[tuple[UUID, UUID], ...]
 
 
+@dataclass(frozen=True)
+class TransactionState:
+    command_receipts: int
+    workflows: int
+    instances: int
+    domain_events: int
+    steps: int
+    trace_events: int
+
+
 class EvidenceInspection:
     def __init__(self, database_url: str) -> None:
         self._database_url = database_url
@@ -164,6 +174,38 @@ class EvidenceInspection:
             challenge_id,
         )
 
+    def transaction_state(self, command_id: UUID, workflow_id: UUID) -> TransactionState:
+        with psycopg.connect(self._database_url) as connection, connection.transaction():
+            connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            row = connection.execute(
+                "SELECT "
+                "(SELECT count(*) FROM openmagic_runtime.command_receipts "
+                " WHERE command_id = %s), "
+                "(SELECT count(*) FROM example_insurance.renewal_workflows "
+                " WHERE workflow_id = %s), "
+                "(SELECT count(*) FROM openmagic_runtime.instances "
+                " WHERE input ->> 'workflow_id' = %s), "
+                "(SELECT count(*) FROM example_insurance.domain_events "
+                " WHERE workflow_id = %s), "
+                "(SELECT count(*) FROM openmagic_runtime.steps AS s "
+                " JOIN openmagic_runtime.instances AS i USING (instance_id) "
+                " WHERE i.input ->> 'workflow_id' = %s), "
+                "(SELECT count(*) FROM openmagic_runtime.trace_events AS t "
+                " JOIN openmagic_runtime.instances AS i USING (instance_id) "
+                " WHERE i.input ->> 'workflow_id' = %s)",
+                (
+                    command_id,
+                    workflow_id,
+                    str(workflow_id),
+                    workflow_id,
+                    str(workflow_id),
+                    str(workflow_id),
+                ),
+            ).fetchone()
+        if row is None:
+            raise RuntimeError("PostgreSQL did not return transaction state")
+        return TransactionState(*(int(value) for value in row))
+
     def agent_safety(self, thread_id: UUID, instance_id: UUID) -> AgentSafetyObservation:
         with psycopg.connect(self._database_url) as connection, connection.transaction():
             connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
@@ -256,5 +298,6 @@ __all__ = [
     "DeliveryAuthority",
     "EvidenceInspection",
     "QueueState",
+    "TransactionState",
     "VerificationDemoObservation",
 ]

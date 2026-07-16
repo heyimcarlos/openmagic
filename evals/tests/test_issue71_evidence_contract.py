@@ -8,6 +8,7 @@ from typing import Literal, cast
 import pytest
 from openmagic_evals.evidence.contracts import (
     REQUIRED_NEGATIVE_CLAIMS,
+    AgentCaseEvidence,
     AgentConfigurationPin,
     AgentQualityArtifact,
     AgentQualitySummary,
@@ -96,7 +97,7 @@ def _agent_configuration() -> AgentConfigurationPin:
     )
 
 
-def _agent_case() -> ArtifactCase:
+def _agent_case() -> AgentCaseEvidence:
     correlations = Correlations(command_ids=("018f2f00-0000-7000-8000-000000000001",))
     trajectory = tuple(
         SanitizedAgentEvent(
@@ -122,7 +123,7 @@ def _agent_case() -> ArtifactCase:
         separators=(",", ":"),
     ).encode()
     trajectory_digest = "sha256:" + hashlib.sha256(trajectory_document).hexdigest()
-    return ArtifactCase(
+    return AgentCaseEvidence(
         case_id="agent.development.tool-choice",
         case_schema_version=1,
         split="development",
@@ -208,6 +209,17 @@ def test_artifacts_reject_incomplete_denominators_and_lane_substitution() -> Non
             negative_claims=REQUIRED_NEGATIVE_CLAIMS,
         )
 
+    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
+        ArtifactCase.model_validate(
+            {
+                **_case().model_dump(mode="python"),
+                "split": "held_out",
+                "pass_threshold": 0.75,
+                "passed_trials": 1,
+                "prohibited_actions": 7,
+            }
+        )
+
 
 def test_race_trial_requires_cardinality_one_and_durable_correlations() -> None:
     with pytest.raises(ValueError, match="exactly one"):
@@ -219,7 +231,7 @@ def test_race_trial_requires_cardinality_one_and_durable_correlations() -> None:
             correlations=Correlations(command_ids=("018f2f00-0000-7000-8000-000000000001",)),
             observation_digest="sha256:" + "1" * 64,
             contender_process_ids=(101, 102),
-            database_overlap_observed=True,
+            overlap_barrier_observed=True,
         )
 
     with pytest.raises(ValueError, match="correlate"):
@@ -231,7 +243,7 @@ def test_race_trial_requires_cardinality_one_and_durable_correlations() -> None:
             correlations=Correlations(),
             observation_digest="sha256:" + "1" * 64,
             contender_process_ids=(101, 102),
-            database_overlap_observed=True,
+            overlap_barrier_observed=True,
         )
 
     with pytest.raises(ValueError, match="Agent quality cannot determine"):
@@ -308,7 +320,7 @@ def test_process_metrics_require_independent_roles_losses_and_drained_queues() -
             minimum=20,
             maximum=20,
         ),
-        lock_wait_ms=DistributionSummary(
+        lock_wait_lower_bound_ms=DistributionSummary(
             count=1,
             mean=5,
             median=5,

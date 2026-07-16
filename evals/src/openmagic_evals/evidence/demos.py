@@ -100,8 +100,6 @@ def run_renewal_demo(
 ) -> PlaygroundArtifact:
     started_at = datetime.now(UTC)
     command_line = (
-        "uv",
-        "run",
         "openmagic-evidence",
         "demo-renewal",
         "--repository-root",
@@ -133,8 +131,6 @@ def run_verification_demo(
 ) -> PlaygroundArtifact:
     started_at = datetime.now(UTC)
     command_line = (
-        "uv",
-        "run",
         "openmagic-evidence",
         "demo-verification",
         "--repository-root",

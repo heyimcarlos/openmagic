@@ -298,7 +298,7 @@ def _signal_trial(
         ),
         observation_digest=race_digest(document),
         contender_process_ids=contenders.process_ids,
-        database_overlap_observed=contenders.database_overlap_observed,
+        overlap_barrier_observed=contenders.overlap_barrier_observed,
     )
 
 
@@ -366,7 +366,7 @@ def _attempt_and_route_trial(
         ),
         observation_digest=race_digest(attempt_document),
         contender_process_ids=attempt_contenders.process_ids,
-        database_overlap_observed=attempt_contenders.database_overlap_observed,
+        overlap_barrier_observed=attempt_contenders.overlap_barrier_observed,
     )
     with psycopg.connect(database_url) as connection, connection.transaction():
         KernelControl(connection).succeed(
@@ -441,7 +441,7 @@ def _attempt_and_route_trial(
         ),
         observation_digest=race_digest(route_document),
         contender_process_ids=route_contenders.process_ids,
-        database_overlap_observed=route_contenders.database_overlap_observed,
+        overlap_barrier_observed=route_contenders.overlap_barrier_observed,
     )
     return attempt_result, route_result
 

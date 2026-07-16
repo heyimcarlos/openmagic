@@ -23,7 +23,7 @@ def test_all_cardinality_races_record_actual_trials() -> None:
         assert all(len(result.public_outcomes) == 2 for result in corpus.results)
         assert all(result.constraint_rows == 1 for result in corpus.results)
         assert all(result.observation_digest.startswith("sha256:") for result in corpus.results)
-        assert all(result.database_overlap_observed for result in corpus.results)
+        assert all(result.overlap_barrier_observed for result in corpus.results)
         assert all(len(set(result.contender_process_ids)) == 2 for result in corpus.results)
         assert all(
             any(result.correlations.model_dump(mode="python").values()) for result in corpus.results

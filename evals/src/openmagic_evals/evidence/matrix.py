@@ -30,6 +30,7 @@ class ReleaseCase:
     family: str
     pytest_nodes: tuple[str, ...]
     pass_condition: str
+    required_scenarios: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -53,6 +54,7 @@ DETERMINISTIC_RELEASE_MATRIX = (
             "evals/tests",
         ),
         "The complete unrestricted source and integration suite passes.",
+        required_scenarios=("all-predeclared-cases",),
     ),
     ReleaseCase(
         "definition.closed-readiness",
@@ -60,8 +62,10 @@ DETERMINISTIC_RELEASE_MATRIX = (
         (
             "packages/openmagic-runtime/tests/test_definitions.py::test_closed_definition_accepts_acyclic_exact_contracts",
             "packages/openmagic-runtime/tests/test_definitions.py::test_closed_definition_rejects_cycles_and_kind_mismatches",
+            "evals/tests/test_issue71_release_matrix.py::test_definition_case_records_closed_installed_manifests",
         ),
         "Every installed Definition is digest verified and invalid manifests fail closed.",
+        required_scenarios=("closed-manifests",),
     ),
     ReleaseCase(
         "transaction.command-atomicity",
@@ -69,8 +73,14 @@ DETERMINISTIC_RELEASE_MATRIX = (
         (
             "evals/tests/test_renewal_drafting.py::test_start_command_commits_and_replays_value_identically",
             "evals/tests/test_renewal_drafting.py::test_command_validation_rejects_nested_types_and_semantics_before_commit",
+            "evals/tests/test_renewal_drafting.py::test_command_handler_fault_rolls_back_application_kernel_event_and_receipt",
         ),
         "Valid Command state, kernel state, Domain Events, and receipt commit together; invalid input does not commit and exact replay is value-identical.",
+        required_scenarios=(
+            "before-commit-validation",
+            "during-handler-rollback",
+            "after-commit-response-loss",
+        ),
     ),
     ReleaseCase(
         "replay.public-identities",
@@ -79,22 +89,32 @@ DETERMINISTIC_RELEASE_MATRIX = (
             "evals/tests/test_verification_contract.py::test_verification_code_is_single_use_replay_safe_and_serialized",
         ),
         "Exact replay is value-identical and conflicting identity reuse fails.",
+        required_scenarios=("exact-replay-and-conflict",),
     ),
     ReleaseCase(
         "route.finite-materialization",
         "route",
         (
             "evals/tests/test_renewal_drafting.py::test_start_route_replay_returns_the_same_complete_occurrence_batch",
+            "evals/tests/test_renewal_drafting.py::test_start_route_fault_rolls_back_the_whole_occurrence_batch[steps-step-boundary-rollback]",
+            "evals/tests/test_renewal_drafting.py::test_start_route_fault_rolls_back_the_whole_occurrence_batch[trace_events-trace-boundary-rollback]",
         ),
         "A predefined Route materializes one complete finite batch and exact replay returns the same occurrences.",
+        required_scenarios=(
+            "step-boundary-rollback",
+            "trace-boundary-rollback",
+            "complete-batch-replay",
+        ),
     ),
     ReleaseCase(
         "wait.one-shot",
         "wait",
         (
             "evals/tests/test_renewal_approval.py::test_exact_approval_satisfies_one_wait_and_materializes_the_fenced_email_step",
+            "evals/tests/test_renewal_approval.py::test_approval_presentation_requires_acknowledged_delivery",
         ),
         "One exact Wait is satisfied once and early or conflicting input is not buffered.",
+        required_scenarios=("early-input-rejected", "exact-one-shot"),
     ),
     ReleaseCase(
         "signal.competing",
@@ -103,6 +123,7 @@ DETERMINISTIC_RELEASE_MATRIX = (
             "evals/tests/test_kernel_signal_race.py::test_competing_signals_have_one_winner_in_100_seeded_real_transaction_races",
         ),
         "One competing Signal wins and the public result agrees with PostgreSQL state.",
+        required_scenarios=("100-seed-competing-signals",),
     ),
     ReleaseCase(
         "lease.authoritative-time",
@@ -112,31 +133,52 @@ DETERMINISTIC_RELEASE_MATRIX = (
             "evals/tests/test_kernel_attempt_guard.py::test_current_attempt_guard_rejects_expired_abandoned_and_superseded_authority",
         ),
         "Authority is accepted only before database-time expiry and rejected at every stale point.",
+        required_scenarios=(
+            "before-expiry",
+            "at-expiry",
+            "after-expiry",
+            "after-abandonment",
+            "after-instance-close",
+        ),
     ),
     ReleaseCase(
         "retry.finite-policy",
         "retry",
         (
             "evals/tests/test_renewal_provider_effect.py::test_definite_non_application_retries_the_same_effect_identity_then_completes",
+            "evals/tests/test_renewal_provider_effect.py::test_definite_non_application_exhaustion_fails_without_uncertain_reconciliation",
         ),
         "Only policy-classified failures follow the exact finite retry schedule.",
+        required_scenarios=("safe-retry-schedule", "exhausted-budget"),
     ),
     ReleaseCase(
         "recovery.fresh-process",
         "recovery",
         (
             "evals/tests/test_issue71_backpressure.py::test_separate_process_pools_drain_backpressure_after_forced_loss",
+            "evals/tests/test_renewal_drafting.py::test_process_loss_after_claim_is_recovered_and_fenced_by_a_fresh_process",
             "evals/tests/test_renewal_effect_recovery.py::test_fresh_process_loss_during_provider_io_reconciles_without_redispatch",
         ),
         "Fresh interpreters reconstruct authority from PostgreSQL after forced process loss.",
+        required_scenarios=("after-claim-loss", "during-provider-io"),
     ),
     ReleaseCase(
         "external-effect.fenced-uncertainty",
         "external_effect",
         (
             "evals/tests/test_renewal_provider_effect.py::test_response_loss_defers_email_retry_until_fresh_provider_reconciliation",
+            "evals/tests/test_renewal_provider_effect.py::test_definite_non_application_exhaustion_fails_without_uncertain_reconciliation",
+            "evals/tests/test_renewal_effect_recovery.py::test_fresh_process_recovers_after_fence_commit_before_provider_io",
+            "evals/tests/test_renewal_effect_recovery.py::test_fresh_process_loss_before_fence_allows_only_safe_retry",
         ),
         "Dispatch is fenced and uncertain outcomes cannot trigger unsafe automatic retry.",
+        required_scenarios=(
+            "before-dispatch-record",
+            "after-dispatch-record-before-io",
+            "response-loss",
+            "provider-failure",
+            "reconciliation",
+        ),
     ),
     ReleaseCase(
         "executor.typed-malformed-timeout",
@@ -146,24 +188,40 @@ DETERMINISTIC_RELEASE_MATRIX = (
             "packages/openmagic-runtime/tests/test_execution.py::test_fresh_agent_executor_rejects_malformed_candidate_type",
             "packages/openmagic-runtime/tests/test_execution.py::test_fresh_agent_executor_terminates_work_after_timeout",
             "evals/tests/test_renewal_drafting.py::test_agent_process_loss_terminalizes_run_and_retries_without_phantom_authority",
+            "evals/tests/test_issue71_release_matrix.py::test_executor_case_records_typed_boundary_scenarios",
         ),
         "Malformed, timed-out, and lost Agent execution cannot publish an invalid result.",
+        required_scenarios=("happy", "typed-failure", "malformed", "timeout", "late"),
     ),
     ReleaseCase(
         "domain-event.atomic-correlation",
         "domain_event",
         (
-            "evals/tests/test_renewal_drafting.py::test_one_domain_event_can_create_multiple_exact_destination_delivery_obligations",
+            "evals/tests/test_renewal_provider_effect.py::test_successful_provider_evidence_completes_and_closes_the_instance",
+            "evals/tests/test_renewal_provider_effect.py::test_definite_non_application_exhaustion_fails_without_uncertain_reconciliation",
+            "evals/tests/test_renewal_approval.py::test_exact_approval_satisfies_one_wait_and_materializes_the_fenced_email_step",
+            "evals/tests/test_renewal_approval.py::test_revision_creates_another_bounded_draft_and_exact_approval_wait",
+            "evals/tests/test_issue71_lease_boundaries.py::test_lease_authority_boundaries_use_database_time_without_a_grace_period",
         ),
         "Every required Domain Event commits with its source transition and durable identities.",
+        required_scenarios=("success", "failure", "approval", "revision", "cancellation"),
     ),
     ReleaseCase(
         "delivery.exact-thread",
         "exact_thread_delivery",
         (
             "evals/tests/test_renewal_drafting.py::test_delivery_appends_once_to_only_the_frozen_exact_thread",
+            "evals/tests/test_renewal_drafting.py::test_stale_workflow_result_and_wrong_thread_delivery_proposal_are_rejected",
+            "evals/tests/test_renewal_drafting.py::test_delivery_process_loss_after_claim_recovers_without_duplicate_message",
         ),
         "One Delivery targets one immutable exact Thread and cannot append elsewhere.",
+        required_scenarios=(
+            "duplicate-creation",
+            "competing-claim",
+            "crash-before-append",
+            "crash-after-append",
+            "wrong-thread",
+        ),
     ),
     ReleaseCase(
         "acknowledgement.atomic-append",
@@ -173,14 +231,17 @@ DETERMINISTIC_RELEASE_MATRIX = (
             "evals/tests/test_renewal_drafting.py::test_delivery_process_loss_after_claim_recovers_without_duplicate_message",
         ),
         "Message append and Delivery acknowledgement recover after process loss without a duplicate Message.",
+        required_scenarios=("atomic-append", "post-append-loss-recovery"),
     ),
     ReleaseCase(
         "completion.evidence-backed",
         "completion",
         (
             "evals/tests/test_renewal_provider_effect.py::test_successful_provider_evidence_completes_and_closes_the_instance",
+            "evals/tests/test_renewal_effect_recovery.py::test_completion_event_and_instance_closure_recover_atomically",
         ),
         "Completion requires accepted evidence and atomically closes the Instance.",
+        required_scenarios=("accepted-evidence", "completion-loss-recovery"),
     ),
     ReleaseCase(
         "trace.complete-durable-chain",
@@ -189,6 +250,7 @@ DETERMINISTIC_RELEASE_MATRIX = (
             "evals/tests/test_verification_evidence.py::test_agent_and_deterministic_workflows_share_runtime_attempt_evidence",
         ),
         "Public renewal and verification projections link every accepted durable identity.",
+        required_scenarios=("all-accepted-scenarios",),
     ),
 )
 

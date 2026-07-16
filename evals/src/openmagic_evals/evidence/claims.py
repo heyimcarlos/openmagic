@@ -14,6 +14,7 @@ from openmagic_evals.evidence.contracts import (
     PlaygroundArtifact,
     ProcessArtifact,
     RaceArtifact,
+    RaceCase,
     parse_artifact,
 )
 from openmagic_evals.evidence.matrix import DETERMINISTIC_RELEASE_MATRIX, cardinality_one_races
@@ -56,10 +57,10 @@ def _validate_release_matrix(artifact: DeterministicArtifact) -> None:
     for case_id in release_contracts:
         case = cases[case_id]
         if (
-            case.verdict.status != "passed"
+            isinstance(case, RaceCase)
+            or case.verdict.status != "passed"
             or case.expected_trials != 1
             or case.observed_trials != 1
-            or case.race_trials
             or not case.observation_digests
             or not any(case.correlations.model_dump(mode="python").values())
         ):
@@ -67,14 +68,15 @@ def _validate_release_matrix(artifact: DeterministicArtifact) -> None:
     for case_id, contract in race_contracts.items():
         case = cases[case_id]
         if (
-            case.verdict.status != "passed"
+            not isinstance(case, RaceCase)
+            or case.verdict.status != "passed"
             or case.expected_trials != 100
             or case.observed_trials != 100
             or case.seeds != contract.seeds
             or len(case.race_trials) != 100
             or any(
                 trial.constraint_rows != 1
-                or not trial.database_overlap_observed
+                or not trial.overlap_barrier_observed
                 or tuple(sorted(trial.public_outcomes))
                 != tuple(sorted(contract.expected_public_outcomes))
                 for trial in case.race_trials
