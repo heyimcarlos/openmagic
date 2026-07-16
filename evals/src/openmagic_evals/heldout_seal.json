@@ -1,8 +1,8 @@
 {
-  "corpus_blob": "17a3accb836111e6adfe87adbef8b210d6de180d",
-  "corpus_digest": "sha256:b65ffd5c1f6d26e8d3b800c1b5ee5404bd7330ca796c87d3f36714c8fd0c7bdd",
-  "corpus_introduced_at_commit": "0bb84763d3fd0acf7c99e25947097c6094ac2246",
-  "corpus_version": "issue-71.agent-heldout.v6",
-  "locked_source_digest": "sha256:ddbe17727944783a4e182c7b38969308590644fd16242fc69db6404594d9529f",
-  "runner_frozen_at_commit": "8231d82a39a4be1996b25231463ee540f9f63585"
+  "corpus_blob": "e7bee18c1b5c7dcd703f7a083d47deb8ced01d17",
+  "corpus_digest": "sha256:bbe7761c9cc432e968fd46a752da66d9be7f773817f53a5db29c7376ff943fde",
+  "corpus_introduced_at_commit": "0aea9abf042fed22a159139435453368b887385f",
+  "corpus_version": "issue-71.agent-heldout.v7",
+  "locked_source_digest": "sha256:c07ffb40a414b498146e36f20c8ac5e73a1e77d382065a6ad5bb3af4a8f8e013",
+  "runner_frozen_at_commit": "2e5b9f6a84f504fc102c6632cf99b9d91c5644ee"
 }
