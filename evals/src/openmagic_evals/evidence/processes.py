@@ -461,6 +461,7 @@ def run_process_release(
             thread_id=report.lost_delivery.thread_id,
             worker_id=report.lost_delivery.worker_id,
         ),
+        workload_correlations=report.workload_correlations,
         workload_observations=report.workload_observations,
         api_observations=report.api_observations,
     )
@@ -495,7 +496,11 @@ def run_process_release(
                 thread_ids=(report.lost_delivery.thread_id,),
                 delivery_ids=(report.lost_delivery.delivery_id,),
                 delivery_attempt_ids=(report.lost_delivery.delivery_attempt_id,),
-                worker_ids=(report.lost_attempt.worker_id, report.lost_delivery.worker_id),
+                worker_ids=tuple(
+                    process.worker_id
+                    for process in (*report.initial_processes, *report.replacement_processes)
+                    if process.worker_id is not None
+                ),
                 process_ids=process_ids,
             ),
         )

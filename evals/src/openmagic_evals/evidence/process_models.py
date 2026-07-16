@@ -9,10 +9,12 @@ from pydantic import Field, model_validator
 
 from openmagic_evals.evidence.core_models import (
     ArtifactCaseBase,
+    Correlations,
     DistributionSummary,
     EvidenceModel,
     SanitizedObservation,
     canonical_digest,
+    merge_correlations,
 )
 
 ProcessRole = Literal["api", "workflow-worker", "delivery-worker"]
@@ -102,6 +104,7 @@ class ProcessObservation(EvidenceModel):
     forced_losses: tuple[ForcedProcessLoss, ForcedProcessLoss, ForcedProcessLoss]
     lost_attempt: AttemptAuthorityEvidence
     lost_delivery: DeliveryAuthorityEvidence
+    workload_correlations: Correlations
     workload_observations: tuple[SanitizedObservation, ...] = Field(min_length=1)
     api_observations: tuple[SanitizedObservation, SanitizedObservation]
 
@@ -219,4 +222,29 @@ class ProcessCase(ArtifactCaseBase):
             raise ValueError("lost Attempt authority must identify the forced Workflow Worker")
         if self.process_observation.lost_delivery.worker_id != forced_delivery.worker_id:
             raise ValueError("lost Delivery authority must identify the forced Delivery Worker")
+        all_processes = (
+            *self.process_observation.initial_processes,
+            *self.process_observation.replacement_processes,
+        )
+        proof_correlations = merge_correlations(
+            (
+                self.process_observation.workload_correlations,
+                Correlations(
+                    instance_ids=(self.process_observation.lost_attempt.instance_id,),
+                    step_ids=(self.process_observation.lost_attempt.step_id,),
+                    attempt_ids=(self.process_observation.lost_attempt.attempt_id,),
+                    thread_ids=(self.process_observation.lost_delivery.thread_id,),
+                    delivery_ids=(self.process_observation.lost_delivery.delivery_id,),
+                    delivery_attempt_ids=(
+                        self.process_observation.lost_delivery.delivery_attempt_id,
+                    ),
+                    worker_ids=tuple(
+                        item.worker_id for item in all_processes if item.worker_id is not None
+                    ),
+                    process_ids=tuple(item.pid for item in all_processes),
+                ),
+            )
+        )
+        if self.correlations != proof_correlations:
+            raise ValueError("process correlations must derive from the complete recorded proof")
         return self

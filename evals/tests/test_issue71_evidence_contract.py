@@ -493,6 +493,7 @@ def _process_case() -> ProcessCase:
             thread_id=UUID(int=6),
             worker_id="delivery-lost",
         ),
+        workload_correlations=Correlations(),
         workload_observations=workload,
         api_observations=(api, api),
     )
@@ -538,7 +539,14 @@ def _process_case() -> ProcessCase:
         observed_throughput_per_second=1,
     )
     correlations = Correlations(
-        worker_ids=("workflow-lost", "delivery-lost"), process_ids=(10, 11, 12, 20, 21, 22)
+        instance_ids=(UUID(int=1),),
+        step_ids=(UUID(int=2),),
+        attempt_ids=(UUID(int=3),),
+        thread_ids=(UUID(int=6),),
+        delivery_ids=(UUID(int=4),),
+        delivery_attempt_ids=(UUID(int=5),),
+        worker_ids=("workflow-old", "delivery-old", "workflow-lost", "delivery-lost"),
+        process_ids=(10, 11, 12, 20, 21, 22),
     )
     proof = {
         "contract": contract.model_dump(mode="json"),
@@ -603,6 +611,15 @@ def test_process_observation_rejects_duplicate_worker_identities() -> None:
 
     with pytest.raises(ValueError, match="unique worker identity"):
         ProcessObservation.model_validate(payload)
+
+
+def test_process_case_derives_correlations_from_complete_proof() -> None:
+    payload = _process_case().model_dump(mode="json")
+    payload["correlations"] = Correlations().model_dump(mode="json")
+    _rehash_process_payload(payload)
+
+    with pytest.raises(ValueError, match="correlations must derive"):
+        ProcessCase.model_validate(payload)
 
 
 def test_surface_verdict_cannot_hide_recorded_violations() -> None:
