@@ -55,7 +55,7 @@ def test_agent_corpus_seal_rejects_current_blob_mutation(tmp_path: Path) -> None
     corpus = repository / "evals/src/openmagic_evals/evidence/_sealed_agent_corpus.py"
     corpus.write_text(corpus.read_text(encoding="utf-8") + "\n", encoding="utf-8")
 
-    with pytest.raises(RuntimeError, match="changed after"):
+    with pytest.raises(RuntimeError, match="freeze-before-exposure"):
         load_sealed_held_out_cases(repository)
 
 
