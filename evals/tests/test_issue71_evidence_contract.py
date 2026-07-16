@@ -11,6 +11,7 @@ from openmagic_evals.evidence.contracts import (
     REQUIRED_NEGATIVE_CLAIMS,
     AgentCaseEvidence,
     AgentConfigurationPin,
+    AgentCorpusPin,
     AgentQualityArtifact,
     AgentQualitySummary,
     AgentTrialEvidence,
@@ -27,6 +28,7 @@ from openmagic_evals.evidence.contracts import (
     DeterministicSummary,
     DistributionSummary,
     ForcedProcessLoss,
+    PostgresDeploymentPin,
     ProcessCase,
     ProcessContract,
     ProcessIdentityEvidence,
@@ -107,23 +109,28 @@ def _pin() -> ReproducibilityPin:
         started_at=datetime(2026, 7, 15, 20, 0, tzinfo=UTC),
         finished_at=datetime(2026, 7, 15, 20, 1, tzinfo=UTC),
         timeout_seconds=900,
-        postgres_version="17.5",
-        postgres_image="postgres@sha256:" + "1" * 64,
-        postgres_configuration={
-            "synchronous_commit": "on",
-            "transaction_isolation": "read committed",
-        },
-        postgres_configuration_digest="sha256:" + "b" * 64,
-        migration_heads={
-            "example_insurance": "0004_deterministic_verification",
-            "openmagic_runtime": "0003_fenced_effect_kernel",
-        },
+        postgres_deployments=(
+            PostgresDeploymentPin(
+                deployment_id="sha256:" + "d" * 64,
+                postgres_version="17.5",
+                postgres_image="postgres@sha256:" + "1" * 64,
+                postgres_configuration={
+                    "synchronous_commit": "on",
+                    "transaction_isolation": "read committed",
+                },
+                postgres_configuration_digest="sha256:" + "b" * 64,
+                migration_heads={
+                    "example_insurance": "0004_deterministic_verification",
+                    "openmagic_runtime": "0003_fenced_effect_kernel",
+                },
+            ),
+        ),
         definition_digests={"example_insurance.renewal": "sha256:" + "c" * 64},
     )
 
 
 def _case(case_id: str = "command.exact_replay") -> ArtifactCase:
-    correlations = Correlations(command_ids=("018f2f00-0000-7000-8000-000000000001",))
+    correlations = Correlations(runtime={"command_ids": ("018f2f00-0000-7000-8000-000000000001",)})
     observation = {"outcome": "passed"}
     observation_digest = (
         "sha256:"
@@ -166,8 +173,20 @@ def _agent_configuration() -> AgentConfigurationPin:
     )
 
 
+def _agent_corpus() -> AgentCorpusPin:
+    return AgentCorpusPin(
+        development_cases_digest="sha256:" + "a" * 64,
+        held_out_corpus_version="test.v1",
+        held_out_cases_digest="sha256:" + "b" * 64,
+        held_out_sealed_at_commit="1" * 40,
+        tuning_locked_paths=("example/agent.py",),
+        execution_phases=("development", "held_out"),
+        tuning_unchanged_after_seal=True,
+    )
+
+
 def _agent_case() -> AgentCaseEvidence:
-    correlations = Correlations(command_ids=("018f2f00-0000-7000-8000-000000000001",))
+    correlations = Correlations(runtime={"command_ids": ("018f2f00-0000-7000-8000-000000000001",)})
     trajectory = tuple(
         SanitizedAgentEvent(
             sequence=index,
@@ -310,7 +329,9 @@ def test_race_trial_requires_cardinality_one_and_durable_correlations() -> None:
             jitter_microseconds=(1, 2),
             public_outcomes=("won", "lost"),
             constraint_rows=2,
-            correlations=Correlations(command_ids=("018f2f00-0000-7000-8000-000000000001",)),
+            correlations=Correlations(
+                runtime={"command_ids": ("018f2f00-0000-7000-8000-000000000001",)}
+            ),
             observation_digest="sha256:" + "1" * 64,
             observation={"seed": 0},
             contender_process_ids=(101, 102),
@@ -333,6 +354,7 @@ def test_race_trial_requires_cardinality_one_and_durable_correlations() -> None:
     with pytest.raises(ValueError, match="Agent quality cannot determine"):
         AgentQualityArtifact(
             reproducibility=_pin(),
+            corpus=_agent_corpus(),
             agent_configurations=(_agent_configuration(),),
             cases=(_agent_case(),),
             summary=AgentQualitySummary(
@@ -358,7 +380,7 @@ def test_race_trial_requires_cardinality_one_and_durable_correlations() -> None:
 
 
 def test_race_digest_binds_every_claim_bearing_field() -> None:
-    correlations = Correlations(command_ids=("018f2f00-0000-7000-8000-000000000001",))
+    correlations = Correlations(runtime={"command_ids": ("018f2f00-0000-7000-8000-000000000001",)})
     observation: dict[str, JsonValue] = {"durable_id": "018f2f00-0000-7000-8000-000000000001"}
     trial = RaceTrialEvidence(
         seed=7,
@@ -539,14 +561,20 @@ def _process_case() -> ProcessCase:
         observed_throughput_per_second=1,
     )
     correlations = Correlations(
-        instance_ids=(UUID(int=1),),
-        step_ids=(UUID(int=2),),
-        attempt_ids=(UUID(int=3),),
-        thread_ids=(UUID(int=6),),
-        delivery_ids=(UUID(int=4),),
-        delivery_attempt_ids=(UUID(int=5),),
-        worker_ids=("workflow-old", "delivery-old", "workflow-lost", "delivery-lost"),
-        process_ids=(10, 11, 12, 20, 21, 22),
+        runtime={
+            "instance_ids": (UUID(int=1),),
+            "step_ids": (UUID(int=2),),
+            "attempt_ids": (UUID(int=3),),
+        },
+        application={
+            "thread_ids": (UUID(int=6),),
+            "delivery_ids": (UUID(int=4),),
+            "delivery_attempt_ids": (UUID(int=5),),
+        },
+        process={
+            "worker_ids": ("workflow-old", "delivery-old", "workflow-lost", "delivery-lost"),
+            "process_ids": (10, 11, 12, 20, 21, 22),
+        },
     )
     proof = {
         "contract": contract.model_dump(mode="json"),

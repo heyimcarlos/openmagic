@@ -1,9 +1,7 @@
-"""Pinned synthetic renewal and verification demonstrations."""
+"""Evidence wrappers around installed playground demonstrations."""
 
 from __future__ import annotations
 
-import hashlib
-import json
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -17,17 +15,12 @@ from openmagic_evals.evidence.contracts import (
     PlaygroundSummary,
     deterministic_observation_digest,
 )
+from openmagic_evals.evidence.core_models import canonical_digest
 from openmagic_evals.evidence.deadline import bounded_evidence
-from openmagic_evals.evidence.deterministic_observations import (
-    collect_renewal_observation,
-    collect_verification_observation,
-)
+from openmagic_evals.evidence.pins import PostgresDeploymentPin
+from openmagic_evals.evidence.playground import playground_correlations
+from openmagic_evals.evidence.playground_client import invoke_playground
 from openmagic_evals.evidence.reproducibility import reproducibility_pin
-
-
-def _digest(value: object) -> str:
-    encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
-    return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
 def _demo_artifact(
@@ -39,7 +32,7 @@ def _demo_artifact(
     started_at: datetime,
     correlations: Correlations,
     observation: dict[str, object],
-    process_controls: bool,
+    postgres_deployments: tuple[PostgresDeploymentPin, ...],
     timeout_seconds: int,
 ) -> PlaygroundArtifact:
     finished_at = datetime.now(UTC)
@@ -48,7 +41,7 @@ def _demo_artifact(
             scenario_id=case_id,
             correlations=correlations,
             observation=observation,
-            observation_digest=_digest(observation),
+            observation_digest=canonical_digest(observation),
         ),
     )
     artifact = PlaygroundArtifact(
@@ -58,7 +51,8 @@ def _demo_artifact(
             started_at=started_at,
             finished_at=finished_at,
             timeout_seconds=timeout_seconds,
-            case_corpus_digest=_digest(case_id),
+            case_corpus_digest=canonical_digest(case_id),
+            postgres_deployments=postgres_deployments,
         ),
         cases=(
             ArtifactCase(
@@ -79,7 +73,7 @@ def _demo_artifact(
             effects_enabled_by_default=False,
             local_provider=True,
             reset_verified=False,
-            process_controls_verified=process_controls,
+            process_controls_verified=False,
             contributes_to_correctness=False,
         ),
         limitations=(
@@ -112,16 +106,18 @@ def run_renewal_demo(
         "--timeout-seconds",
         str(timeout_seconds),
     )
-    result = collect_renewal_observation(working_directory)
+    result = invoke_playground("demo-renewal", timeout_seconds=timeout_seconds)
     return _demo_artifact(
         repository_root=repository_root,
         output=output,
         command=command_line,
-        case_id="demo.renewal-complete",
+        case_id="demo.renewal-safe-wait",
         started_at=started_at,
-        correlations=result.correlations,
-        observation=result.document,
-        process_controls=False,
+        correlations=playground_correlations(result["correlations"]),
+        observation=result["observation"],
+        postgres_deployments=tuple(
+            PostgresDeploymentPin.model_validate(value) for value in result["postgres_deployments"]
+        ),
         timeout_seconds=timeout_seconds,
     )
 
@@ -141,16 +137,18 @@ def run_verification_demo(
         "--timeout-seconds",
         str(timeout_seconds),
     )
-    result = collect_verification_observation()
+    result = invoke_playground("demo-verification", timeout_seconds=timeout_seconds)
     return _demo_artifact(
         repository_root=repository_root,
         output=output,
         command=command_line,
         case_id="demo.deterministic-verification",
         started_at=started_at,
-        correlations=result.correlations,
-        observation=result.document,
-        process_controls=False,
+        correlations=playground_correlations(result["correlations"]),
+        observation=result["observation"],
+        postgres_deployments=tuple(
+            PostgresDeploymentPin.model_validate(value) for value in result["postgres_deployments"]
+        ),
         timeout_seconds=timeout_seconds,
     )
 

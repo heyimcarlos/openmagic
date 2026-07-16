@@ -27,7 +27,11 @@ from openmagic_runtime.kernel.definitions import (
 )
 from openmagic_runtime.kernel.work import ClaimWork, DispositionRequired, claim_once
 
-from openmagic_evals.evidence.contracts import Correlations
+from openmagic_evals.evidence.contracts import (
+    Correlations,
+    ProcessCorrelations,
+    RuntimeCorrelations,
+)
 from openmagic_evals.evidence.inspection import EvidenceInspection
 from openmagic_evals.evidence.race_models import (
     RaceCorpus,
@@ -264,12 +268,23 @@ def _signal_trial(
         payloads=requests,
     )
     outcomes: tuple[ProcessRaceResult, ProcessRaceResult] = contenders.results
-    public = tuple("accepted" if item.error_type is None else "conflict" for item in outcomes)
+    expected_conflict = ("RuntimeError", "Signal target Wait is no longer unsatisfied")
+    public = tuple(
+        "accepted"
+        if item.error_type is None
+        else "conflict"
+        if (item.error_type, item.error_message) == expected_conflict
+        else "unexpected_error"
+        for item in outcomes
+    )
     unexpected_errors = tuple(
-        item.error_type for item in outcomes if item.error_type not in {None, "RuntimeError"}
+        (item.error_type, item.error_message)
+        for item in outcomes
+        if item.error_type is not None
+        and (item.error_type, item.error_message) != expected_conflict
     )
     if unexpected_errors:
-        raise RuntimeError(f"Signal race contender failed: {unexpected_errors}")
+        raise RuntimeError(f"Signal race contender failed unexpectedly: {unexpected_errors}")
     winner = next(item.require_value() for item in outcomes if item.error_type is None)
     if not isinstance(winner, SignalReceipt):
         raise AssertionError("Signal race did not return its typed winner receipt")
@@ -291,12 +306,14 @@ def _signal_trial(
         public_outcomes=public,
         constraint_rows=constraint_rows,
         correlations=Correlations(
-            instance_ids=(started.instance_id,),
-            step_ids=tuple(winner.steps.values()),
-            wait_ids=(wait_id,),
-            signal_ids=(winner.signal_id,),
-            trace_event_ids=(started.trace_event_id, winner.trace_event_id),
-            process_ids=contenders.process_ids,
+            runtime=RuntimeCorrelations(
+                instance_ids=(started.instance_id,),
+                step_ids=tuple(winner.steps.values()),
+                wait_ids=(wait_id,),
+                signal_ids=(winner.signal_id,),
+                trace_event_ids=(started.trace_event_id, winner.trace_event_id),
+            ),
+            process=ProcessCorrelations(process_ids=contenders.process_ids),
         ),
         observation=document,
         contender_process_ids=contenders.process_ids,
@@ -361,12 +378,16 @@ def _attempt_and_route_trial(
         public_outcomes=attempt_public,
         constraint_rows=attempt_count,
         correlations=Correlations(
-            instance_ids=(claim.instance_id,),
-            step_ids=(claim.step_id,),
-            attempt_ids=(claim.attempt_id,),
-            trace_event_ids=(started.trace_event_id,),
-            worker_ids=(f"attempt-result-{seed}",),
-            process_ids=attempt_contenders.process_ids,
+            runtime=RuntimeCorrelations(
+                instance_ids=(claim.instance_id,),
+                step_ids=(claim.step_id,),
+                attempt_ids=(claim.attempt_id,),
+                trace_event_ids=(started.trace_event_id,),
+            ),
+            process=ProcessCorrelations(
+                worker_ids=(f"attempt-result-{seed}",),
+                process_ids=attempt_contenders.process_ids,
+            ),
         ),
         observation=attempt_document,
         contender_process_ids=attempt_contenders.process_ids,
@@ -440,10 +461,12 @@ def _attempt_and_route_trial(
         public_outcomes=route_public,
         constraint_rows=route_count,
         correlations=Correlations(
-            instance_ids=(route_started.instance_id,),
-            step_ids=(route_claim.step_id, *finish_step_ids),
-            attempt_ids=(route_claim.attempt_id,),
-            process_ids=route_contenders.process_ids,
+            runtime=RuntimeCorrelations(
+                instance_ids=(route_started.instance_id,),
+                step_ids=(route_claim.step_id, *finish_step_ids),
+                attempt_ids=(route_claim.attempt_id,),
+            ),
+            process=ProcessCorrelations(process_ids=route_contenders.process_ids),
         ),
         observation=route_document,
         contender_process_ids=route_contenders.process_ids,

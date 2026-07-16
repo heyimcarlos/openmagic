@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from openmagic_evals.evidence.contracts import has_correlations
 from openmagic_evals.evidence.races import run_all_races
 
 
@@ -25,6 +26,4 @@ def test_all_cardinality_races_record_actual_trials() -> None:
         assert all(result.observation_digest.startswith("sha256:") for result in corpus.results)
         assert all(result.overlap_barrier_observed for result in corpus.results)
         assert all(len(set(result.contender_process_ids)) == 2 for result in corpus.results)
-        assert all(
-            any(result.correlations.model_dump(mode="python").values()) for result in corpus.results
-        )
+        assert all(has_correlations(result.correlations) for result in corpus.results)

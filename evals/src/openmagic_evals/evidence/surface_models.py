@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from openmagic_evals.evidence.pins import ReproducibilityPin
+from openmagic_evals.evidence.release_models import SCHEMA_VERSION
 
 
 class _SurfaceModel(BaseModel):
@@ -68,9 +73,32 @@ class SurfaceAuditSummary(_SurfaceModel):
         return self
 
 
+class SurfaceAuditArtifact(_SurfaceModel):
+    schema_version: Literal["openmagic.enterprise-evidence.v1"] = SCHEMA_VERSION
+    artifact_kind: Literal["surface_audit"] = "surface_audit"
+    lane: Literal["installable_surface"] = "installable_surface"
+    reproducibility: ReproducibilityPin
+    repository: RepositorySurfaceEvidence
+    installed: InstalledSurfaceEvidence
+    cold_schema: ColdSchemaEvidence
+    summary: SurfaceAuditSummary
+    limitations: tuple[str, ...]
+
+    @model_validator(mode="after")
+    def validate_surface_audit(self) -> SurfaceAuditArtifact:
+        if self.summary.repository_passed != self.repository.passed:
+            raise ValueError("repository audit summary contradicts its evidence")
+        if self.summary.installed_surface_passed != self.installed.passed:
+            raise ValueError("installed audit summary contradicts its evidence")
+        if self.summary.cold_schema_passed != self.cold_schema.passed:
+            raise ValueError("cold schema summary contradicts its evidence")
+        return self
+
+
 __all__ = [
     "ColdSchemaEvidence",
     "InstalledSurfaceEvidence",
     "RepositorySurfaceEvidence",
+    "SurfaceAuditArtifact",
     "SurfaceAuditSummary",
 ]

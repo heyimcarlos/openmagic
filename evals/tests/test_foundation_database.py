@@ -4,7 +4,7 @@ from uuid import uuid4
 
 import psycopg
 import pytest
-from example_insurance.migrations import apply_migrations
+from example_insurance.migrations import apply_migrations, apply_migrations_on
 from openmagic_evals.evidence.audit import audit_cold_schema
 from openmagic_evals.harness._postgres import postgres_container
 from openmagic_evals.harness.synthetic_reset import (
@@ -124,6 +124,27 @@ def test_cold_migrations_create_independently_owned_schemas_without_reverse_fore
             for kind, definition in challenge_constraints
         )
         assert redundant_pending_index == []
+
+
+@pytest.mark.integration
+def test_connection_scoped_migrations_rollback_with_the_caller_transaction() -> None:
+    def apply_then_rollback(database_url: str) -> None:
+        with psycopg.connect(database_url) as connection, connection.transaction():
+            apply_migrations_on(connection)
+            assert connection.execute(
+                "SELECT to_regnamespace('openmagic_runtime') IS NOT NULL"
+            ).fetchone() == (True,)
+            raise RuntimeError("force rollback")
+
+    with postgres_container(database_name=f"openmagic_test_{uuid4().hex}") as postgres:
+        database_url = postgres.get_connection_url(driver=None)
+        with pytest.raises(RuntimeError, match="force rollback"):
+            apply_then_rollback(database_url)
+
+        with psycopg.connect(database_url) as connection:
+            assert connection.execute(
+                "SELECT to_regnamespace('openmagic_runtime'), to_regnamespace('example_insurance')"
+            ).fetchone() == (None, None)
 
 
 @pytest.mark.integration

@@ -12,7 +12,15 @@ from uuid import UUID, uuid4
 
 from example_insurance.renewals import ExampleInsurance
 
-from openmagic_evals.evidence.contracts import Correlations, merge_correlations
+from openmagic_evals.evidence.contracts import (
+    AgentCorrelations,
+    ApplicationCorrelations,
+    Correlations,
+    ProcessCorrelations,
+    ProviderCorrelations,
+    RuntimeCorrelations,
+    merge_correlations,
+)
 from openmagic_evals.evidence.inspection import EvidenceInspection
 
 _DIRECTORY_ENVIRONMENT = "OPENMAGIC_EVIDENCE_OBSERVATION_DIRECTORY"
@@ -57,31 +65,86 @@ def record_renewal_case(
         case_id=case_id,
         scenario_id=scenario_id,
         correlations=Correlations(
-            command_ids=tuple(
-                dict.fromkeys((UUID(str(values["command_id"])), *additional_command_ids))
+            runtime=RuntimeCorrelations(
+                command_ids=tuple(
+                    dict.fromkeys((UUID(str(values["command_id"])), *additional_command_ids))
+                ),
+                workflow_ids=(UUID(str(values["workflow_id"])),),
+                instance_ids=(instance_id,),
+                step_ids=_ids(values["step_ids"]),
+                attempt_ids=_ids(values["attempt_ids"]),
+                wait_ids=_ids(outcomes["approval_wait_ids"]),
+                signal_ids=_ids(values["signal_ids"]),
+                trace_event_ids=trace_event_ids,
             ),
-            workflow_ids=(UUID(str(values["workflow_id"])),),
-            instance_ids=(instance_id,),
-            step_ids=_ids(values["step_ids"]),
-            attempt_ids=_ids(values["attempt_ids"]),
-            wait_ids=_ids(outcomes["approval_wait_ids"]),
-            signal_ids=_ids(values["signal_ids"]),
-            trace_event_ids=trace_event_ids,
-            thread_ids=(UUID(str(values["thread_id"])),),
-            message_ids=_ids(values["message_ids"]),
-            agent_run_ids=_ids(values["agent_run_ids"]),
-            domain_event_ids=(
-                _ids(values["domain_event_ids"]) if domain_event_ids is None else domain_event_ids
+            application=ApplicationCorrelations(
+                thread_ids=(UUID(str(values["thread_id"])),),
+                message_ids=_ids(values["message_ids"]),
+                domain_event_ids=(
+                    _ids(values["domain_event_ids"])
+                    if domain_event_ids is None
+                    else domain_event_ids
+                ),
+                delivery_ids=_ids(values["delivery_ids"]),
+                delivery_attempt_ids=delivery_attempt_ids,
+                external_effect_ids=_ids(values["logical_effect_ids"]),
+                approval_grant_ids=_ids(values["approval_grant_ids"]),
             ),
-            delivery_ids=_ids(values["delivery_ids"]),
-            delivery_attempt_ids=delivery_attempt_ids,
-            external_effect_ids=_ids(values["logical_effect_ids"]),
-            approval_grant_ids=_ids(values["approval_grant_ids"]),
-            worker_ids=worker_ids,
-            process_ids=process_ids,
-            provider_request_ids=provider_request_ids,
+            agent=AgentCorrelations(agent_run_ids=_ids(values["agent_run_ids"])),
+            process=ProcessCorrelations(worker_ids=worker_ids, process_ids=process_ids),
+            provider=ProviderCorrelations(provider_request_ids=provider_request_ids),
         ),
         document=document,
+    )
+
+
+def record_complete_durable_chain(
+    *,
+    application: ExampleInsurance,
+    database_url: str,
+    renewal_workflow_id: UUID,
+    challenge_id: UUID,
+) -> None:
+    """Record one relationally verified chain from one PostgreSQL snapshot."""
+
+    chain = EvidenceInspection(database_url).durable_chain(
+        renewal_workflow_id=renewal_workflow_id,
+        challenge_id=challenge_id,
+    )
+    correlations = Correlations(
+        runtime=RuntimeCorrelations(
+            command_ids=chain.command_ids,
+            workflow_ids=chain.workflow_ids,
+            instance_ids=chain.instance_ids,
+            step_ids=chain.step_ids,
+            attempt_ids=chain.attempt_ids,
+            wait_ids=chain.wait_ids,
+            signal_ids=chain.signal_ids,
+            trace_event_ids=chain.trace_event_ids,
+        ),
+        application=ApplicationCorrelations(
+            thread_ids=chain.thread_ids,
+            message_ids=chain.message_ids,
+            domain_event_ids=chain.domain_event_ids,
+            delivery_ids=chain.delivery_ids,
+            delivery_attempt_ids=chain.delivery_attempt_ids,
+            approval_grant_ids=chain.approval_grant_ids,
+            verification_challenge_ids=chain.verification_challenge_ids,
+            verification_session_ids=chain.verification_session_ids,
+        ),
+        agent=AgentCorrelations(agent_run_ids=chain.agent_run_ids),
+    )
+    evidence = json.loads(application.renewal_evidence_json(renewal_workflow_id))
+    record_case_observation(
+        case_id="trace.complete-durable-chain",
+        scenario_id="one-relational-chain",
+        correlations=correlations,
+        document={
+            "connected": True,
+            "relationship_checks": chain.relationship_checks,
+            "renewal_evidence_schema": evidence["schema_version"],
+            "renewal_evidence_redacted": evidence["redacted"],
+        },
     )
 
 
@@ -168,5 +231,6 @@ __all__ = [
     "load_case_observations",
     "merge_case_observations",
     "record_case_observation",
+    "record_complete_durable_chain",
     "record_renewal_case",
 ]

@@ -27,6 +27,7 @@ def test_built_wheels_install_and_boot_in_clean_environments(tmp_path) -> None:
         ("openmagic-runtime", "openmagic_runtime", "openmagic_runtime"),
         ("example-insurance", "example_insurance", "example_insurance"),
         ("openmagic-api", "openmagic_api", "openmagic_api"),
+        ("openmagic-playground", "openmagic_playground", "openmagic_playground"),
         ("openmagic-evals", "openmagic_evals", "openmagic_evals"),
     )
     wheel_directory = tmp_path / "wheels"
@@ -86,8 +87,8 @@ def test_built_wheels_install_and_boot_in_clean_environments(tmp_path) -> None:
             (
                 "import os\n"
                 "from pathlib import Path\n"
-                "from openmagic_evals.harness import DeploymentVerifier, TestDeployment\n"
-                "with TestDeployment(working_directory=Path(os.environ['WORK_DIRECTORY'])) "
+                "from openmagic_evals.harness import DeploymentVerifier, PlaygroundDeployment\n"
+                "with PlaygroundDeployment(working_directory=Path(os.environ['WORK_DIRECTORY'])) "
                 "as deployment:\n"
                 "    verdict = DeploymentVerifier(deployment).verify_boot()\n"
                 "    assert verdict.passed, verdict.violations\n"

@@ -40,6 +40,10 @@ from openmagic_evals.evidence.matrix import (
     cardinality_one_races,
     select_pytest_results,
 )
+from openmagic_evals.evidence.postgres_provenance import (
+    load_postgres_deployments,
+    record_postgres_deployments,
+)
 from openmagic_evals.evidence.race_models import RaceCorpus
 from openmagic_evals.evidence.races import run_all_races
 from openmagic_evals.evidence.reproducibility import reproducibility_pin, sha256
@@ -177,30 +181,38 @@ def _trace_completeness_case(
 ) -> ArtifactCase:
     contract = _release_case(case, tests, observation)
     correlations = observation.correlations
-    required_identity_groups = (
-        correlations.command_ids,
-        correlations.workflow_ids,
-        correlations.instance_ids,
-        correlations.step_ids,
-        correlations.attempt_ids,
-        correlations.wait_ids,
-        correlations.signal_ids,
-        correlations.trace_event_ids,
-        correlations.thread_ids,
-        correlations.message_ids,
-        correlations.agent_run_ids,
-        correlations.domain_event_ids,
-        correlations.delivery_ids,
-        correlations.delivery_attempt_ids,
-        correlations.external_effect_ids,
-        correlations.approval_grant_ids,
-        correlations.verification_challenge_ids,
-        correlations.verification_session_ids,
-        correlations.worker_ids,
-        correlations.process_ids,
-        correlations.provider_request_ids,
+    required_durable_identity_groups = (
+        correlations.runtime.command_ids,
+        correlations.runtime.workflow_ids,
+        correlations.runtime.instance_ids,
+        correlations.runtime.step_ids,
+        correlations.runtime.attempt_ids,
+        correlations.runtime.wait_ids,
+        correlations.runtime.signal_ids,
+        correlations.runtime.trace_event_ids,
+        correlations.application.thread_ids,
+        correlations.application.message_ids,
+        correlations.agent.agent_run_ids,
+        correlations.application.domain_event_ids,
+        correlations.application.delivery_ids,
+        correlations.application.delivery_attempt_ids,
+        correlations.application.approval_grant_ids,
+        correlations.application.verification_challenge_ids,
+        correlations.application.verification_session_ids,
     )
-    if not all(required_identity_groups):
+    scenario_documents = observation.document.get("scenarios")
+    if not isinstance(scenario_documents, list) or len(scenario_documents) != 1:
+        raise AssertionError("trace completeness requires one canonical scenario")
+    scenario_document = scenario_documents[0]
+    proof = scenario_document.get("observation") if isinstance(scenario_document, dict) else None
+    relationship_checks = proof.get("relationship_checks") if isinstance(proof, dict) else None
+    if (
+        not all(required_durable_identity_groups)
+        or not isinstance(proof, dict)
+        or proof.get("connected") is not True
+        or not isinstance(relationship_checks, list)
+        or len(relationship_checks) < 7
+    ):
         raise AssertionError("trace completeness omitted an accepted durable identity")
     return contract
 
@@ -296,6 +308,7 @@ def run_deterministic_release(
     with tempfile.TemporaryDirectory(prefix="openmagic-evidence-") as directory:
         result_path = Path(directory) / "pytest-results.json"
         observation_directory = Path(directory) / "case-observations"
+        postgres_directory = Path(directory) / "postgres-deployments"
         process_command = [
             *process_command_base,
             "--openmagic-evidence-results",
@@ -303,6 +316,7 @@ def run_deterministic_release(
         ]
         environment = {
             "OPENMAGIC_EVIDENCE_OBSERVATION_DIRECTORY": str(observation_directory),
+            "OPENMAGIC_EVIDENCE_POSTGRES_DIRECTORY": str(postgres_directory),
             "PATH": os.environ.get("PATH", os.defpath),
             "PYTHONNOUSERSITE": "1",
         }
@@ -317,41 +331,22 @@ def run_deterministic_release(
             raise RuntimeError("pytest did not produce its explicit evidence result file")
         test_document = json.loads(result_path.read_text(encoding="utf-8"))
         recorded = load_case_observations(observation_directory)
+        pytest_deployments = load_postgres_deployments(postgres_directory)
     tests = dict(test_document["tests"])
     case_observations = {
-        case.case_id: _exact_observation(case, recorded)
-        for case in selected_release_cases
-        if case.case_id != "trace.complete-durable-chain"
+        case.case_id: _exact_observation(case, recorded) for case in selected_release_cases
     }
-    all_correlations = merge_correlations(
-        observation.correlations for observation in case_observations.values()
-    )
-    all_document: dict[str, object] = {
-        case_id: observation.document for case_id, observation in sorted(case_observations.items())
-    }
-    for aggregate_case_id, scenario_id in (
-        ("trace.complete-durable-chain", "all-accepted-scenarios"),
-    ):
-        if not any(case.case_id == aggregate_case_id for case in selected_release_cases):
-            continue
-        aggregate = RecordedCaseObservation(
-            case_id=aggregate_case_id,
-            scenario_id=scenario_id,
-            correlations=all_correlations,
-            document=all_document,
-        )
-        recorded[aggregate_case_id] = (aggregate,)
-        aggregate_case = next(
-            case for case in selected_release_cases if case.case_id == aggregate_case_id
-        )
-        case_observations[aggregate_case_id] = _exact_observation(aggregate_case, recorded)
     cases = tuple(
         _trace_completeness_case(case, tests, case_observations[case.case_id])
         if case.family == "trace_completeness"
         else _release_case(case, tests, case_observations[case.case_id])
         for case in selected_release_cases
     )
-    corpora = {corpus.case_id: corpus for corpus in run_all_races()}
+    with tempfile.TemporaryDirectory(prefix="openmagic-race-provenance-") as directory:
+        postgres_directory = Path(directory)
+        with record_postgres_deployments(postgres_directory):
+            corpora = {corpus.case_id: corpus for corpus in run_all_races()}
+        race_deployments = load_postgres_deployments(postgres_directory)
     race_cases = tuple(_race_case(case, corpora[case.case_id]) for case in selected_race_contracts)
     finished_at = datetime.now(UTC)
     all_cases = cases + race_cases
@@ -366,6 +361,12 @@ def run_deterministic_release(
             finished_at=finished_at,
             timeout_seconds=timeout_seconds,
             case_corpus_digest=corpus_digest,
+            postgres_deployments=tuple(
+                sorted(
+                    (*pytest_deployments, *race_deployments),
+                    key=lambda item: item.deployment_id,
+                )
+            ),
         ),
         cases=all_cases,
         summary=DeterministicSummary(
@@ -412,7 +413,11 @@ def run_race_release(
     )
     corpus_digest = _race_corpus_digest(contracts)
     started_at = datetime.now(UTC)
-    corpora = {corpus.case_id: corpus for corpus in run_all_races()}
+    with tempfile.TemporaryDirectory(prefix="openmagic-race-provenance-") as directory:
+        postgres_directory = Path(directory)
+        with record_postgres_deployments(postgres_directory):
+            corpora = {corpus.case_id: corpus for corpus in run_all_races()}
+        postgres_deployments = load_postgres_deployments(postgres_directory)
     cases = tuple(_race_case(contract, corpora[contract.case_id]) for contract in contracts)
     finished_at = datetime.now(UTC)
     statuses = tuple(case.verdict.status for case in cases)
@@ -426,6 +431,7 @@ def run_race_release(
             finished_at=finished_at,
             timeout_seconds=timeout_seconds,
             case_corpus_digest=corpus_digest,
+            postgres_deployments=postgres_deployments,
         ),
         cases=cases,
         summary=DeterministicSummary(

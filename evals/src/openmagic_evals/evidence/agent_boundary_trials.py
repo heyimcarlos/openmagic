@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import inspect
 import json
 import time
@@ -31,12 +30,17 @@ from openmagic_evals.evidence.agent_cases import (
 )
 from openmagic_evals.evidence.agent_trials import AgentTrial
 from openmagic_evals.evidence.contracts import (
+    AgentCorrelations,
+    ApplicationCorrelations,
     BoundaryAgentCandidateObservation,
     BoundaryAgentScorerContract,
     Correlations,
+    ProcessCorrelations,
+    RuntimeCorrelations,
     SanitizedAgentEvent,
     agent_rubric_scores,
 )
+from openmagic_evals.evidence.core_models import canonical_digest
 from openmagic_evals.evidence.inspection import EvidenceInspection
 from openmagic_evals.harness.renewal_scenario import renewal_context
 
@@ -72,11 +76,6 @@ def boundary_configuration_document() -> dict[str, object]:
         "executor_source": inspect.getsource(FreshAgentExecutor),
         "timeout_seconds": _BOUNDARY_TIMEOUT_SECONDS,
     }
-
-
-def _digest(value: object) -> str:
-    document = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
-    return "sha256:" + hashlib.sha256(document).hexdigest()
 
 
 def execute_boundary_trial(case: BoundaryAgentCase, seed: int) -> AgentTrial:
@@ -227,25 +226,25 @@ def execute_boundary_trial(case: BoundaryAgentCase, seed: int) -> AgentTrial:
                 sequence=1,
                 event_type="context_projection",
                 durable_identity=str(thread.thread_id),
-                input_digest=_digest({"case_id": case.case_id, "seed": seed}),
-                output_digest=_digest(context_projection),
+                input_digest=canonical_digest({"case_id": case.case_id, "seed": seed}),
+                output_digest=canonical_digest(context_projection),
             ),
             SanitizedAgentEvent(
                 sequence=2,
                 event_type="candidate",
                 durable_identity=str(run.agent_run_id),
-                input_digest=_digest(context_projection),
-                output_digest=_digest(candidate_projection),
+                input_digest=canonical_digest(context_projection),
+                output_digest=canonical_digest(candidate_projection),
             ),
             SanitizedAgentEvent(
                 sequence=3,
                 event_type="outcome_verification",
                 durable_identity=str(attempt.attempt_id),
-                input_digest=_digest(candidate_projection),
-                output_digest=_digest(verifier_projection),
+                input_digest=canonical_digest(candidate_projection),
+                output_digest=canonical_digest(verifier_projection),
             ),
         )
-        trajectory_digest = _digest(
+        trajectory_digest = canonical_digest(
             {
                 "candidate_observation": candidate_observation.model_dump(mode="json"),
                 "rubric_scores": dict(sorted(rubric_scores.items())),
@@ -260,14 +259,18 @@ def execute_boundary_trial(case: BoundaryAgentCase, seed: int) -> AgentTrial:
             latency_ms=latency_ms,
             observation_digest=trajectory_digest,
             correlations=Correlations(
-                command_ids=(command.command_id,),
-                workflow_ids=(command.input.workflow_id,),
-                instance_ids=(receipt.result.instance_id,),
-                step_ids=(attempt.step_id,),
-                attempt_ids=(attempt.attempt_id,),
-                thread_ids=(thread.thread_id,),
-                agent_run_ids=(run.agent_run_id,),
-                worker_ids=(f"boundary-facts-{seed}", f"boundary-agent-{seed}"),
+                runtime=RuntimeCorrelations(
+                    command_ids=(command.command_id,),
+                    workflow_ids=(command.input.workflow_id,),
+                    instance_ids=(receipt.result.instance_id,),
+                    step_ids=(attempt.step_id,),
+                    attempt_ids=(attempt.attempt_id,),
+                ),
+                application=ApplicationCorrelations(thread_ids=(thread.thread_id,)),
+                agent=AgentCorrelations(agent_run_ids=(run.agent_run_id,)),
+                process=ProcessCorrelations(
+                    worker_ids=(f"boundary-facts-{seed}", f"boundary-agent-{seed}")
+                ),
             ),
             trajectory=trajectory,
             candidate_observation=candidate_observation,

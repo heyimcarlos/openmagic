@@ -7,6 +7,7 @@ from typing import LiteralString
 from uuid import UUID
 
 import psycopg
+from psycopg import sql
 
 
 @dataclass(frozen=True)
@@ -56,6 +57,28 @@ class TransactionState:
     domain_events: int
     steps: int
     trace_events: int
+
+
+@dataclass(frozen=True)
+class DurableChainObservation:
+    command_ids: tuple[UUID, ...]
+    workflow_ids: tuple[UUID, ...]
+    instance_ids: tuple[UUID, ...]
+    step_ids: tuple[UUID, ...]
+    attempt_ids: tuple[UUID, ...]
+    wait_ids: tuple[UUID, ...]
+    signal_ids: tuple[UUID, ...]
+    trace_event_ids: tuple[UUID, ...]
+    thread_ids: tuple[UUID, ...]
+    message_ids: tuple[UUID, ...]
+    agent_run_ids: tuple[UUID, ...]
+    domain_event_ids: tuple[UUID, ...]
+    delivery_ids: tuple[UUID, ...]
+    delivery_attempt_ids: tuple[UUID, ...]
+    approval_grant_ids: tuple[UUID, ...]
+    verification_challenge_ids: tuple[UUID, ...]
+    verification_session_ids: tuple[UUID, ...]
+    relationship_checks: tuple[str, ...]
 
 
 class EvidenceInspection:
@@ -293,6 +316,151 @@ class EvidenceInspection:
             ),
         )
 
+    def durable_chain(
+        self,
+        *,
+        renewal_workflow_id: UUID,
+        challenge_id: UUID,
+    ) -> DurableChainObservation:
+        """Prove one FK-backed renewal and verification chain in one snapshot."""
+
+        with psycopg.connect(self._database_url) as connection, connection.transaction():
+            connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            row = connection.execute(
+                "SELECT r.start_command_id, r.instance_id, r.thread_id, "
+                "p.protected_command_id, g.approval_grant_id, d.wait_id, d.signal_id, "
+                "c.delivery_workflow_id, c.delivery_instance_id, c.destination_thread_id, "
+                "s.session_id "
+                "FROM example_insurance.renewal_workflows AS r "
+                "JOIN example_insurance.protected_commands AS p "
+                "ON p.workflow_id = r.workflow_id "
+                "JOIN openmagic_runtime.command_receipts AS start_receipt "
+                "ON start_receipt.command_id = r.start_command_id "
+                "JOIN openmagic_runtime.command_receipts AS protected_receipt "
+                "ON protected_receipt.command_id = p.protected_command_id "
+                "JOIN example_insurance.approval_grants AS g "
+                "ON g.approval_grant_id = p.approval_grant_id AND g.workflow_id = r.workflow_id "
+                "JOIN example_insurance.renewal_decisions AS d "
+                "ON d.decision_id = g.decision_id AND d.workflow_id = r.workflow_id "
+                "JOIN openmagic_runtime.waits AS w "
+                "ON w.wait_id = d.wait_id AND w.instance_id = r.instance_id "
+                "JOIN openmagic_runtime.signals AS signal "
+                "ON signal.signal_id = d.signal_id AND signal.wait_id = w.wait_id "
+                "JOIN example_insurance.verification_challenges AS c "
+                "ON c.challenge_id = %s AND c.protected_command_id = p.protected_command_id "
+                "AND c.protected_workflow_id = r.workflow_id "
+                "JOIN example_insurance.verification_workflows AS v "
+                "ON v.workflow_id = c.delivery_workflow_id AND v.challenge_id = c.challenge_id "
+                "AND v.instance_id = c.delivery_instance_id "
+                "AND v.protected_workflow_id = r.workflow_id "
+                "JOIN openmagic_runtime.instances AS renewal_instance "
+                "ON renewal_instance.instance_id = r.instance_id "
+                "JOIN openmagic_runtime.instances AS verification_instance "
+                "ON verification_instance.instance_id = v.instance_id "
+                "JOIN example_insurance.verification_sessions AS s "
+                "ON s.challenge_id = c.challenge_id AND s.thread_id = c.thread_id "
+                "AND s.identifier_thread_id = c.destination_thread_id "
+                "WHERE r.workflow_id = %s",
+                (challenge_id, renewal_workflow_id),
+            ).fetchone()
+            if row is None:
+                raise AssertionError("canonical durable chain is not relationally connected")
+            renewal_instance_id = UUID(str(row[1]))
+            verification_instance_id = UUID(str(row[8]))
+            instance_ids = (renewal_instance_id, verification_instance_id)
+
+            def runtime_ids(table: str, column: str) -> tuple[UUID, ...]:
+                rows = connection.execute(
+                    sql.SQL(
+                        "SELECT {column} FROM openmagic_runtime.{table} "
+                        "WHERE instance_id = ANY(%s) ORDER BY {column}"
+                    ).format(
+                        column=sql.Identifier(column),
+                        table=sql.Identifier(table),
+                    ),
+                    (list(instance_ids),),
+                ).fetchall()
+                return tuple(UUID(str(item[0])) for item in rows)
+
+            message_rows = connection.execute(
+                "SELECT m.message_id FROM openmagic_runtime.messages AS m "
+                "WHERE m.thread_id = ANY(%s) ORDER BY m.message_id",
+                ([UUID(str(row[2])), UUID(str(row[9]))],),
+            ).fetchall()
+            event_rows = connection.execute(
+                "SELECT event_id FROM example_insurance.domain_events "
+                "WHERE workflow_id = %s ORDER BY event_id",
+                (renewal_workflow_id,),
+            ).fetchall()
+            delivery_rows = connection.execute(
+                "SELECT DISTINCT delivery_id FROM ("
+                "SELECT delivery_id FROM openmagic_runtime.deliveries "
+                "WHERE domain_event_id IN ("
+                "SELECT event_id FROM example_insurance.domain_events WHERE workflow_id = %s"
+                ") UNION ALL SELECT delivery_id FROM example_insurance.verification_workflows "
+                "WHERE challenge_id = %s AND delivery_id IS NOT NULL"
+                ") AS related ORDER BY delivery_id",
+                (renewal_workflow_id, challenge_id),
+            ).fetchall()
+            delivery_ids = tuple(UUID(str(item[0])) for item in delivery_rows)
+            delivery_attempt_rows = connection.execute(
+                "SELECT delivery_attempt_id FROM openmagic_runtime.delivery_attempts "
+                "WHERE delivery_id = ANY(%s) ORDER BY delivery_attempt_id",
+                (list(delivery_ids),),
+            ).fetchall()
+            agent_rows = connection.execute(
+                "SELECT a.agent_run_id FROM openmagic_runtime.agent_runs AS a "
+                "JOIN openmagic_runtime.attempts AS attempt USING (attempt_id) "
+                "WHERE attempt.instance_id = ANY(%s) ORDER BY a.agent_run_id",
+                (list(instance_ids),),
+            ).fetchall()
+            step_ids = runtime_ids("steps", "step_id")
+            attempt_ids = runtime_ids("attempts", "attempt_id")
+            trace_event_ids = runtime_ids("trace_events", "trace_event_id")
+
+        observation = DurableChainObservation(
+            command_ids=(UUID(str(row[0])), UUID(str(row[3]))),
+            workflow_ids=(renewal_workflow_id, UUID(str(row[7]))),
+            instance_ids=instance_ids,
+            step_ids=step_ids,
+            attempt_ids=attempt_ids,
+            wait_ids=(UUID(str(row[5])),),
+            signal_ids=(UUID(str(row[6])),),
+            trace_event_ids=trace_event_ids,
+            thread_ids=(UUID(str(row[2])), UUID(str(row[9]))),
+            message_ids=tuple(UUID(str(item[0])) for item in message_rows),
+            agent_run_ids=tuple(UUID(str(item[0])) for item in agent_rows),
+            domain_event_ids=tuple(UUID(str(item[0])) for item in event_rows),
+            delivery_ids=delivery_ids,
+            delivery_attempt_ids=tuple(UUID(str(item[0])) for item in delivery_attempt_rows),
+            approval_grant_ids=(UUID(str(row[4])),),
+            verification_challenge_ids=(challenge_id,),
+            verification_session_ids=(UUID(str(row[10])),),
+            relationship_checks=(
+                "command-receipt-to-renewal-workflow",
+                "renewal-workflow-to-runtime-instance",
+                "approval-decision-to-wait-and-signal",
+                "protected-command-to-approval-grant",
+                "challenge-to-protected-workflow",
+                "challenge-to-verification-workflow-instance",
+                "verification-session-to-challenge-and-threads",
+            ),
+        )
+        if not all(
+            (
+                observation.step_ids,
+                observation.attempt_ids,
+                observation.trace_event_ids,
+                observation.message_ids,
+                observation.agent_run_ids,
+                observation.domain_event_ids,
+                observation.delivery_ids,
+                observation.delivery_attempt_ids,
+            )
+        ):
+            raise AssertionError("canonical durable chain omitted a durable child identity")
+        return observation
+
     def _count(self, statement: LiteralString, identity: UUID) -> int:
         with psycopg.connect(self._database_url) as connection, connection.transaction():
             connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
@@ -304,6 +472,7 @@ __all__ = [
     "AgentSafetyObservation",
     "AttemptAuthority",
     "DeliveryAuthority",
+    "DurableChainObservation",
     "EvidenceInspection",
     "QueueState",
     "TransactionState",

@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+from uuid import uuid4
+
 import psycopg
+from example_insurance.renewals import SubmitVerificationCode, SubmitVerificationCodeInput
+from openmagic_evals.evidence.case_recording import record_complete_durable_chain
 from openmagic_evals.harness import (
     issue_verification_challenge,
     renewal_context,
 )
+from openmagic_runtime.commands import Cause
 from openmagic_runtime.evidence import RuntimeEvidenceReader
 from openmagic_runtime.kernel.inspection import KernelInspection
 
@@ -19,7 +24,25 @@ def test_agent_and_deterministic_workflows_share_runtime_attempt_evidence() -> N
         renewal = scenario.renewal
         required = scenario.challenge_receipt
         assert required.result.verification_instance_id is not None
+        assert required.result.challenge_id is not None
+        assert scenario.code is not None
         renewal_instance_id = application.start_renewal_outreach(renewal).result.instance_id
+        accepted = application.submit_verification_code(
+            SubmitVerificationCode(
+                command_id=uuid4(),
+                actor=scenario.actor,
+                cause=Cause("message", str(uuid4())),
+                input=SubmitVerificationCodeInput(
+                    challenge_id=required.result.challenge_id,
+                    protected_command_id=scenario.protected_command.command_id,
+                    workflow_id=renewal.input.workflow_id,
+                    thread_id=renewal.input.thread_id,
+                    purpose="renewal.read_approved_details",
+                    code=scenario.code,
+                ),
+            )
+        )
+        assert accepted.result.session_id is not None
         with psycopg.connect(database_url) as connection, connection.transaction():
             reader = RuntimeEvidenceReader(connection)
             agent_workflow = reader.instance(renewal_instance_id)
@@ -35,4 +58,10 @@ def test_agent_and_deterministic_workflows_share_runtime_attempt_evidence() -> N
             .snapshot(required.result.verification_instance_id)
             .definition_key
             == "example_insurance.verification_delivery"
+        )
+        record_complete_durable_chain(
+            application=application,
+            database_url=database_url,
+            renewal_workflow_id=renewal.input.workflow_id,
+            challenge_id=required.result.challenge_id,
         )

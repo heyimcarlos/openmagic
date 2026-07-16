@@ -269,7 +269,7 @@ DETERMINISTIC_RELEASE_MATRIX = (
             "evals/tests/test_verification_evidence.py::test_agent_and_deterministic_workflows_share_runtime_attempt_evidence",
         ),
         "Public renewal and verification projections link every accepted durable identity.",
-        required_scenarios=("all-accepted-scenarios",),
+        required_scenarios=("one-relational-chain",),
     ),
 )
 

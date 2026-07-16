@@ -16,6 +16,7 @@ from openmagic_evals.evidence.contracts import (
     RaceArtifact,
     RaceCase,
     SurfaceAuditArtifact,
+    has_correlations,
     parse_artifact,
 )
 from openmagic_evals.evidence.matrix import (
@@ -42,11 +43,6 @@ def _common_reproducibility_pin(artifact: Artifact) -> tuple[object, ...]:
     return (
         pin.build,
         pin.suite_version,
-        pin.postgres_version,
-        pin.postgres_image,
-        pin.postgres_configuration,
-        pin.postgres_configuration_digest,
-        pin.migration_heads,
         pin.definition_digests,
         pin.sandbox_digest,
     )
@@ -71,7 +67,7 @@ def _validate_release_matrix(artifact: DeterministicArtifact) -> None:
             or case.expected_trials != 1
             or case.observed_trials != 1
             or not case.observation_digests
-            or not any(case.correlations.model_dump(mode="python").values())
+            or not has_correlations(case.correlations)
             or scenario_ids != tuple(sorted(contract.required_scenarios))
             or selected_results != case.test_results
             or any(node not in selected_results for node in contract.pytest_nodes)

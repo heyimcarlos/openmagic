@@ -19,6 +19,7 @@ from openmagic_evals.evidence.contracts import (
     DeterministicScenarioEvidence,
     LiveProviderPin,
     LiveSmokeArtifact,
+    ProviderCorrelations,
     deterministic_observation_digest,
 )
 from openmagic_evals.evidence.deadline import bounded_evidence
@@ -158,7 +159,9 @@ def run_live_smoke(
             }
     finished_at = datetime.now(UTC)
     status = "passed" if available else "unavailable" if not attempted else "infrastructure_error"
-    correlations = Correlations(provider_request_ids=provider_request_ids)
+    correlations = Correlations(
+        provider=ProviderCorrelations(provider_request_ids=provider_request_ids)
+    )
     scenarios = (
         DeterministicScenarioEvidence(
             scenario_id=synthetic_case_id,
@@ -174,6 +177,7 @@ def run_live_smoke(
             started_at=started_at,
             finished_at=finished_at,
             timeout_seconds=timeout_seconds,
+            postgres_deployments=(),
             case_corpus_digest=_digest(synthetic_case_id),
         ),
         provider_configuration=LiveProviderPin(

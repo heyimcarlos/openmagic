@@ -7,6 +7,7 @@ from pathlib import Path
 ROOT = Path(__file__).parents[2]
 SOURCE_PACKAGES = (
     Path("apps/api/src/openmagic_api"),
+    Path("apps/playground/src/openmagic_playground"),
     Path("evals/src/openmagic_evals"),
     Path("packages/openmagic-runtime/src/openmagic_runtime"),
     Path("reference-apps/example-insurance/src/example_insurance"),

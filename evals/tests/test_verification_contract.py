@@ -351,14 +351,20 @@ def test_verification_code_is_single_use_replay_safe_and_serialized() -> None:
             case_id="replay.public-identities",
             scenario_id="exact-replay-and-conflict",
             correlations=Correlations(
-                command_ids=(protected.command_id, commands[winner_index].command_id),
-                workflow_ids=(renewal.input.workflow_id, verification.workflow_id),
-                instance_ids=(verification.instance_id,),
-                step_ids=tuple(step_id for step_id, _ in verification.step_attempt_ids),
-                attempt_ids=tuple(attempt_id for _, attempt_id in verification.step_attempt_ids),
-                thread_ids=(renewal.input.thread_id,),
-                verification_challenge_ids=(required.result.challenge_id,),
-                verification_session_ids=(verification.session_id,),
+                runtime={
+                    "command_ids": (protected.command_id, commands[winner_index].command_id),
+                    "workflow_ids": (renewal.input.workflow_id, verification.workflow_id),
+                    "instance_ids": (verification.instance_id,),
+                    "step_ids": tuple(step_id for step_id, _ in verification.step_attempt_ids),
+                    "attempt_ids": tuple(
+                        attempt_id for _, attempt_id in verification.step_attempt_ids
+                    ),
+                },
+                application={
+                    "thread_ids": (renewal.input.thread_id,),
+                    "verification_challenge_ids": (required.result.challenge_id,),
+                    "verification_session_ids": (verification.session_id,),
+                },
             ),
             document={
                 "conflicting_reuse_rejected": True,

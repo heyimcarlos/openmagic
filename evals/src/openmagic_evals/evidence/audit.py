@@ -3,24 +3,29 @@
 from __future__ import annotations
 
 import ast
-import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
 import psycopg
 from psycopg import sql
 
+from openmagic_evals.evidence.core_models import canonical_digest
+from openmagic_evals.evidence.package_policy import (
+    PACKAGE_ROLES,
+    project_dependencies,
+    python_imports,
+    role_dependency_violations,
+    role_import_violations,
+    source_python_files,
+)
 from openmagic_evals.evidence.surface_contracts import (
     APPLICATION_PUBLIC_EXPORTS,
     DELETED_IDENTIFIERS,
     EXPECTED_PRODUCTION_EDGES,
+    PUBLIC_SURFACE_DIGESTS,
     RUNTIME_PUBLIC_EXPORTS,
 )
 
-_FORBIDDEN_PRODUCT_IMPORTS = {
-    "openmagic_evals",
-    "openmagic_playground",
-}
 _EXPECTED_TABLES = {
     "public": set(),
     "example_insurance": {
@@ -96,26 +101,6 @@ class ColdSchemaAudit:
     legacy_relations: tuple[str, ...]
 
 
-def _imports(source_root: Path) -> set[str]:
-    imported: set[str] = set()
-    for path in source_root.rglob("*.py"):
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                imported.update(alias.name for alias in node.names)
-            elif isinstance(node, ast.ImportFrom) and node.module:
-                imported.add(node.module)
-    return imported
-
-
-def _dependencies(project: Path) -> set[str]:
-    document = tomllib.loads(project.read_text(encoding="utf-8"))
-    return {
-        dependency.split("[", 1)[0].split("=", 1)[0].split("<", 1)[0].strip()
-        for dependency in document["project"].get("dependencies", [])
-    }
-
-
 def _declared_exports(path: Path) -> set[str] | None:
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     for node in tree.body:
@@ -155,32 +140,24 @@ def audit_repository(root: Path) -> RepositoryAudit:
     violations: list[str] = []
     runtime_root = root / "packages/openmagic-runtime/src/openmagic_runtime"
     application_root = root / "reference-apps/example-insurance/src/example_insurance"
-    api_root = root / "apps/api/src/openmagic_api"
-    runtime_imports = _imports(runtime_root)
-    application_imports = _imports(application_root)
-    api_imports = _imports(api_root)
-    if any(
-        name.startswith(("example_insurance", "openmagic_api", "openmagic_evals"))
-        for name in runtime_imports
-    ):
-        violations.append("runtime imports an outward distribution")
-    if any(name.startswith(("openmagic_api", "openmagic_evals")) for name in application_imports):
-        violations.append("application imports an outward distribution")
-    if any(name.startswith(tuple(_FORBIDDEN_PRODUCT_IMPORTS)) for name in api_imports):
-        violations.append("API imports a private evidence or demonstration distribution")
+    projects = {role.distribution: root / role.project for role in PACKAGE_ROLES}
+    for role in PACKAGE_ROLES:
+        imports = python_imports(source_python_files(root / role.source))
+        dependencies = project_dependencies(root / role.project)
+        violations.extend(role_import_violations(role, imports))
+        violations.extend(role_dependency_violations(role, dependencies))
+        exports = _public_exports(root / role.source)
+        if canonical_digest(exports) != PUBLIC_SURFACE_DIGESTS[role.distribution]:
+            violations.append(
+                f"{role.distribution} public modules or exports differ from the exact surface"
+            )
 
-    projects = {
-        "openmagic-runtime": root / "packages/openmagic-runtime/pyproject.toml",
-        "example-insurance": root / "reference-apps/example-insurance/pyproject.toml",
-        "openmagic-api": root / "apps/api/pyproject.toml",
-        "openmagic-evals": root / "evals/pyproject.toml",
-    }
-    internal_names = set(projects)
+    production_names = {"openmagic-runtime", "example-insurance", "openmagic-api"}
     production_edges = tuple(
         sorted(
             f"{owner} -> {dependency}"
-            for owner in ("openmagic-runtime", "example-insurance", "openmagic-api")
-            for dependency in _dependencies(projects[owner]) & internal_names
+            for owner in production_names
+            for dependency in project_dependencies(projects[owner]) & production_names
         )
     )
     if production_edges != EXPECTED_PRODUCTION_EDGES:

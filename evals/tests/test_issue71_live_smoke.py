@@ -61,7 +61,7 @@ def test_live_smoke_posts_and_verifies_one_reversible_synthetic_case(tmp_path: P
 
     assert artifact.summary.attempted
     assert artifact.summary.available
-    assert artifact.cases[0].correlations.provider_request_ids == ("synthetic-request-1",)
+    assert artifact.cases[0].correlations.provider.provider_request_ids == ("synthetic-request-1",)
 
 
 def test_live_smoke_rejects_unpinned_configuration_and_arbitrary_credential_hosts(

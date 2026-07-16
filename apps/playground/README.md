@@ -7,10 +7,13 @@ by default, fixtures are pinned to `issue-71.v1`, and provider behavior is local
 Print the safety contract:
 
 ```bash
-PYTHONPATH=apps/playground/src uv run python -m openmagic_playground manifest
-PYTHONPATH=apps/playground/src uv run python -m openmagic_playground controls
+uv run openmagic-playground manifest
+uv run openmagic-playground controls
+uv run openmagic-playground demo-renewal
+uv run openmagic-playground demo-verification
+uv run openmagic-playground exercise --working-directory .artifacts/playground
 ```
 
-The private `openmagic-evidence playground` command controls separate API,
-Workflow Worker, and Delivery Worker pools. It verifies process stop, drain,
-fresh restart, deterministic fixtures, local provider behavior, and reset.
+The public `exercise` command owns separate API, Workflow Worker, and Delivery
+Worker pools. It exercises start, drain, atomic reset, fresh restart, and stop.
+The private eval command invokes this installed surface as an external observer.

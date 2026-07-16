@@ -73,6 +73,27 @@ class BuildPin(_PinModel):
         return self
 
 
+class PostgresDeploymentPin(_PinModel):
+    """Observed provenance for one exact PostgreSQL deployment used by a lane."""
+
+    deployment_id: str
+    postgres_version: str
+    postgres_image: str
+    postgres_configuration: dict[str, str]
+    postgres_configuration_digest: str
+    migration_heads: dict[str, str | None]
+
+    @model_validator(mode="after")
+    def validate_deployment(self) -> PostgresDeploymentPin:
+        _require_digest(self.deployment_id, "deployment_id")
+        if "@sha256:" not in self.postgres_image or not self.postgres_configuration:
+            raise ValueError("PostgreSQL image and observed configuration must be pinned")
+        _require_digest(self.postgres_configuration_digest, "postgres_configuration_digest")
+        if set(self.migration_heads) != {"example_insurance", "openmagic_runtime"}:
+            raise ValueError("both owned migration heads must be observed")
+        return self
+
+
 class ReproducibilityPin(_PinModel):
     build: BuildPin
     suite_version: str
@@ -81,11 +102,7 @@ class ReproducibilityPin(_PinModel):
     started_at: datetime
     finished_at: datetime
     timeout_seconds: int = Field(gt=0)
-    postgres_version: str
-    postgres_image: str
-    postgres_configuration: dict[str, str]
-    postgres_configuration_digest: str
-    migration_heads: dict[str, str]
+    postgres_deployments: tuple[PostgresDeploymentPin, ...]
     definition_digests: dict[str, str]
     case_corpus_digest: str | None = None
     sandbox_digest: str | None = None
@@ -96,16 +113,16 @@ class ReproducibilityPin(_PinModel):
             raise ValueError("suite version and exact command are required")
         if self.finished_at < self.started_at:
             raise ValueError("finished_at cannot precede started_at")
-        if "@sha256:" not in self.postgres_image or not self.postgres_configuration:
-            raise ValueError("PostgreSQL image and observed configuration must be pinned")
-        _require_digest(self.postgres_configuration_digest, "postgres_configuration_digest")
+        deployment_ids = tuple(item.deployment_id for item in self.postgres_deployments)
+        if len(deployment_ids) != len(set(deployment_ids)):
+            raise ValueError("PostgreSQL deployment provenance must be unique")
         if self.case_corpus_digest is not None:
             _require_digest(self.case_corpus_digest, "case_corpus_digest")
         if self.sandbox_digest is not None:
             _require_digest(self.sandbox_digest, "sandbox_digest")
-        if not self.migration_heads or not self.definition_digests:
-            raise ValueError("migration heads and Definition digests are required")
+        if not self.definition_digests:
+            raise ValueError("Definition digests are required")
         return self
 
 
-__all__ = ["BuildPin", "ReproducibilityPin", "WheelArchivePin"]
+__all__ = ["BuildPin", "PostgresDeploymentPin", "ReproducibilityPin", "WheelArchivePin"]

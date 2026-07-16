@@ -11,6 +11,7 @@ from openmagic_evals.evidence.audit import audit_cold_schema, audit_repository
 from openmagic_evals.evidence.contracts import artifact_json_schema
 from openmagic_evals.evidence.surface_contracts import (
     APPLICATION_PUBLIC_EXPORTS,
+    PUBLIC_SURFACE_DIGESTS,
     RUNTIME_PUBLIC_EXPORTS,
 )
 from openmagic_evals.harness._postgres import postgres_container
@@ -32,6 +33,7 @@ def test_repository_audit_closes_dependency_export_persistence_and_legacy_surfac
         "example-insurance",
         "openmagic-api",
         "openmagic-evals",
+        "openmagic-playground",
         "openmagic-runtime",
     )
     assert report.production_dependency_edges == (
@@ -46,6 +48,7 @@ def test_repository_audit_closes_dependency_export_persistence_and_legacy_surfac
     assert RUNTIME_PUBLIC_EXPORTS["__init__.py"] == ("__version__",)
     assert RUNTIME_PUBLIC_EXPORTS["kernel/__init__.py"] == ()
     assert APPLICATION_PUBLIC_EXPORTS["__init__.py"] == ("__version__",)
+    assert set(PUBLIC_SURFACE_DIGESTS) == set(report.audited_distributions)
     assert all(
         not hasattr(projection, "decode")
         for projection in (RuntimeAttempt, RuntimeInstance, RuntimeStep, RuntimeWait)

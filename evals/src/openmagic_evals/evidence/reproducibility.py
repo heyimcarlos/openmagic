@@ -6,7 +6,6 @@ import base64
 import csv
 import hashlib
 import io
-import json
 import subprocess
 import zipfile
 from datetime import datetime
@@ -16,33 +15,35 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import unquote, urlparse
 
-import psycopg
-from example_insurance.migrations import apply_migrations
 from example_insurance.renewal_definition import RENEWAL_DEFINITION
 from example_insurance.verification_definition import VERIFICATION_DEFINITION
 from openmagic_runtime.evidence import content_fingerprint
 from pydantic import JsonValue, TypeAdapter
 
 from openmagic_evals.evidence.contracts import BuildPin, ReproducibilityPin, WheelArchivePin
+from openmagic_evals.evidence.pins import PostgresDeploymentPin
 from openmagic_evals.evidence.race_transitions import transition_race_definitions
-from openmagic_evals.harness._postgres import POSTGRES_IMAGE, postgres_container
+from openmagic_evals.harness._postgres import POSTGRES_IMAGE
 
 _DISTRIBUTIONS = (
     "example-insurance",
     "openmagic-api",
     "openmagic-evals",
+    "openmagic-playground",
     "openmagic-runtime",
 )
 _DISTRIBUTION_PACKAGES = {
     "example-insurance": "example_insurance",
     "openmagic-api": "openmagic_api",
     "openmagic-evals": "openmagic_evals",
+    "openmagic-playground": "openmagic_playground",
     "openmagic-runtime": "openmagic_runtime",
 }
 _DISTRIBUTION_SOURCE_ROOTS = {
     "example-insurance": Path("reference-apps/example-insurance/src/example_insurance"),
     "openmagic-api": Path("apps/api/src/openmagic_api"),
     "openmagic-evals": Path("evals/src/openmagic_evals"),
+    "openmagic-playground": Path("apps/playground/src/openmagic_playground"),
     "openmagic-runtime": Path("packages/openmagic-runtime/src/openmagic_runtime"),
 }
 
@@ -219,6 +220,7 @@ def reproducibility_pin(
     finished_at: datetime,
     timeout_seconds: int,
     case_corpus_digest: str,
+    postgres_deployments: tuple[PostgresDeploymentPin, ...],
 ) -> ReproducibilityPin:
     definitions = {
         "example_insurance.renewal_outreach:2": "sha256:" + content_fingerprint(RENEWAL_DEFINITION),
@@ -232,38 +234,6 @@ def reproducibility_pin(
             for definition in transition_race_definitions()
         }
     )
-    with postgres_container(database_name="openmagic_test_evidence_pin") as postgres:
-        database_url = postgres.get_connection_url(driver=None)
-        apply_migrations(database_url)
-        with psycopg.connect(database_url) as connection:
-            row = connection.execute(
-                "SELECT current_setting('server_version'), "
-                "current_setting('transaction_isolation'), "
-                "current_setting('synchronous_commit'), "
-                "current_setting('TimeZone'), "
-                "current_setting('max_connections')"
-            ).fetchone()
-            application_head = connection.execute(
-                "SELECT version FROM example_insurance.migration_history "
-                "ORDER BY version DESC LIMIT 1"
-            ).fetchone()
-            runtime_head = connection.execute(
-                "SELECT version FROM openmagic_runtime.migration_history "
-                "ORDER BY version DESC LIMIT 1"
-            ).fetchone()
-    if row is None:
-        raise RuntimeError("PostgreSQL did not return its observed configuration")
-    if application_head is None or runtime_head is None:
-        raise RuntimeError("PostgreSQL did not return its observed migration heads")
-    postgres_configuration = {
-        "max_connections": str(row[4]),
-        "synchronous_commit": str(row[2]),
-        "timezone": str(row[3]),
-        "transaction_isolation": str(row[1]),
-    }
-    configuration_document = json.dumps(
-        postgres_configuration, sort_keys=True, separators=(",", ":")
-    ).encode()
     return ReproducibilityPin(
         build=build_pin(root),
         suite_version="issue-71.v1",
@@ -272,14 +242,7 @@ def reproducibility_pin(
         started_at=started_at,
         finished_at=finished_at,
         timeout_seconds=timeout_seconds,
-        postgres_version=str(row[0]),
-        postgres_image=POSTGRES_IMAGE,
-        postgres_configuration=postgres_configuration,
-        postgres_configuration_digest=sha256(configuration_document),
-        migration_heads={
-            "example_insurance": str(application_head[0]),
-            "openmagic_runtime": str(runtime_head[0]),
-        },
+        postgres_deployments=postgres_deployments,
         definition_digests=definitions,
         case_corpus_digest=case_corpus_digest,
         sandbox_digest=sha256(POSTGRES_IMAGE.encode()),

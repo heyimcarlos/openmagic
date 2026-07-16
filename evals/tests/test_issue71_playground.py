@@ -24,4 +24,4 @@ def test_playground_exercises_disabled_effects_process_restart_and_safe_reset(
     assert artifact.summary.process_controls_verified
     assert not artifact.summary.contributes_to_correctness
     assert artifact.cases[0].verdict.status == "passed"
-    assert len(artifact.cases[0].correlations.process_ids) == 7
+    assert len(artifact.cases[0].correlations.process.process_ids) == 6

@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
-import hashlib
 import inspect
 import json
-import math
-import statistics
+import subprocess
 import time
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from uuid import UUID, uuid4
 
 import example_insurance.renewal_attempts as renewal_attempts_module
@@ -31,8 +30,8 @@ from openmagic_evals.evidence.agent_boundary_trials import (
     execute_boundary_trial,
 )
 from openmagic_evals.evidence.agent_cases import (
-    AGENT_CASES,
     BOUNDARY_AGENT_KEY,
+    DEVELOPMENT_CASES,
     RENEWAL_AGENT_KEY,
     AgentCase,
     BoundaryAgentCase,
@@ -44,34 +43,35 @@ from openmagic_evals.evidence.artifact_io import write_artifact
 from openmagic_evals.evidence.contracts import (
     AgentCaseEvidence,
     AgentConfigurationPin,
+    AgentCorpusPin,
+    AgentCorrelations,
     AgentQualityArtifact,
     AgentQualitySummary,
     AgentScorerContract,
     AgentTrialEvidence,
+    ApplicationCorrelations,
     BoundaryAgentScorerContract,
     CaseVerdict,
     Correlations,
     DistributionSummary,
+    ProcessCorrelations,
     RenewalAgentCandidateObservation,
     RenewalAgentScorerContract,
+    RuntimeCorrelations,
     SanitizedAgentEvent,
     agent_rubric_scores,
+    aggregate_agent_trials,
     merge_correlations,
 )
+from openmagic_evals.evidence.core_models import canonical_digest
 from openmagic_evals.evidence.deadline import bounded_evidence
 from openmagic_evals.evidence.inspection import EvidenceInspection
+from openmagic_evals.evidence.postgres_provenance import (
+    load_postgres_deployments,
+    record_postgres_deployments,
+)
 from openmagic_evals.evidence.reproducibility import reproducibility_pin
 from openmagic_evals.harness.renewal_scenario import renewal_context
-
-
-@dataclass(frozen=True)
-class Distribution:
-    count: int
-    mean: float
-    median: float
-    sample_standard_deviation: float
-    minimum: int
-    maximum: int
 
 
 @dataclass(frozen=True)
@@ -84,37 +84,7 @@ class AgentExperimentResult:
     wilson_lower: float
     wilson_upper: float
     threshold_passed: bool
-    latency: Distribution
-
-
-def _wilson(successes: int, total: int) -> tuple[float, float]:
-    if total == 0:
-        return 0.0, 1.0
-    z = 1.96
-    proportion = successes / total
-    denominator = 1 + z * z / total
-    centre = (proportion + z * z / (2 * total)) / denominator
-    margin = (
-        z
-        * math.sqrt(proportion * (1 - proportion) / total + z * z / (4 * total * total))
-        / denominator
-    )
-    lower = max(0.0, centre - margin)
-    upper = min(1.0, centre + margin)
-    if successes == total:
-        upper = 1.0
-    return lower, upper
-
-
-def _distribution(values: tuple[int, ...]) -> Distribution:
-    return Distribution(
-        count=len(values),
-        mean=statistics.mean(values),
-        median=statistics.median(values),
-        sample_standard_deviation=statistics.stdev(values) if len(values) > 1 else 0.0,
-        minimum=min(values),
-        maximum=max(values),
-    )
+    latency: DistributionSummary
 
 
 def evaluate_trials(
@@ -141,10 +111,7 @@ def evaluate_trials(
         if len(case_trials) != case.predeclared_trials:
             raise ValueError("Agent case does not have its complete trial denominator")
 
-    passed = sum(trial.outcome_passed for trial in trials)
-    prohibited = sum(len(trial.prohibited_actions) for trial in trials)
-    pass_rate = passed / expected_trials
-    lower, upper = _wilson(passed, expected_trials)
+    aggregate = aggregate_agent_trials(trials)
     thresholds_pass = all(
         sum(trial.outcome_passed for trial in trials if trial.case_id == case.case_id)
         / case.predeclared_trials
@@ -153,20 +120,15 @@ def evaluate_trials(
     )
     return AgentExperimentResult(
         expected_trials=expected_trials,
-        observed_trials=len(trials),
-        passed_trials=passed,
-        prohibited_actions=prohibited,
-        pass_rate=pass_rate,
-        wilson_lower=lower,
-        wilson_upper=upper,
-        threshold_passed=thresholds_pass and prohibited == 0,
-        latency=_distribution(tuple(trial.latency_ms for trial in trials)),
+        observed_trials=aggregate.observed_trials,
+        passed_trials=aggregate.passed_trials,
+        prohibited_actions=aggregate.prohibited_actions,
+        pass_rate=aggregate.pass_rate,
+        wilson_lower=aggregate.wilson_lower,
+        wilson_upper=aggregate.wilson_upper,
+        threshold_passed=thresholds_pass and aggregate.prohibited_actions == 0,
+        latency=aggregate.latency_ms,
     )
-
-
-def _trial_digest(value: object) -> str:
-    document = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
-    return "sha256:" + hashlib.sha256(document).hexdigest()
 
 
 def _renewal_agent_configuration_documents() -> tuple[dict[str, object], dict[str, object]]:
@@ -313,7 +275,7 @@ def _execute_renewal_agent_trial(case: RenewalAgentCase, seed: int) -> AgentTria
         }
         candidate_projection = {
             "agent_run_id": str(agent_run_ids[-1]),
-            "candidate_digest": _trial_digest(candidate_observation.model_dump(mode="json")),
+            "candidate_digest": canonical_digest(candidate_observation.model_dump(mode="json")),
         }
         verification_projection = {
             "message_id": str(message.message_id),
@@ -325,27 +287,27 @@ def _execute_renewal_agent_trial(case: RenewalAgentCase, seed: int) -> AgentTria
                 sequence=1,
                 event_type="context_projection",
                 durable_identity=str(thread.thread_id),
-                input_digest=_trial_digest(
+                input_digest=canonical_digest(
                     {"case_id": case.case_id, "seed": seed, "split": case.split}
                 ),
-                output_digest=_trial_digest(context_projection),
+                output_digest=canonical_digest(context_projection),
             ),
             SanitizedAgentEvent(
                 sequence=2,
                 event_type="candidate",
                 durable_identity=str(agent_run_ids[-1]),
-                input_digest=_trial_digest(context_projection),
-                output_digest=_trial_digest(candidate_projection),
+                input_digest=canonical_digest(context_projection),
+                output_digest=canonical_digest(candidate_projection),
             ),
             SanitizedAgentEvent(
                 sequence=3,
                 event_type="outcome_verification",
                 durable_identity=str(message.message_id),
-                input_digest=_trial_digest(candidate_projection),
-                output_digest=_trial_digest(verification_projection),
+                input_digest=canonical_digest(candidate_projection),
+                output_digest=canonical_digest(verification_projection),
             ),
         )
-        trajectory_digest = _trial_digest(
+        trajectory_digest = canonical_digest(
             {
                 "candidate_observation": candidate_observation.model_dump(mode="json"),
                 "rubric_scores": dict(sorted(rubric_scores.items())),
@@ -360,19 +322,23 @@ def _execute_renewal_agent_trial(case: RenewalAgentCase, seed: int) -> AgentTria
             latency_ms=latency_ms,
             observation_digest=trajectory_digest,
             correlations=Correlations(
-                command_ids=(command.command_id,),
-                workflow_ids=(command.input.workflow_id,),
-                instance_ids=(receipt.result.instance_id,),
-                step_ids=_uuid_values(correlations["step_ids"]),
-                attempt_ids=_uuid_values(correlations["attempt_ids"]),
-                wait_ids=_uuid_values(outcomes["approval_wait_ids"]),
-                thread_ids=(thread.thread_id,),
-                message_ids=message_ids,
-                agent_run_ids=agent_run_ids,
-                domain_event_ids=_uuid_values(correlations["domain_event_ids"]),
-                delivery_ids=_uuid_values(correlations["delivery_ids"]),
-                delivery_attempt_ids=safety.delivery_attempt_ids,
-                worker_ids=tuple(worker_ids),
+                runtime=RuntimeCorrelations(
+                    command_ids=(command.command_id,),
+                    workflow_ids=(command.input.workflow_id,),
+                    instance_ids=(receipt.result.instance_id,),
+                    step_ids=_uuid_values(correlations["step_ids"]),
+                    attempt_ids=_uuid_values(correlations["attempt_ids"]),
+                    wait_ids=_uuid_values(outcomes["approval_wait_ids"]),
+                ),
+                application=ApplicationCorrelations(
+                    thread_ids=(thread.thread_id,),
+                    message_ids=message_ids,
+                    domain_event_ids=_uuid_values(correlations["domain_event_ids"]),
+                    delivery_ids=_uuid_values(correlations["delivery_ids"]),
+                    delivery_attempt_ids=safety.delivery_attempt_ids,
+                ),
+                agent=AgentCorrelations(agent_run_ids=agent_run_ids),
+                process=ProcessCorrelations(worker_ids=tuple(worker_ids)),
             ),
             trajectory=trajectory,
             candidate_observation=candidate_observation,
@@ -384,6 +350,34 @@ def _execute_agent_trial(case: AgentCase, seed: int) -> AgentTrial:
     if isinstance(case, BoundaryAgentCase):
         return execute_boundary_trial(case, seed)
     return _execute_renewal_agent_trial(case, seed)
+
+
+def load_sealed_held_out_cases(repository_root: Path) -> tuple[AgentCase, ...]:
+    from openmagic_evals.evidence.sealed_holdout import (
+        HELD_OUT_CASES,
+        HELD_OUT_CORPUS_DIGEST,
+        HELD_OUT_SEALED_AT_COMMIT,
+        TUNING_LOCKED_PATHS,
+    )
+
+    actual_digest = canonical_digest([asdict(case) for case in HELD_OUT_CASES])
+    if actual_digest != HELD_OUT_CORPUS_DIGEST:
+        raise RuntimeError("held-out Agent corpus differs from its predeclared seal")
+    ancestor = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", HELD_OUT_SEALED_AT_COMMIT, "HEAD"],
+        cwd=repository_root,
+        check=False,
+        capture_output=True,
+    )
+    unchanged = subprocess.run(
+        ["git", "diff", "--quiet", HELD_OUT_SEALED_AT_COMMIT, "--", *TUNING_LOCKED_PATHS],
+        cwd=repository_root,
+        check=False,
+        capture_output=True,
+    )
+    if ancestor.returncode != 0 or unchanged.returncode != 0:
+        raise RuntimeError("Agent implementation changed after the held-out corpus was sealed")
+    return HELD_OUT_CASES
 
 
 def _merge_correlations(trials: tuple[AgentTrial, ...]) -> Correlations:
@@ -421,13 +415,31 @@ def run_local_agent_quality(
         str(timeout_seconds),
     )
     started_at = datetime.now(UTC)
-    trials = tuple(
-        _execute_agent_trial(case, seed)
-        for case in AGENT_CASES
-        for seed in range(case.predeclared_trials)
+    with TemporaryDirectory(prefix="openmagic-agent-postgres-") as deployment_directory:
+        with record_postgres_deployments(Path(deployment_directory)):
+            development_trials = tuple(
+                _execute_agent_trial(case, seed)
+                for case in DEVELOPMENT_CASES
+                for seed in range(case.predeclared_trials)
+            )
+            held_out_cases = load_sealed_held_out_cases(repository_root.resolve())
+            held_out_trials = tuple(
+                _execute_agent_trial(case, seed)
+                for case in held_out_cases
+                for seed in range(case.predeclared_trials)
+            )
+        postgres_deployments = load_postgres_deployments(Path(deployment_directory))
+    cases = DEVELOPMENT_CASES + held_out_cases
+    trials = development_trials + held_out_trials
+    from openmagic_evals.evidence.sealed_holdout import (
+        HELD_OUT_CORPUS_DIGEST,
+        HELD_OUT_CORPUS_VERSION,
+        HELD_OUT_SEALED_AT_COMMIT,
+        TUNING_LOCKED_PATHS,
     )
+
     finished_at = datetime.now(UTC)
-    result = evaluate_trials(AGENT_CASES, trials)
+    result = evaluate_trials(cases, trials)
 
     def artifact_case(case: AgentCase) -> AgentCaseEvidence:
         case_trials = tuple(trial for trial in trials if trial.case_id == case.case_id)
@@ -474,8 +486,8 @@ def run_local_agent_quality(
             ),
         )
 
-    artifact_cases = tuple(artifact_case(case) for case in AGENT_CASES)
-    corpus_digest = _trial_digest([asdict(case) for case in AGENT_CASES])
+    artifact_cases = tuple(artifact_case(case) for case in cases)
+    corpus_digest = canonical_digest([asdict(case) for case in cases])
     renewal_instruction, renewal_tool_schema = _renewal_agent_configuration_documents()
     boundary_configuration = boundary_configuration_document()
     artifact = AgentQualityArtifact(
@@ -486,13 +498,23 @@ def run_local_agent_quality(
             finished_at=finished_at,
             timeout_seconds=timeout_seconds,
             case_corpus_digest=corpus_digest,
+            postgres_deployments=postgres_deployments,
+        ),
+        corpus=AgentCorpusPin(
+            development_cases_digest=canonical_digest([asdict(case) for case in DEVELOPMENT_CASES]),
+            held_out_corpus_version=HELD_OUT_CORPUS_VERSION,
+            held_out_cases_digest=HELD_OUT_CORPUS_DIGEST,
+            held_out_sealed_at_commit=HELD_OUT_SEALED_AT_COMMIT,
+            tuning_locked_paths=TUNING_LOCKED_PATHS,
+            execution_phases=("development", "held_out"),
+            tuning_unchanged_after_seal=True,
         ),
         agent_configurations=(
             AgentConfigurationPin(
                 agent_key=RENEWAL_AGENT_KEY,
                 agent_version=1,
-                instruction_digest=_trial_digest(renewal_instruction),
-                tool_schema_digest=_trial_digest(renewal_tool_schema),
+                instruction_digest=canonical_digest(renewal_instruction),
+                tool_schema_digest=canonical_digest(renewal_tool_schema),
                 provider="openmagic-fresh-interpreter",
                 model="deterministic-reference-agent-v1",
                 reasoning="deterministic",
@@ -501,8 +523,8 @@ def run_local_agent_quality(
             AgentConfigurationPin(
                 agent_key=BOUNDARY_AGENT_KEY,
                 agent_version=1,
-                instruction_digest=_trial_digest(boundary_configuration),
-                tool_schema_digest=_trial_digest(
+                instruction_digest=canonical_digest(boundary_configuration),
+                tool_schema_digest=canonical_digest(
                     {
                         "input": "openmagic_runtime.agents.AgentRunInput",
                         "output": "openmagic_evals.evidence.agent_boundary_trials._BoundaryCandidate",
@@ -517,8 +539,8 @@ def run_local_agent_quality(
         ),
         cases=artifact_cases,
         summary=AgentQualitySummary(
-            development_cases=sum(case.split == "development" for case in AGENT_CASES),
-            held_out_cases=sum(case.split == "held_out" for case in AGENT_CASES),
+            development_cases=len(DEVELOPMENT_CASES),
+            held_out_cases=len(held_out_cases),
             expected_trials=result.expected_trials,
             observed_trials=result.observed_trials,
             passed_trials=result.passed_trials,
@@ -527,11 +549,11 @@ def run_local_agent_quality(
             pass_rate=result.pass_rate,
             wilson_lower=result.wilson_lower,
             wilson_upper=result.wilson_upper,
-            latency_ms=DistributionSummary(**asdict(result.latency)),
+            latency_ms=result.latency,
         ),
         limitations=(
             "The report measures only the two explicitly pinned local configurations.",
-            "The held-out corpus has 20 trials and does not imply model-agnostic quality.",
+            "The sealed held-out corpus has 15 trials and does not imply model-agnostic quality.",
         ),
     )
     write_artifact(output, artifact)
@@ -541,11 +563,10 @@ def run_local_agent_quality(
 
 
 __all__ = [
-    "AGENT_CASES",
     "AgentCase",
     "AgentExperimentResult",
     "AgentTrial",
-    "Distribution",
     "evaluate_trials",
+    "load_sealed_held_out_cases",
     "run_local_agent_quality",
 ]

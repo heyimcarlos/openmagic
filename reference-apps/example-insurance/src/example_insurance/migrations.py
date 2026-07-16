@@ -75,13 +75,13 @@ def apply_migrations(database_url: str) -> tuple[AppliedMigrationBundle, ...]:
     """Apply the installed runtime baseline before the application baseline."""
 
     with psycopg.connect(database_url) as connection, connection.transaction():
-        return _apply_migrations(connection)
+        return apply_migrations_on(connection)
 
 
-def _apply_migrations(
+def apply_migrations_on(
     connection: Connection[tuple[object, ...]],
 ) -> tuple[AppliedMigrationBundle, ...]:
-    """Apply both owned bundles in the caller's transaction."""
+    """Apply both owned bundles inside the caller-owned transaction."""
 
     discovered = {entry.name: entry for entry in entry_points(group="openmagic.migrations")}
     missing = tuple(name for name in _EXPECTED_BUNDLES if name not in discovered)
@@ -111,4 +111,4 @@ def main() -> None:
         print(f"{result.owner}: {result.schema} ({versions})")
 
 
-__all__ = ["AppliedMigrationBundle", "apply_migrations", "main"]
+__all__ = ["AppliedMigrationBundle", "apply_migrations", "apply_migrations_on", "main"]

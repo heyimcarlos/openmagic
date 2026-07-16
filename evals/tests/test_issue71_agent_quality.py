@@ -1,29 +1,51 @@
 from __future__ import annotations
 
+from dataclasses import asdict
+from pathlib import Path
+
 from openmagic_evals.evidence.agent_boundary_trials import execute_boundary_trial
-from openmagic_evals.evidence.agent_cases import BoundaryAgentCase, RenewalAgentCase
+from openmagic_evals.evidence.agent_cases import (
+    DEVELOPMENT_CASES,
+    BoundaryAgentCase,
+    RenewalAgentCase,
+)
 from openmagic_evals.evidence.agent_quality import (
-    AGENT_CASES,
     AgentTrial,
     evaluate_trials,
+    load_sealed_held_out_cases,
 )
 from openmagic_evals.evidence.contracts import BoundaryAgentCandidateObservation, Correlations
+from openmagic_evals.evidence.core_models import canonical_digest
+from openmagic_evals.evidence.sealed_holdout import (
+    HELD_OUT_CASES,
+    HELD_OUT_CORPUS_DIGEST,
+)
+
+ROOT = Path(__file__).parents[2]
+
+
+def _cases():
+    return DEVELOPMENT_CASES + HELD_OUT_CASES
 
 
 def test_agent_corpus_pins_development_and_untouched_held_out_cases() -> None:
-    assert {case.split for case in AGENT_CASES} == {"development", "held_out"}
-    assert len({case.case_id for case in AGENT_CASES}) == len(AGENT_CASES)
-    assert all(case.case_schema_version == 1 for case in AGENT_CASES if case.split == "development")
-    assert all(case.case_schema_version == 2 for case in AGENT_CASES if case.split == "held_out")
-    assert all(case.predeclared_trials == 5 for case in AGENT_CASES)
-    assert all(case.pass_threshold == 0.75 for case in AGENT_CASES)
-    renewal_cases = tuple(case for case in AGENT_CASES if isinstance(case, RenewalAgentCase))
+    cases = _cases()
+    assert {case.split for case in cases} == {"development", "held_out"}
+    assert len({case.case_id for case in cases}) == len(cases)
+    assert all(case.case_schema_version == 1 for case in DEVELOPMENT_CASES)
+    assert all(case.case_schema_version == 2 for case in HELD_OUT_CASES)
+    assert all(case.predeclared_trials == 5 for case in cases)
+    assert all(case.pass_threshold == 0.75 for case in cases)
+    renewal_cases = tuple(case for case in cases if isinstance(case, RenewalAgentCase))
     assert all(case.expected_subject for case in renewal_cases)
     assert all(case.required_body_fragments for case in renewal_cases)
-    assert all(case.prohibited_actions for case in AGENT_CASES)
+    assert all(case.prohibited_actions for case in cases)
+    assert canonical_digest([asdict(case) for case in HELD_OUT_CASES]) == HELD_OUT_CORPUS_DIGEST
+    assert load_sealed_held_out_cases(ROOT) == HELD_OUT_CASES
 
 
 def test_agent_evaluation_reports_complete_denominator_uncertainty_and_safety() -> None:
+    cases = _cases()
     trials = tuple(
         AgentTrial(
             case_id=case.case_id,
@@ -39,13 +61,13 @@ def test_agent_evaluation_reports_complete_denominator_uncertainty_and_safety() 
             ),
             rubric_scores={},
         )
-        for case in AGENT_CASES
+        for case in cases
         for seed in range(case.predeclared_trials)
     )
 
-    result = evaluate_trials(AGENT_CASES, trials)
+    result = evaluate_trials(cases, trials)
 
-    expected = sum(case.predeclared_trials for case in AGENT_CASES)
+    expected = sum(case.predeclared_trials for case in cases)
     assert result.expected_trials == expected
     assert result.observed_trials == expected
     assert result.passed_trials == expected
@@ -60,6 +82,7 @@ def test_agent_evaluation_reports_complete_denominator_uncertainty_and_safety() 
 
 
 def test_agent_safety_violation_cannot_be_hidden_by_quality_success() -> None:
+    cases = _cases()
     trials = tuple(
         AgentTrial(
             case_id=case.case_id,
@@ -75,19 +98,19 @@ def test_agent_safety_violation_cannot_be_hidden_by_quality_success() -> None:
             ),
             rubric_scores={},
         )
-        for case in AGENT_CASES
+        for case in cases
         for seed in range(case.predeclared_trials)
     )
 
-    result = evaluate_trials(AGENT_CASES, trials)
+    result = evaluate_trials(cases, trials)
 
     assert result.pass_rate == 1.0
-    assert result.prohibited_actions == len(AGENT_CASES)
+    assert result.prohibited_actions == len(cases)
     assert not result.threshold_passed
 
 
 def test_boundary_agent_cases_reject_malformed_and_timed_out_candidates() -> None:
-    cases = tuple(case for case in AGENT_CASES if isinstance(case, BoundaryAgentCase))
+    cases = tuple(case for case in DEVELOPMENT_CASES if isinstance(case, BoundaryAgentCase))
 
     trials = tuple(execute_boundary_trial(case, 0) for case in cases)
 

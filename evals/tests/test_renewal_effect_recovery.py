@@ -13,7 +13,7 @@ from example_insurance.renewals import ExampleInsurance
 from openmagic_evals.evidence.case_recording import record_renewal_case
 from openmagic_evals.harness import (
     LocalEmailProvider,
-    TestDeployment,
+    PlaygroundDeployment,
     approve_renewal,
     prepare_renewal_approval,
     wait_for_database_fault_window,
@@ -25,7 +25,7 @@ from openmagic_runtime.threads import ThreadStore
 @pytest.mark.integration
 def test_fresh_process_recovers_after_fence_commit_before_provider_io(tmp_path) -> None:
     provider = LocalEmailProvider(working_directory=tmp_path / "provider")
-    deployment = TestDeployment(
+    deployment = PlaygroundDeployment(
         working_directory=tmp_path / "deployment",
         email_provider_url=provider.url,
     )
@@ -91,7 +91,7 @@ def test_fresh_process_recovers_after_fence_commit_before_provider_io(tmp_path) 
 @pytest.mark.integration
 def test_fresh_process_loss_before_fence_allows_only_safe_retry(tmp_path) -> None:
     provider = LocalEmailProvider(working_directory=tmp_path / "provider")
-    deployment = TestDeployment(
+    deployment = PlaygroundDeployment(
         working_directory=tmp_path / "deployment",
         email_provider_url=provider.url,
     )
@@ -156,7 +156,7 @@ def test_fresh_process_loss_before_fence_allows_only_safe_retry(tmp_path) -> Non
 @pytest.mark.integration
 def test_fresh_process_loss_during_reconciliation_preserves_uncertainty(tmp_path) -> None:
     provider = LocalEmailProvider(working_directory=tmp_path / "provider")
-    deployment = TestDeployment(
+    deployment = PlaygroundDeployment(
         working_directory=tmp_path / "deployment",
         email_provider_url=provider.url,
     )
@@ -216,7 +216,7 @@ def test_fresh_process_loss_during_reconciliation_preserves_uncertainty(tmp_path
 @pytest.mark.integration
 def test_fresh_process_loss_during_provider_io_reconciles_without_redispatch(tmp_path) -> None:
     provider = LocalEmailProvider(working_directory=tmp_path / "provider")
-    deployment = TestDeployment(
+    deployment = PlaygroundDeployment(
         working_directory=tmp_path / "deployment",
         email_provider_url=provider.url,
     )
@@ -272,7 +272,7 @@ def test_fresh_process_loss_during_provider_io_reconciles_without_redispatch(tmp
 @pytest.mark.integration
 def test_completion_event_and_instance_closure_recover_atomically(tmp_path) -> None:
     provider = LocalEmailProvider(working_directory=tmp_path / "provider")
-    deployment = TestDeployment(
+    deployment = PlaygroundDeployment(
         working_directory=tmp_path / "deployment",
         email_provider_url=provider.url,
     )

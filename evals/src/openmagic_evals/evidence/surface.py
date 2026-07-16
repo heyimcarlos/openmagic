@@ -19,13 +19,15 @@ from openmagic_evals.evidence.contracts import (
     canonical_digest,
 )
 from openmagic_evals.evidence.installed_audit import audit_installed_environment
+from openmagic_evals.evidence.postgres_provenance import observe_postgres_deployment
 from openmagic_evals.evidence.reproducibility import reproducibility_pin
 from openmagic_evals.evidence.surface_contracts import (
     APPLICATION_PUBLIC_EXPORTS,
     EXPECTED_PRODUCTION_EDGES,
+    PUBLIC_SURFACE_DIGESTS,
     RUNTIME_PUBLIC_EXPORTS,
 )
-from openmagic_evals.harness._postgres import postgres_container
+from openmagic_evals.harness._postgres import POSTGRES_IMAGE, postgres_container
 
 
 def run_surface_audit(
@@ -52,6 +54,9 @@ def run_surface_audit(
         database_url = postgres.get_connection_url(driver=None)
         apply_migrations(database_url)
         cold = audit_cold_schema(database_url)
+        postgres_deployment = observe_postgres_deployment(
+            database_url, postgres_image=POSTGRES_IMAGE
+        )
     finished_at = datetime.now(UTC)
     strict_pass = repository.passed and installed.passed and cold.passed
     artifact = SurfaceAuditArtifact(
@@ -61,10 +66,12 @@ def run_surface_audit(
             started_at=started_at,
             finished_at=finished_at,
             timeout_seconds=timeout_seconds,
+            postgres_deployments=(postgres_deployment,),
             case_corpus_digest=canonical_digest(
                 {
                     "application_public_exports": APPLICATION_PUBLIC_EXPORTS,
                     "expected_production_edges": EXPECTED_PRODUCTION_EDGES,
+                    "public_surface_digests": PUBLIC_SURFACE_DIGESTS,
                     "runtime_public_exports": RUNTIME_PUBLIC_EXPORTS,
                     "expected_cold_schemas": ["example_insurance", "openmagic_runtime", "public"],
                     "expected_migration_heads": {

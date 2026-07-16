@@ -1,6 +1,24 @@
-"""Synthetic-only foundation for the OpenMagic playground."""
+"""Public synthetic-only controls and demonstrations."""
 
 from dataclasses import asdict, dataclass
+from importlib.metadata import version
+
+from openmagic_playground.demonstrations import (
+    DemonstrationResult,
+    exercise_process_controls,
+    run_renewal_demonstration,
+    run_verification_demonstration,
+)
+from openmagic_playground.deployment import ManagedProcess, PlaygroundDeployment, ProcessRole
+from openmagic_playground.reset import (
+    ResetAssessment,
+    ResetPreflightBlocked,
+    assess_reset,
+    mark_synthetic_deployment,
+    reset_synthetic_deployment,
+)
+
+__version__ = version("openmagic-playground")
 
 
 @dataclass(frozen=True)
@@ -20,7 +38,7 @@ class PlaygroundSafety:
 @dataclass(frozen=True)
 class PlaygroundProcessControls:
     roles: tuple[str, ...] = ("api", "workflow-worker", "delivery-worker")
-    actions: tuple[str, ...] = ("start", "drain", "restart", "stop")
+    actions: tuple[str, ...] = ("start", "drain", "reset", "restart", "stop")
     ownership: str = "explicit-local-processes"
 
     def as_dict(self) -> dict[str, tuple[str, ...] | str]:
@@ -36,8 +54,21 @@ def process_controls() -> PlaygroundProcessControls:
 
 
 __all__ = [
+    "DemonstrationResult",
+    "ManagedProcess",
+    "PlaygroundDeployment",
     "PlaygroundProcessControls",
     "PlaygroundSafety",
+    "ProcessRole",
+    "ResetAssessment",
+    "ResetPreflightBlocked",
+    "__version__",
+    "assess_reset",
+    "exercise_process_controls",
+    "mark_synthetic_deployment",
     "process_controls",
+    "reset_synthetic_deployment",
+    "run_renewal_demonstration",
+    "run_verification_demonstration",
     "safety_manifest",
 ]

@@ -9,6 +9,7 @@ from openmagic_runtime import __version__ as runtime_version
 from openmagic_runtime.evidence import inspect_runtime_database
 
 from openmagic_api import __version__ as api_version
+from openmagic_api.renewals import StartRenewalRequest, StartRenewalResponse, submit_renewal
 
 
 def create_app(*, database_url: str) -> FastAPI:
@@ -22,6 +23,10 @@ def create_app(*, database_url: str) -> FastAPI:
         payload["runtime_version"] = runtime_version
         payload["application_version"] = application_version
         return payload
+
+    @app.post("/renewals", response_model=StartRenewalResponse)
+    def start_renewal(request: StartRenewalRequest) -> StartRenewalResponse:
+        return submit_renewal(database_url=database_url, request=request)
 
     return app
 

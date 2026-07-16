@@ -28,7 +28,7 @@ from openmagic_evals.evidence.case_recording import (
 )
 from openmagic_evals.evidence.contracts import Correlations
 from openmagic_evals.evidence.inspection import EvidenceInspection
-from openmagic_evals.harness import TestDeployment
+from openmagic_evals.harness import PlaygroundDeployment
 from openmagic_evals.harness._postgres import postgres_container
 from openmagic_runtime.agents import (
     AgentAudience,
@@ -913,10 +913,12 @@ def test_start_route_replay_returns_the_same_complete_occurrence_batch() -> None
             case_id="route.finite-materialization",
             scenario_id="complete-batch-replay",
             correlations=Correlations(
-                command_ids=(command_id,),
-                instance_ids=(first.instance_id,),
-                step_ids=tuple(step.step_id for step in snapshot.steps),
-                trace_event_ids=trace_event_ids,
+                runtime={
+                    "command_ids": (command_id,),
+                    "instance_ids": (first.instance_id,),
+                    "step_ids": tuple(step.step_id for step in snapshot.steps),
+                    "trace_event_ids": trace_event_ids,
+                }
             ),
             document={
                 "replayed_value_identically": replay == first,
@@ -1363,7 +1365,7 @@ def test_delivery_appends_once_to_only_the_frozen_exact_thread() -> None:
 
 
 def test_fresh_worker_processes_recover_the_complete_sanitized_evidence_chain(tmp_path) -> None:
-    with TestDeployment(working_directory=tmp_path) as deployment:
+    with PlaygroundDeployment(working_directory=tmp_path) as deployment:
         deployment.terminate_role("workflow-worker")
         deployment.terminate_role("delivery-worker")
         context = _prepared_renewal_context(deployment.database_url)
@@ -1423,7 +1425,7 @@ def test_fresh_worker_processes_recover_the_complete_sanitized_evidence_chain(tm
 
 
 def test_process_loss_after_claim_is_recovered_and_fenced_by_a_fresh_process(tmp_path) -> None:
-    with TestDeployment(working_directory=tmp_path) as deployment:
+    with PlaygroundDeployment(working_directory=tmp_path) as deployment:
         deployment.terminate_role("workflow-worker")
         deployment.terminate_role("delivery-worker")
         context = _prepared_renewal_context(deployment.database_url)
@@ -1475,7 +1477,7 @@ def test_process_loss_after_claim_is_recovered_and_fenced_by_a_fresh_process(tmp
 def test_agent_process_loss_terminalizes_run_and_retries_without_phantom_authority(
     tmp_path,
 ) -> None:
-    with TestDeployment(working_directory=tmp_path) as deployment:
+    with PlaygroundDeployment(working_directory=tmp_path) as deployment:
         deployment.terminate_role("workflow-worker")
         deployment.terminate_role("delivery-worker")
         context = _prepared_renewal_context(deployment.database_url)
@@ -1565,7 +1567,7 @@ def test_agent_process_loss_terminalizes_run_and_retries_without_phantom_authori
 
 
 def test_delivery_process_loss_after_claim_recovers_without_duplicate_message(tmp_path) -> None:
-    with TestDeployment(working_directory=tmp_path) as deployment:
+    with PlaygroundDeployment(working_directory=tmp_path) as deployment:
         deployment.terminate_role("workflow-worker")
         deployment.terminate_role("delivery-worker")
         context = _prepared_renewal_context(deployment.database_url)

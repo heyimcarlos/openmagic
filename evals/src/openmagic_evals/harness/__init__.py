@@ -1,6 +1,7 @@
-"""Public TestDeployment and independent boot verifier seams."""
+"""Private evidence helpers around public installed package seams."""
 
-from openmagic_evals.harness.deployment import ManagedProcess, ProcessRole, TestDeployment
+from openmagic_playground import ManagedProcess, PlaygroundDeployment, ProcessRole
+
 from openmagic_evals.harness.local_provider import LocalEmailProvider
 from openmagic_evals.harness.renewal_scenario import (
     approve_renewal,
@@ -21,8 +22,8 @@ __all__ = [
     "DeploymentVerifier",
     "LocalEmailProvider",
     "ManagedProcess",
+    "PlaygroundDeployment",
     "ProcessRole",
-    "TestDeployment",
     "VerificationScenario",
     "approve_renewal",
     "issue_verification_challenge",

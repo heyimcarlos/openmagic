@@ -6,12 +6,21 @@ import json
 import os
 import subprocess
 import sys
-import tomllib
 from pathlib import Path
 
 import example_insurance
 import openmagic_api
+import openmagic_evals
+import openmagic_playground
 import openmagic_runtime
+from openmagic_evals.evidence.package_policy import (
+    PACKAGE_ROLES,
+    project_dependencies,
+    python_imports,
+    role_dependency_violations,
+    role_import_violations,
+    source_python_files,
+)
 
 ROOT = Path(__file__).parents[2]
 
@@ -30,26 +39,6 @@ RUNTIME_PUBLIC_MODULES = (
 )
 
 
-def _imports(source_root: Path) -> set[str]:
-    imported: set[str] = set()
-    for path in source_root.rglob("*.py"):
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                imported.update(alias.name.split(".", 1)[0] for alias in node.names)
-            elif isinstance(node, ast.ImportFrom) and node.module:
-                imported.add(node.module.split(".", 1)[0])
-    return imported
-
-
-def _dependencies(project: Path) -> set[str]:
-    document = tomllib.loads(project.read_text(encoding="utf-8"))
-    return {
-        dependency.split("[", 1)[0].split("=", 1)[0].split("<", 1)[0].strip()
-        for dependency in document["project"].get("dependencies", [])
-    }
-
-
 def _from_imports(path: Path) -> set[tuple[str, str]]:
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     return {
@@ -61,33 +50,19 @@ def _from_imports(path: Path) -> set[tuple[str, str]]:
 
 
 def test_production_dependency_direction_is_one_way() -> None:
-    runtime_imports = _imports(ROOT / "packages/openmagic-runtime/src")
-    application_imports = _imports(ROOT / "reference-apps/example-insurance/src")
-    api_imports = _imports(ROOT / "apps/api/src")
-
-    assert runtime_imports.isdisjoint(
-        {"example_insurance", "openmagic_api", "openmagic_evals", "openmagic_playground"}
-    )
-    assert application_imports.isdisjoint(
-        {"openmagic_api", "openmagic_evals", "openmagic_playground"}
-    )
-    assert api_imports.isdisjoint({"openmagic_evals", "openmagic_playground"})
-
-    assert _dependencies(ROOT / "packages/openmagic-runtime/pyproject.toml").isdisjoint(
-        {"example-insurance", "openmagic-api", "openmagic-evals", "openmagic-playground"}
-    )
-    assert _dependencies(ROOT / "reference-apps/example-insurance/pyproject.toml").isdisjoint(
-        {"openmagic-api", "openmagic-evals", "openmagic-playground"}
-    )
-    assert _dependencies(ROOT / "apps/api/pyproject.toml").isdisjoint(
-        {"openmagic-evals", "openmagic-playground"}
-    )
+    for role in PACKAGE_ROLES:
+        imports = python_imports(source_python_files(ROOT / role.source))
+        dependencies = project_dependencies(ROOT / role.project)
+        assert role_import_violations(role, imports) == ()
+        assert role_dependency_violations(role, dependencies) == ()
 
 
 def test_runtime_root_and_role_modules_have_explicit_export_allowlists() -> None:
     assert openmagic_runtime.__all__ == ["__version__"]
     assert example_insurance.__all__ == ["__version__"]
     assert openmagic_api.__all__ == ["__version__"]
+    assert openmagic_evals.__all__ == ["__version__"]
+    assert "PlaygroundDeployment" in openmagic_playground.__all__
 
     forbidden_exports = {
         "Session",
@@ -237,7 +212,7 @@ def test_playground_safety_is_verified_through_its_process_interface() -> None:
         env=environment,
     )
     assert json.loads(controls.stdout) == {
-        "actions": ["start", "drain", "restart", "stop"],
+        "actions": ["start", "drain", "reset", "restart", "stop"],
         "ownership": "explicit-local-processes",
         "roles": ["api", "workflow-worker", "delivery-worker"],
     }

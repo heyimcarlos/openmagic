@@ -19,17 +19,35 @@ def test_separate_process_pools_drain_backpressure_after_forced_loss(tmp_path) -
     assert report.lost_attempt.attempt_id
     assert report.lost_delivery.worker_id
     assert report.lost_delivery.delivery_attempt_id
-    assert len(report.workload_correlations.workflow_ids) == report.queued_workflows
-    assert len(report.workload_correlations.message_ids) == report.queued_workflows
+    assert len(report.workload_correlations.runtime.workflow_ids) == report.queued_workflows
+    assert len(report.workload_correlations.application.message_ids) == report.queued_workflows
     assert len(report.workload_observations) == report.queued_workflows
     assert report.claim_latency_ms >= 0
     assert all(value > 0 for value in report.recovery_times_ms)
     assert report.lock_wait_lower_bound_ms >= 250
     assert report.observed_throughput_per_second > 0
     assert len(report.api_observations) == 2
+    assert report.api_observations[0].document["independent_processes_exercised"] == 2
+    assert report.api_observations[0].document["durable_operation"] == "renewal-submission"
+    assert report.api_observations[1].document["drained_capacity"] == 2
+    assert report.api_observations[1].document["restarted_capacity"] == 2
+    assert report.api_observations[1].document["durable_recovery"] is True
+    exercised_process_ids = report.api_observations[0].document["exercised_process_ids"]
+    drained_process_ids = report.api_observations[1].document["drained_process_ids"]
+    restarted_process_ids = report.api_observations[1].document["restarted_process_ids"]
+    assert isinstance(exercised_process_ids, list)
+    assert len(exercised_process_ids) == 2
+    assert isinstance(drained_process_ids, list)
+    assert len(drained_process_ids) == 2
+    assert isinstance(restarted_process_ids, list)
+    assert len(restarted_process_ids) == 2
+    assert report.postgres_deployment.migration_heads == {
+        "example_insurance": "0004_deterministic_verification",
+        "openmagic_runtime": "0003_fenced_effect_kernel",
+    }
     initial_pids = {process.pid for process in report.initial_processes}
     assert all(process.pid not in initial_pids for process in report.replacement_processes)
     replacements = Counter(process.role for process in report.replacement_processes)
-    assert replacements["api"] == 1
+    assert replacements["api"] == 3
     assert replacements["workflow-worker"] >= 2
     assert replacements["delivery-worker"] >= 2

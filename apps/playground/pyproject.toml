@@ -1,0 +1,22 @@
+[project]
+name = "openmagic-playground"
+version = "0.1.0"
+description = "Synthetic local demonstration application for OpenMagic"
+requires-python = ">=3.11,<3.15"
+dependencies = [
+    "example-insurance==0.1.0",
+    "openmagic-api==0.1.0",
+    "openmagic-runtime==0.1.0",
+    "psycopg[binary]>=3.3.0,<4.0.0",
+    "testcontainers[postgres]>=4.10.0,<5.0.0",
+]
+
+[project.scripts]
+openmagic-playground = "openmagic_playground.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/openmagic_playground"]

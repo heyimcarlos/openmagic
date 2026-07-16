@@ -6,8 +6,7 @@ from urllib.error import URLError
 from urllib.request import urlopen
 
 import psycopg
-
-from openmagic_evals.harness.deployment import TestDeployment
+from openmagic_playground import PlaygroundDeployment
 
 
 @dataclass(frozen=True)
@@ -19,7 +18,7 @@ class BootVerdict:
 class DeploymentVerifier:
     """Judge process and schema evidence independently of process internals."""
 
-    def __init__(self, deployment: TestDeployment) -> None:
+    def __init__(self, deployment: PlaygroundDeployment) -> None:
         self.deployment = deployment
 
     def verify_boot(
@@ -65,3 +64,6 @@ class DeploymentVerifier:
             if schema not in schemas:
                 violations.append(f"required schema is missing: {schema}")
         return BootVerdict(passed=not violations, violations=tuple(violations))
+
+
+__all__ = ["BootVerdict", "DeploymentVerifier"]

@@ -46,24 +46,36 @@ def test_lease_authority_boundaries_use_database_time_without_a_grace_period() -
         )
 
         with psycopg.connect(database_url) as connection, connection.transaction():
-            connection.execute(
-                "SELECT pg_sleep(GREATEST(EXTRACT(EPOCH FROM "
-                "(lease_expires_at - clock_timestamp())), 0)) "
-                "FROM openmagic_runtime.attempts WHERE attempt_id = %s",
-                (claim.attempt_id,),
-            )
-            with pytest.raises(StaleAuthority, match="stale"):
-                KernelWork(connection).execution_authority(
-                    claim,
-                    worker_id="lease-boundary",
-                )
+            boundary: StaleAuthority | None = None
+            local_deadline = time.monotonic() + 2
+            while boundary is None:
+                try:
+                    KernelWork(connection).execution_authority(
+                        claim,
+                        worker_id="lease-boundary",
+                    )
+                except StaleAuthority as error:
+                    boundary = error
+                if time.monotonic() >= local_deadline:
+                    pytest.fail("database authority did not cross its exact lease boundary")
+                if boundary is None:
+                    time.sleep(0.005)
+            assert boundary.checked_at is not None
+            assert boundary.lease_expires_at is not None
+            assert boundary.checked_at >= boundary.lease_expires_at
         record_renewal_case(
             case_id="lease.authoritative-time",
             scenario_id="at-expiry",
             application=application,
             database_url=database_url,
             workflow_id=command.input.workflow_id,
-            document={"rejected": True, "attempt_id": str(claim.attempt_id)},
+            document={
+                "rejected": True,
+                "attempt_id": str(claim.attempt_id),
+                "database_checked_at": boundary.checked_at.isoformat(),
+                "lease_expires_at": boundary.lease_expires_at.isoformat(),
+                "database_time_relation": "at-or-after-expiry",
+            },
             worker_ids=("lease-boundary",),
         )
 

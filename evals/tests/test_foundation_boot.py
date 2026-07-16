@@ -5,7 +5,7 @@ import subprocess
 import sys
 from stat import S_IMODE
 
-from openmagic_evals.harness import DeploymentVerifier, TestDeployment
+from openmagic_evals.harness import DeploymentVerifier, PlaygroundDeployment
 
 
 def test_clean_slate_deployment_boots_installed_processes(tmp_path) -> None:
@@ -16,7 +16,7 @@ def test_clean_slate_deployment_boots_installed_processes(tmp_path) -> None:
     )
 
     secret_path = tmp_path / "verification-code-secret"
-    with TestDeployment(working_directory=tmp_path) as deployment:
+    with PlaygroundDeployment(working_directory=tmp_path) as deployment:
         verdict = DeploymentVerifier(deployment).verify_boot()
 
         assert verdict.passed, verdict.violations
@@ -32,7 +32,7 @@ def test_clean_slate_deployment_boots_installed_processes(tmp_path) -> None:
 
 
 def test_known_bad_control_is_rejected_by_independent_verifier(tmp_path) -> None:
-    with TestDeployment(working_directory=tmp_path) as deployment:
+    with PlaygroundDeployment(working_directory=tmp_path) as deployment:
         verdict = DeploymentVerifier(deployment).verify_boot(
             required_schemas=(
                 "openmagic_runtime",

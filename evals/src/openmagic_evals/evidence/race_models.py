@@ -16,6 +16,12 @@ from openmagic_evals.evidence.core_models import (
     canonical_digest,
     merge_correlations,
 )
+from openmagic_evals.evidence.pins import ReproducibilityPin
+from openmagic_evals.evidence.release_models import (
+    SCHEMA_VERSION,
+    DeterministicSummary,
+    validate_deterministic_summary,
+)
 
 _OBSERVATION_ADAPTER = TypeAdapter(dict[str, JsonValue])
 
@@ -80,15 +86,15 @@ class RaceTrialEvidence(EvidenceModel):
         ):
             raise ValueError("race trial must record two fresh contender interpreters")
         durable_ids = (
-            self.correlations.command_ids,
-            self.correlations.workflow_ids,
-            self.correlations.instance_ids,
-            self.correlations.step_ids,
-            self.correlations.attempt_ids,
-            self.correlations.wait_ids,
-            self.correlations.signal_ids,
-            self.correlations.delivery_ids,
-            self.correlations.verification_challenge_ids,
+            self.correlations.runtime.command_ids,
+            self.correlations.runtime.workflow_ids,
+            self.correlations.runtime.instance_ids,
+            self.correlations.runtime.step_ids,
+            self.correlations.runtime.attempt_ids,
+            self.correlations.runtime.wait_ids,
+            self.correlations.runtime.signal_ids,
+            self.correlations.application.delivery_ids,
+            self.correlations.application.verification_challenge_ids,
         )
         if not any(durable_ids):
             raise ValueError("race trial must correlate its public and PostgreSQL outcomes")
@@ -122,6 +128,22 @@ class RaceCase(ArtifactCaseBase):
             trial.correlations for trial in self.race_trials
         ):
             raise ValueError("race case correlations must derive from every trial")
+        return self
+
+
+class RaceArtifact(EvidenceModel):
+    schema_version: Literal["openmagic.enterprise-evidence.v1"] = SCHEMA_VERSION
+    artifact_kind: Literal["race_corpus"] = "race_corpus"
+    lane: Literal["deterministic_correctness"] = "deterministic_correctness"
+    reproducibility: ReproducibilityPin
+    cases: tuple[RaceCase, ...] = Field(min_length=1)
+    summary: DeterministicSummary
+    limitations: tuple[str, ...]
+    negative_claims: tuple[str, ...]
+
+    @model_validator(mode="after")
+    def validate_release(self) -> RaceArtifact:
+        validate_deterministic_summary(self.cases, self.summary, self.negative_claims)
         return self
 
 
@@ -161,6 +183,7 @@ class RaceCorpus:
 
 
 __all__ = [
+    "RaceArtifact",
     "RaceCase",
     "RaceCorpus",
     "RaceSeedResult",

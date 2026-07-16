@@ -8,13 +8,22 @@ from uuid import UUID
 from pydantic import Field, model_validator
 
 from openmagic_evals.evidence.core_models import (
+    ApplicationCorrelations,
     ArtifactCaseBase,
     Correlations,
     DistributionSummary,
     EvidenceModel,
+    ProcessCorrelations,
+    RuntimeCorrelations,
     SanitizedObservation,
     canonical_digest,
     merge_correlations,
+)
+from openmagic_evals.evidence.pins import ReproducibilityPin
+from openmagic_evals.evidence.release_models import (
+    SCHEMA_VERSION,
+    DeterministicSummary,
+    validate_deterministic_summary,
 )
 
 ProcessRole = Literal["api", "workflow-worker", "delivery-worker"]
@@ -230,21 +239,59 @@ class ProcessCase(ArtifactCaseBase):
             (
                 self.process_observation.workload_correlations,
                 Correlations(
-                    instance_ids=(self.process_observation.lost_attempt.instance_id,),
-                    step_ids=(self.process_observation.lost_attempt.step_id,),
-                    attempt_ids=(self.process_observation.lost_attempt.attempt_id,),
-                    thread_ids=(self.process_observation.lost_delivery.thread_id,),
-                    delivery_ids=(self.process_observation.lost_delivery.delivery_id,),
-                    delivery_attempt_ids=(
-                        self.process_observation.lost_delivery.delivery_attempt_id,
+                    runtime=RuntimeCorrelations(
+                        instance_ids=(self.process_observation.lost_attempt.instance_id,),
+                        step_ids=(self.process_observation.lost_attempt.step_id,),
+                        attempt_ids=(self.process_observation.lost_attempt.attempt_id,),
                     ),
-                    worker_ids=tuple(
-                        item.worker_id for item in all_processes if item.worker_id is not None
+                    application=ApplicationCorrelations(
+                        thread_ids=(self.process_observation.lost_delivery.thread_id,),
+                        delivery_ids=(self.process_observation.lost_delivery.delivery_id,),
+                        delivery_attempt_ids=(
+                            self.process_observation.lost_delivery.delivery_attempt_id,
+                        ),
                     ),
-                    process_ids=tuple(item.pid for item in all_processes),
+                    process=ProcessCorrelations(
+                        worker_ids=tuple(
+                            item.worker_id for item in all_processes if item.worker_id is not None
+                        ),
+                        process_ids=tuple(item.pid for item in all_processes),
+                    ),
                 ),
             )
         )
         if self.correlations != proof_correlations:
             raise ValueError("process correlations must derive from the complete recorded proof")
         return self
+
+
+class ProcessArtifact(EvidenceModel):
+    schema_version: Literal["openmagic.enterprise-evidence.v1"] = SCHEMA_VERSION
+    artifact_kind: Literal["process_recovery"] = "process_recovery"
+    lane: Literal["deterministic_correctness"] = "deterministic_correctness"
+    reproducibility: ReproducibilityPin
+    cases: tuple[ProcessCase, ...] = Field(min_length=1)
+    summary: DeterministicSummary
+    limitations: tuple[str, ...]
+    negative_claims: tuple[str, ...]
+
+    @model_validator(mode="after")
+    def validate_release(self) -> ProcessArtifact:
+        validate_deterministic_summary(self.cases, self.summary, self.negative_claims)
+        return self
+
+
+__all__ = [
+    "PROCESS_ROLES",
+    "AttemptAuthorityEvidence",
+    "DeliveryAuthorityEvidence",
+    "ForcedProcessLoss",
+    "ProcessArtifact",
+    "ProcessCase",
+    "ProcessContract",
+    "ProcessIdentityEvidence",
+    "ProcessMetrics",
+    "ProcessObservation",
+    "ProcessRole",
+    "QueueDepth",
+]

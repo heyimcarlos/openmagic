@@ -190,10 +190,12 @@ def test_competing_signals_have_one_winner_in_100_seeded_real_transaction_races(
             case_id="signal.competing",
             scenario_id="100-seed-competing-signals",
             correlations=Correlations(
-                instance_ids=tuple(instance_ids),
-                step_ids=tuple(step_ids),
-                wait_ids=tuple(wait_ids),
-                signal_ids=tuple(signal_ids),
+                runtime={
+                    "instance_ids": tuple(instance_ids),
+                    "step_ids": tuple(step_ids),
+                    "wait_ids": tuple(wait_ids),
+                    "signal_ids": tuple(signal_ids),
+                }
             ),
             document={
                 "seeds": list(range(100)),

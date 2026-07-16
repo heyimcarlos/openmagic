@@ -10,7 +10,12 @@ from openmagic_runtime.delivery import ClaimedDelivery
 from openmagic_runtime.kernel.work import ClaimedAttempt
 from openmagic_runtime.threads import ThreadStore
 
-from openmagic_evals.evidence.contracts import Correlations
+from openmagic_evals.evidence.contracts import (
+    ApplicationCorrelations,
+    Correlations,
+    ProcessCorrelations,
+    RuntimeCorrelations,
+)
 from openmagic_evals.evidence.inspection import EvidenceInspection
 from openmagic_evals.evidence.race_models import (
     RaceCorpus,
@@ -78,13 +83,16 @@ def run_claim_races(
                 public_outcomes=step_outcomes,
                 constraint_rows=step_count,
                 correlations=Correlations(
-                    command_ids=(command.command_id,),
-                    workflow_ids=(command.input.workflow_id,),
-                    instance_ids=(receipt.result.instance_id,),
-                    step_ids=(step_winner.step_id,),
-                    attempt_ids=(step_winner.attempt_id,),
-                    worker_ids=step_workers,
-                    process_ids=step_contenders.process_ids,
+                    runtime=RuntimeCorrelations(
+                        command_ids=(command.command_id,),
+                        workflow_ids=(command.input.workflow_id,),
+                        instance_ids=(receipt.result.instance_id,),
+                        step_ids=(step_winner.step_id,),
+                        attempt_ids=(step_winner.attempt_id,),
+                    ),
+                    process=ProcessCorrelations(
+                        worker_ids=step_workers, process_ids=step_contenders.process_ids
+                    ),
                 ),
                 observation=step_result,
                 contender_process_ids=step_contenders.process_ids,
@@ -145,11 +153,15 @@ def run_claim_races(
                 public_outcomes=delivery_outcomes,
                 constraint_rows=delivery_count,
                 correlations=Correlations(
-                    thread_ids=(delivery_winner.thread_id,),
-                    delivery_ids=(delivery_winner.delivery_id,),
-                    delivery_attempt_ids=(delivery_winner.delivery_attempt_id,),
-                    worker_ids=delivery_workers,
-                    process_ids=delivery_contenders.process_ids,
+                    application=ApplicationCorrelations(
+                        thread_ids=(delivery_winner.thread_id,),
+                        delivery_ids=(delivery_winner.delivery_id,),
+                        delivery_attempt_ids=(delivery_winner.delivery_attempt_id,),
+                    ),
+                    process=ProcessCorrelations(
+                        worker_ids=delivery_workers,
+                        process_ids=delivery_contenders.process_ids,
+                    ),
                 ),
                 observation=delivery_result,
                 contender_process_ids=delivery_contenders.process_ids,

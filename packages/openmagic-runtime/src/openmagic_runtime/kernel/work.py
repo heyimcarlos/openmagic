@@ -20,6 +20,17 @@ from openmagic_runtime.kernel.definitions import validate_payload, verified_defi
 class StaleAuthority(RuntimeError):
     """Raised when a Worker submits a result after its lease authority ended."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        checked_at: datetime | None = None,
+        lease_expires_at: datetime | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.checked_at = checked_at
+        self.lease_expires_at = lease_expires_at
+
 
 class AttemptResultConflict(RuntimeError):
     """Raised when an Attempt identity is reused with a different observation."""
@@ -229,7 +240,8 @@ class KernelWork:
         row = self._connection.execute(
             "SELECT a.state, a.worker_id, a.lease_expires_at > clock_timestamp(), "
             "a.hard_deadline > clock_timestamp(), a.observation, a.instance_id, a.step_id, "
-            "a.attempt_number, s.template_key, s.input FROM openmagic_runtime.attempts AS a "
+            "a.attempt_number, s.template_key, s.input, a.lease_expires_at, clock_timestamp() "
+            "FROM openmagic_runtime.attempts AS a "
             "JOIN openmagic_runtime.steps AS s ON s.step_id = a.step_id "
             "WHERE a.attempt_id = %s FOR UPDATE OF a, s",
             (attempt.attempt_id,),
@@ -256,7 +268,11 @@ class KernelWork:
                 accepted_observation=dict(row[4]),
             )
         if row[0] != "leased" or row[1] != worker_id or not row[2] or not row[3]:
-            raise StaleAuthority("Attempt authority is stale")
+            raise StaleAuthority(
+                "Attempt authority is stale",
+                checked_at=row[11],
+                lease_expires_at=row[10],
+            )
         return AttemptExecutionAuthority(
             claim=durable_claim,
             directive="execute",

@@ -40,7 +40,7 @@ class SanitizedObservation(EvidenceModel):
         return self
 
 
-class Correlations(EvidenceModel):
+class RuntimeCorrelations(EvidenceModel):
     command_ids: tuple[UUID, ...] = ()
     workflow_ids: tuple[UUID, ...] = ()
     instance_ids: tuple[UUID, ...] = ()
@@ -49,9 +49,11 @@ class Correlations(EvidenceModel):
     wait_ids: tuple[UUID, ...] = ()
     signal_ids: tuple[UUID, ...] = ()
     trace_event_ids: tuple[UUID, ...] = ()
+
+
+class ApplicationCorrelations(EvidenceModel):
     thread_ids: tuple[UUID, ...] = ()
     message_ids: tuple[UUID, ...] = ()
-    agent_run_ids: tuple[UUID, ...] = ()
     domain_event_ids: tuple[UUID, ...] = ()
     delivery_ids: tuple[UUID, ...] = ()
     delivery_attempt_ids: tuple[UUID, ...] = ()
@@ -59,9 +61,41 @@ class Correlations(EvidenceModel):
     approval_grant_ids: tuple[UUID, ...] = ()
     verification_challenge_ids: tuple[UUID, ...] = ()
     verification_session_ids: tuple[UUID, ...] = ()
+
+
+class AgentCorrelations(EvidenceModel):
+    agent_run_ids: tuple[UUID, ...] = ()
+
+
+class ProcessCorrelations(EvidenceModel):
     worker_ids: tuple[str, ...] = ()
     process_ids: tuple[int, ...] = ()
+
+
+class ProviderCorrelations(EvidenceModel):
     provider_request_ids: tuple[str, ...] = ()
+
+
+class Correlations(EvidenceModel):
+    runtime: RuntimeCorrelations = Field(default_factory=RuntimeCorrelations)
+    application: ApplicationCorrelations = Field(default_factory=ApplicationCorrelations)
+    agent: AgentCorrelations = Field(default_factory=AgentCorrelations)
+    process: ProcessCorrelations = Field(default_factory=ProcessCorrelations)
+    provider: ProviderCorrelations = Field(default_factory=ProviderCorrelations)
+
+
+def has_correlations(value: Correlations) -> bool:
+    return any(
+        identities
+        for group in (
+            value.runtime,
+            value.application,
+            value.agent,
+            value.process,
+            value.provider,
+        )
+        for identities in group.model_dump(mode="python").values()
+    )
 
 
 def merge_correlations(values: Iterable[Correlations]) -> Correlations:
@@ -71,31 +105,53 @@ def merge_correlations(values: Iterable[Correlations]) -> Correlations:
         return tuple(dict.fromkeys(source))
 
     return Correlations(
-        command_ids=unique(value for item in items for value in item.command_ids),
-        workflow_ids=unique(value for item in items for value in item.workflow_ids),
-        instance_ids=unique(value for item in items for value in item.instance_ids),
-        step_ids=unique(value for item in items for value in item.step_ids),
-        attempt_ids=unique(value for item in items for value in item.attempt_ids),
-        wait_ids=unique(value for item in items for value in item.wait_ids),
-        signal_ids=unique(value for item in items for value in item.signal_ids),
-        trace_event_ids=unique(value for item in items for value in item.trace_event_ids),
-        thread_ids=unique(value for item in items for value in item.thread_ids),
-        message_ids=unique(value for item in items for value in item.message_ids),
-        agent_run_ids=unique(value for item in items for value in item.agent_run_ids),
-        domain_event_ids=unique(value for item in items for value in item.domain_event_ids),
-        delivery_ids=unique(value for item in items for value in item.delivery_ids),
-        delivery_attempt_ids=unique(value for item in items for value in item.delivery_attempt_ids),
-        external_effect_ids=unique(value for item in items for value in item.external_effect_ids),
-        approval_grant_ids=unique(value for item in items for value in item.approval_grant_ids),
-        verification_challenge_ids=unique(
-            value for item in items for value in item.verification_challenge_ids
+        runtime=RuntimeCorrelations(
+            command_ids=unique(value for item in items for value in item.runtime.command_ids),
+            workflow_ids=unique(value for item in items for value in item.runtime.workflow_ids),
+            instance_ids=unique(value for item in items for value in item.runtime.instance_ids),
+            step_ids=unique(value for item in items for value in item.runtime.step_ids),
+            attempt_ids=unique(value for item in items for value in item.runtime.attempt_ids),
+            wait_ids=unique(value for item in items for value in item.runtime.wait_ids),
+            signal_ids=unique(value for item in items for value in item.runtime.signal_ids),
+            trace_event_ids=unique(
+                value for item in items for value in item.runtime.trace_event_ids
+            ),
         ),
-        verification_session_ids=unique(
-            value for item in items for value in item.verification_session_ids
+        application=ApplicationCorrelations(
+            thread_ids=unique(value for item in items for value in item.application.thread_ids),
+            message_ids=unique(value for item in items for value in item.application.message_ids),
+            domain_event_ids=unique(
+                value for item in items for value in item.application.domain_event_ids
+            ),
+            delivery_ids=unique(value for item in items for value in item.application.delivery_ids),
+            delivery_attempt_ids=unique(
+                value for item in items for value in item.application.delivery_attempt_ids
+            ),
+            external_effect_ids=unique(
+                value for item in items for value in item.application.external_effect_ids
+            ),
+            approval_grant_ids=unique(
+                value for item in items for value in item.application.approval_grant_ids
+            ),
+            verification_challenge_ids=unique(
+                value for item in items for value in item.application.verification_challenge_ids
+            ),
+            verification_session_ids=unique(
+                value for item in items for value in item.application.verification_session_ids
+            ),
         ),
-        worker_ids=unique(value for item in items for value in item.worker_ids),
-        process_ids=unique(value for item in items for value in item.process_ids),
-        provider_request_ids=unique(value for item in items for value in item.provider_request_ids),
+        agent=AgentCorrelations(
+            agent_run_ids=unique(value for item in items for value in item.agent.agent_run_ids),
+        ),
+        process=ProcessCorrelations(
+            worker_ids=unique(value for item in items for value in item.process.worker_ids),
+            process_ids=unique(value for item in items for value in item.process.process_ids),
+        ),
+        provider=ProviderCorrelations(
+            provider_request_ids=unique(
+                value for item in items for value in item.provider.provider_request_ids
+            ),
+        ),
     )
 
 
@@ -145,3 +201,22 @@ class ArtifactCaseBase(EvidenceModel):
         for digest in self.observation_digests:
             require_digest(digest, "observation_digest")
         return self
+
+
+__all__ = [
+    "AgentCorrelations",
+    "ApplicationCorrelations",
+    "ArtifactCaseBase",
+    "CaseVerdict",
+    "Correlations",
+    "DistributionSummary",
+    "EvidenceModel",
+    "ProcessCorrelations",
+    "ProviderCorrelations",
+    "RuntimeCorrelations",
+    "SanitizedObservation",
+    "canonical_digest",
+    "has_correlations",
+    "merge_correlations",
+    "require_digest",
+]

@@ -40,3 +40,6 @@ def pytest_sessionfinish(session: Any, exitstatus: int) -> None:
         json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n",
         encoding="utf-8",
     )
+
+
+__all__ = ["pytest_addoption", "pytest_sessionfinish"]

@@ -58,7 +58,7 @@ provider availability     -> opt-in live smoke
 playground behavior       -> synthetic demonstration only
 ```
 
-Build all four distributions as wheels, install them into an isolated environment,
+Build all five distributions as wheels, install them into an isolated environment,
 then generate the complete package from that exact clean checkout:
 
 ```bash

@@ -17,7 +17,12 @@ from example_insurance.renewals import (
 from openmagic_runtime.commands import Cause, CommandReceipt
 from openmagic_runtime.threads import ThreadStore
 
-from openmagic_evals.evidence.contracts import Correlations
+from openmagic_evals.evidence.contracts import (
+    ApplicationCorrelations,
+    Correlations,
+    ProcessCorrelations,
+    RuntimeCorrelations,
+)
 from openmagic_evals.evidence.inspection import EvidenceInspection
 from openmagic_evals.evidence.race_claims import run_claim_races
 from openmagic_evals.evidence.race_models import (
@@ -81,10 +86,12 @@ def run_command_receipt_races(
                 public_outcomes=("value_identical_receipt", "value_identical_receipt"),
                 constraint_rows=count,
                 correlations=Correlations(
-                    command_ids=(command.command_id,),
-                    workflow_ids=(command.input.workflow_id,),
-                    instance_ids=(receipt.result.instance_id,),
-                    process_ids=contenders.process_ids,
+                    runtime=RuntimeCorrelations(
+                        command_ids=(command.command_id,),
+                        workflow_ids=(command.input.workflow_id,),
+                        instance_ids=(receipt.result.instance_id,),
+                    ),
+                    process=ProcessCorrelations(process_ids=contenders.process_ids),
                 ),
                 observation=observation,
                 contender_process_ids=contenders.process_ids,
@@ -172,15 +179,19 @@ def run_verification_submission_races(
                 public_outcomes=outcomes,
                 constraint_rows=count,
                 correlations=Correlations(
-                    command_ids=tuple(command.command_id for command in commands),
-                    workflow_ids=(scenario.renewal.input.workflow_id,),
-                    verification_challenge_ids=(challenge_id,),
-                    verification_session_ids=tuple(
-                        receipt.result.session_id
-                        for receipt in receipts
-                        if receipt.result.session_id is not None
+                    runtime=RuntimeCorrelations(
+                        command_ids=tuple(command.command_id for command in commands),
+                        workflow_ids=(scenario.renewal.input.workflow_id,),
                     ),
-                    process_ids=contenders.process_ids,
+                    application=ApplicationCorrelations(
+                        verification_challenge_ids=(challenge_id,),
+                        verification_session_ids=tuple(
+                            receipt.result.session_id
+                            for receipt in receipts
+                            if receipt.result.session_id is not None
+                        ),
+                    ),
+                    process=ProcessCorrelations(process_ids=contenders.process_ids),
                 ),
                 observation=observation,
                 contender_process_ids=contenders.process_ids,

@@ -12,6 +12,7 @@ from openmagic_evals.evidence.contracts import (
     REQUIRED_NEGATIVE_CLAIMS,
     AgentCaseEvidence,
     AgentConfigurationPin,
+    AgentCorpusPin,
     AgentQualityArtifact,
     AgentQualitySummary,
     AgentTrialEvidence,
@@ -27,6 +28,7 @@ from openmagic_evals.evidence.contracts import (
     DeterministicSummary,
     DistributionSummary,
     InstalledSurfaceEvidence,
+    PostgresDeploymentPin,
     RaceCase,
     RaceTrialEvidence,
     RepositorySurfaceEvidence,
@@ -71,11 +73,19 @@ def _pin(git_sha: str) -> ReproducibilityPin:
         started_at=datetime(2026, 7, 15, tzinfo=UTC),
         finished_at=datetime(2026, 7, 15, 0, 1, tzinfo=UTC),
         timeout_seconds=60,
-        postgres_version="17.5",
-        postgres_image="postgres@sha256:" + "2" * 64,
-        postgres_configuration={"transaction_isolation": "read committed"},
-        postgres_configuration_digest="sha256:" + "3" * 64,
-        migration_heads={"openmagic_runtime": "0003"},
+        postgres_deployments=(
+            PostgresDeploymentPin(
+                deployment_id="sha256:" + "a" * 64,
+                postgres_version="17.5",
+                postgres_image="postgres@sha256:" + "2" * 64,
+                postgres_configuration={"transaction_isolation": "read committed"},
+                postgres_configuration_digest="sha256:" + "3" * 64,
+                migration_heads={
+                    "example_insurance": "0004",
+                    "openmagic_runtime": "0003",
+                },
+            ),
+        ),
         definition_digests={"definition": "sha256:" + "4" * 64},
         case_corpus_digest="sha256:" + "5" * 64,
         sandbox_digest="sha256:" + "6" * 64,
@@ -85,7 +95,7 @@ def _pin(git_sha: str) -> ReproducibilityPin:
 def _case(
     *, agent: bool = False, case_id: str = "release.test"
 ) -> ArtifactCase | AgentCaseEvidence:
-    correlations = Correlations(command_ids=("018f2f00-0000-7000-8000-000000000001",))
+    correlations = Correlations(runtime={"command_ids": ("018f2f00-0000-7000-8000-000000000001",)})
     trajectory = tuple(
         SanitizedAgentEvent(
             sequence=index,
@@ -188,7 +198,7 @@ def _case(
 
 def _race_case(case_id: str) -> RaceCase:
     contract = next(case for case in cardinality_one_races() if case.case_id == case_id)
-    correlations = Correlations(command_ids=("018f2f00-0000-7000-8000-000000000001",))
+    correlations = Correlations(runtime={"command_ids": ("018f2f00-0000-7000-8000-000000000001",)})
     trials = tuple(
         RaceTrialEvidence(
             seed=seed,
@@ -255,6 +265,15 @@ def test_claim_report_rejects_artifacts_from_different_builds(tmp_path: Path) ->
         _validate_release_matrix(incomplete)
     agent = AgentQualityArtifact(
         reproducibility=_pin("2" * 40),
+        corpus=AgentCorpusPin(
+            development_cases_digest="sha256:" + "a" * 64,
+            held_out_corpus_version="test.v1",
+            held_out_cases_digest="sha256:" + "b" * 64,
+            held_out_sealed_at_commit="1" * 40,
+            tuning_locked_paths=("example/agent.py",),
+            execution_phases=("development", "held_out"),
+            tuning_unchanged_after_seal=True,
+        ),
         agent_configurations=(
             AgentConfigurationPin(
                 agent_key="test",

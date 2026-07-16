@@ -7,6 +7,7 @@ members = [
     "example-insurance",
     "openmagic-api",
     "openmagic-evals",
+    "openmagic-playground",
     "openmagic-runtime",
 ]
 
@@ -251,6 +252,7 @@ source = { editable = "evals" }
 dependencies = [
     { name = "example-insurance" },
     { name = "openmagic-api" },
+    { name = "openmagic-playground" },
     { name = "openmagic-runtime" },
     { name = "psycopg", extra = ["binary"] },
     { name = "pydantic" },
@@ -261,9 +263,31 @@ dependencies = [
 requires-dist = [
     { name = "example-insurance", editable = "reference-apps/example-insurance" },
     { name = "openmagic-api", editable = "apps/api" },
+    { name = "openmagic-playground", editable = "apps/playground" },
     { name = "openmagic-runtime", editable = "packages/openmagic-runtime" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.3.0,<4.0.0" },
     { name = "pydantic", specifier = ">=2.12.0,<3.0.0" },
+    { name = "testcontainers", extras = ["postgres"], specifier = ">=4.10.0,<5.0.0" },
+]
+
+[[package]]
+name = "openmagic-playground"
+version = "0.1.0"
+source = { editable = "apps/playground" }
+dependencies = [
+    { name = "example-insurance" },
+    { name = "openmagic-api" },
+    { name = "openmagic-runtime" },
+    { name = "psycopg", extra = ["binary"] },
+    { name = "testcontainers" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "example-insurance", editable = "reference-apps/example-insurance" },
+    { name = "openmagic-api", editable = "apps/api" },
+    { name = "openmagic-runtime", editable = "packages/openmagic-runtime" },
+    { name = "psycopg", extras = ["binary"], specifier = ">=3.3.0,<4.0.0" },
     { name = "testcontainers", extras = ["postgres"], specifier = ">=4.10.0,<5.0.0" },
 ]
 

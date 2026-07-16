@@ -167,7 +167,12 @@ APPLICATION_PUBLIC_EXPORTS = {
     "__init__.py": ("__version__",),
     "application_event_records.py": ("actor_record", "cause_record"),
     "application_registry.py": ("application_command_dispatcher",),
-    "migrations.py": ("AppliedMigrationBundle", "apply_migrations", "main"),
+    "migrations.py": (
+        "AppliedMigrationBundle",
+        "apply_migrations",
+        "apply_migrations_on",
+        "main",
+    ),
     "readiness.py": ("verify_application_ready",),
     "renewal_approval_policy.py": (
         "ApprovalAcceptedDecision",
@@ -501,10 +506,18 @@ EXPECTED_PRODUCTION_EDGES = (
     "openmagic-api -> example-insurance",
     "openmagic-api -> openmagic-runtime",
 )
+PUBLIC_SURFACE_DIGESTS = {
+    "example-insurance": "sha256:0a884d3f23b3ab3fa541efb0f106453ea5e56f20d2838241599a8f556a8db33d",
+    "openmagic-api": "sha256:b47b899d81cf0831f3fa31e984c8e342e9fa8a32adbec983739a29929d131ed3",
+    "openmagic-evals": "sha256:377fee738efd8baf9e314cf876fe43a03a61f57b5052c59d9b2ee042b180293e",
+    "openmagic-playground": "sha256:5e5b39cb8af483ed5f787373f76266d13f13613e77b19ec6365afe8ba120cf9d",
+    "openmagic-runtime": "sha256:f539eca06fe59cb6cc6b19e69c5f803f61e9717768cfb8102ecca911924beb11",
+}
 
 __all__ = [
     "APPLICATION_PUBLIC_EXPORTS",
     "DELETED_IDENTIFIERS",
     "EXPECTED_PRODUCTION_EDGES",
+    "PUBLIC_SURFACE_DIGESTS",
     "RUNTIME_PUBLIC_EXPORTS",
 ]

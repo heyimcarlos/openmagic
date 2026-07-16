@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from collections import Counter
 
-from openmagic_evals.harness import TestDeployment
+from openmagic_evals.harness import PlaygroundDeployment
 
 
 def test_process_pools_have_independent_capacity_drain_loss_and_fresh_restart(tmp_path) -> None:
-    with TestDeployment(
+    with PlaygroundDeployment(
         working_directory=tmp_path / "deployment",
         role_capacities={"api": 2, "workflow-worker": 2, "delivery-worker": 3},
     ) as deployment:

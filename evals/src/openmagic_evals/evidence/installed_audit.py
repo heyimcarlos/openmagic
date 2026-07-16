@@ -4,25 +4,27 @@ from __future__ import annotations
 
 import ast
 import importlib
-import re
 from dataclasses import dataclass
 from importlib.metadata import Distribution, distribution
 from pathlib import Path
 
+from openmagic_evals.evidence.core_models import canonical_digest
+from openmagic_evals.evidence.package_policy import (
+    PACKAGE_ROLES,
+    python_imports,
+    requirement_name,
+    role_dependency_violations,
+    role_import_violations,
+)
 from openmagic_evals.evidence.surface_contracts import (
     APPLICATION_PUBLIC_EXPORTS,
     DELETED_IDENTIFIERS,
     EXPECTED_PRODUCTION_EDGES,
+    PUBLIC_SURFACE_DIGESTS,
     RUNTIME_PUBLIC_EXPORTS,
 )
 
-_DISTRIBUTIONS = {
-    "openmagic-runtime": "openmagic_runtime",
-    "example-insurance": "example_insurance",
-    "openmagic-api": "openmagic_api",
-    "openmagic-evals": "openmagic_evals",
-}
-_NORMALIZE = re.compile(r"[-_.]+")
+_DISTRIBUTIONS = {role.distribution: role.package for role in PACKAGE_ROLES}
 
 
 @dataclass(frozen=True)
@@ -35,34 +37,12 @@ class InstalledSurfaceAudit:
     audited_files: int
 
 
-def _normalized(value: str) -> str:
-    return _NORMALIZE.sub("-", value).lower()
-
-
-def _requirement_name(requirement: str) -> str:
-    return _normalized(re.split(r"[ ;(<>=!~\[]", requirement, maxsplit=1)[0])
-
-
 def _distribution_files(item: Distribution) -> tuple[Path, ...]:
     return tuple(
         Path(str(item.locate_file(file)))
         for file in (item.files or ())
         if file.parts and file.suffix in {".py", ".sql"}
     )
-
-
-def _imports(paths: tuple[Path, ...]) -> set[str]:
-    imported: set[str] = set()
-    for path in paths:
-        if path.suffix != ".py":
-            continue
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                imported.update(alias.name for alias in node.names)
-            elif isinstance(node, ast.ImportFrom) and node.module:
-                imported.add(node.module)
-    return imported
 
 
 def _installed_public_exports(
@@ -117,7 +97,7 @@ def audit_installed_environment() -> InstalledSurfaceAudit:
             f"{owner} -> {dependency}"
             for owner in ("openmagic-runtime", "example-insurance", "openmagic-api")
             for dependency in {
-                _requirement_name(requirement) for requirement in (installed[owner].requires or ())
+                requirement_name(requirement) for requirement in (installed[owner].requires or ())
             }
             & internal
         )
@@ -125,18 +105,26 @@ def audit_installed_environment() -> InstalledSurfaceAudit:
     if edges != EXPECTED_PRODUCTION_EDGES:
         violations.append("installed production dependency graph differs from the accepted graph")
 
-    runtime_imports = _imports(files["openmagic-runtime"])
-    application_imports = _imports(files["example-insurance"])
-    api_imports = _imports(files["openmagic-api"])
-    if any(
-        name.startswith(("example_insurance", "openmagic_api", "openmagic_evals"))
-        for name in runtime_imports
-    ):
-        violations.append("installed runtime imports an outward distribution")
-    if any(name.startswith(("openmagic_api", "openmagic_evals")) for name in application_imports):
-        violations.append("installed application imports an outward distribution")
-    if any(name.startswith(("openmagic_evals", "openmagic_playground")) for name in api_imports):
-        violations.append("installed API imports evidence or demonstration code")
+    imports_by_distribution = {
+        role.distribution: python_imports(files[role.distribution]) for role in PACKAGE_ROLES
+    }
+    for role in PACKAGE_ROLES:
+        violations.extend(role_import_violations(role, imports_by_distribution[role.distribution]))
+        requirements = frozenset(
+            requirement_name(requirement)
+            for requirement in (installed[role.distribution].requires or ())
+        )
+        violations.extend(role_dependency_violations(role, requirements))
+        exports = _installed_public_exports(
+            files[role.distribution],
+            role.package,
+        )
+        if canonical_digest(exports) != PUBLIC_SURFACE_DIGESTS[role.distribution]:
+            violations.append(
+                f"installed {role.distribution} public modules or exports differ from exact surface"
+            )
+    application_imports = imports_by_distribution["example-insurance"]
+    api_imports = imports_by_distribution["openmagic-api"]
     if any(name.startswith("openmagic_runtime._persistence") for name in application_imports):
         violations.append("installed application imports private runtime persistence")
     if any("._persistence" in name for name in api_imports):

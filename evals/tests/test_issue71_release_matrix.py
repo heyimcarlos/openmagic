@@ -245,7 +245,7 @@ def test_case_recording_rejects_duplicate_case_and_scenario_emissions(
     values = {
         "case_id": "release.test",
         "scenario_id": "exact-scenario",
-        "correlations": Correlations(command_ids=(uuid4(),)),
+        "correlations": Correlations(runtime={"command_ids": (uuid4(),)}),
         "document": {"observed": True},
     }
 

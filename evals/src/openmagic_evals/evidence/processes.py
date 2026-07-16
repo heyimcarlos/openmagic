@@ -9,15 +9,25 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from urllib.request import urlopen
-from uuid import UUID
+from urllib.request import Request, urlopen
+from uuid import UUID, uuid5
 
-from example_insurance.renewals import ExampleInsurance
-from openmagic_runtime.threads import ThreadStore
+from example_insurance.renewals import (
+    ExampleInsurance,
+    StartRenewalOutreach,
+    StartRenewalOutreachInput,
+)
+from openmagic_api.renewals import StartRenewalRequest, StartRenewalResponse
+from openmagic_playground import ManagedProcess, PlaygroundDeployment, ProcessRole
+from openmagic_playground.deployment_observation import observe_postgres
+from openmagic_runtime.commands import Actor, Cause
+from pydantic import JsonValue
 
 from openmagic_evals.evidence.artifact_io import write_artifact
 from openmagic_evals.evidence.contracts import (
     REQUIRED_NEGATIVE_CLAIMS,
+    AgentCorrelations,
+    ApplicationCorrelations,
     AttemptAuthorityEvidence,
     CaseVerdict,
     Correlations,
@@ -28,10 +38,12 @@ from openmagic_evals.evidence.contracts import (
     ProcessArtifact,
     ProcessCase,
     ProcessContract,
+    ProcessCorrelations,
     ProcessIdentityEvidence,
     ProcessMetrics,
     ProcessObservation,
     QueueDepth,
+    RuntimeCorrelations,
     SanitizedObservation,
     canonical_digest,
     merge_correlations,
@@ -44,15 +56,10 @@ from openmagic_evals.evidence.inspection import (
     EvidenceInspection,
     QueueState,
 )
+from openmagic_evals.evidence.pins import PostgresDeploymentPin
 from openmagic_evals.evidence.reproducibility import reproducibility_pin
 from openmagic_evals.harness import LocalEmailProvider
-from openmagic_evals.harness.deployment import ManagedProcess, ProcessRole, TestDeployment
-from openmagic_evals.harness.renewal_scenario import (
-    approve_renewal,
-    prepare_renewal_approval,
-    prepare_synthetic_renewal_start,
-    wait_for_renewal_completion,
-)
+from openmagic_evals.harness.renewal_scenario import approve_renewal, wait_for_renewal_completion
 
 _PROCESS_ROLES: tuple[ProcessRole, ...] = (
     "api",
@@ -63,7 +70,7 @@ _PROCESS_CONTRACT = ProcessContract(
     scenario_version="process.loss-backpressure-recovery.v1",
     queued_workflows=12,
     initial_capacity={"api": 1, "workflow-worker": 1, "delivery-worker": 1},
-    burst_capacity={"api": 1, "workflow-worker": 3, "delivery-worker": 2},
+    burst_capacity={"api": 2, "workflow-worker": 3, "delivery-worker": 2},
     provider_behavior="slow_success",
     provider_delay_seconds=3,
     forced_loss_points=(
@@ -97,6 +104,7 @@ class ProcessEvidence:
     lock_wait_lower_bound_ms: int
     observed_throughput_per_second: float
     elapsed_ms: int
+    postgres_deployment: PostgresDeploymentPin
 
 
 def _distribution(values: tuple[int, ...]) -> DistributionSummary:
@@ -110,19 +118,75 @@ def _distribution(values: tuple[int, ...]) -> DistributionSummary:
     )
 
 
-def _api_database_observation(process: ManagedProcess) -> SanitizedObservation:
+def _api_database_observation(
+    process: ManagedProcess, *, document_update: dict[str, JsonValue] | None = None
+) -> SanitizedObservation:
     with urlopen(process.health_url, timeout=2) as response:
         payload = json.load(response)
     if payload.get("role") != "api" or payload.get("status") != "ready":
         raise AssertionError("API did not reconstruct its readiness from PostgreSQL")
-    document = {
+    document: dict[str, JsonValue] = {
         "role": "api",
         "status": "ready",
         "postgresql_authority_reconstructed": True,
     }
+    if document_update is not None:
+        document.update(document_update)
     return SanitizedObservation(
         document=document,
         digest=canonical_digest(document),
+    )
+
+
+_PROCESS_RENEWAL_NAMESPACE = UUID("64d438ed-3420-44ea-a8bc-464fa9080fab")
+
+
+def _renewal_request(seed: int) -> StartRenewalRequest:
+    def identity(role: str) -> UUID:
+        return uuid5(_PROCESS_RENEWAL_NAMESPACE, f"{seed}:{role}")
+
+    return StartRenewalRequest(
+        command_id=identity("command"),
+        workflow_id=identity("workflow"),
+        thread_id=identity("thread"),
+        policy_id=identity("policy"),
+        actor_id=identity("actor"),
+        cause_id=identity("cause"),
+        policy_number=f"OM-PROCESS-{seed}",
+        policyholder_name=f"Synthetic Process Party {seed}",
+        policyholder_email=f"process-{seed}@example.test",
+        renewal_date="2028-12-31",
+        expiring_premium_cents=100_000 + seed,
+    )
+
+
+def _submit_via_api(process: ManagedProcess, request: StartRenewalRequest) -> StartRenewalResponse:
+    target = process.health_url.removesuffix("/health") + "/renewals"
+    http_request = Request(
+        target,
+        data=request.model_dump_json().encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urlopen(http_request, timeout=5) as response:
+        return StartRenewalResponse.model_validate_json(response.read())
+
+
+def _application_command(request: StartRenewalRequest) -> StartRenewalOutreach:
+    return StartRenewalOutreach(
+        command_id=request.command_id,
+        actor=Actor("party", str(request.actor_id)),
+        cause=Cause("message", str(request.cause_id)),
+        input=StartRenewalOutreachInput(
+            workflow_id=request.workflow_id,
+            thread_id=request.thread_id,
+            policy_id=request.policy_id,
+            policy_number=request.policy_number,
+            policyholder_name=request.policyholder_name,
+            policyholder_email=request.policyholder_email,
+            renewal_date=request.renewal_date,
+            expiring_premium_cents=request.expiring_premium_cents,
+        ),
     )
 
 
@@ -165,18 +229,21 @@ def _verify_workload_outcome(
             f"{json.dumps(diagnostic, sort_keys=True)}"
         )
     correlations = Correlations(
-        command_ids=(UUID(values["command_id"]),),
-        workflow_ids=(UUID(values["workflow_id"]),),
-        instance_ids=(UUID(values["instance_id"]),),
-        step_ids=_uuid_tuple(values["step_ids"]),
-        attempt_ids=_uuid_tuple(values["attempt_ids"]),
-        wait_ids=_uuid_tuple(outcomes["approval_wait_ids"]),
-        trace_event_ids=(),
-        thread_ids=(UUID(values["thread_id"]),),
-        message_ids=_uuid_tuple(values["message_ids"]),
-        agent_run_ids=_uuid_tuple(values["agent_run_ids"]),
-        domain_event_ids=_uuid_tuple(values["domain_event_ids"]),
-        delivery_ids=_uuid_tuple(values["delivery_ids"]),
+        runtime=RuntimeCorrelations(
+            command_ids=(UUID(values["command_id"]),),
+            workflow_ids=(UUID(values["workflow_id"]),),
+            instance_ids=(UUID(values["instance_id"]),),
+            step_ids=_uuid_tuple(values["step_ids"]),
+            attempt_ids=_uuid_tuple(values["attempt_ids"]),
+            wait_ids=_uuid_tuple(outcomes["approval_wait_ids"]),
+        ),
+        application=ApplicationCorrelations(
+            thread_ids=(UUID(values["thread_id"]),),
+            message_ids=_uuid_tuple(values["message_ids"]),
+            domain_event_ids=_uuid_tuple(values["domain_event_ids"]),
+            delivery_ids=_uuid_tuple(values["delivery_ids"]),
+        ),
+        agent=AgentCorrelations(agent_run_ids=_uuid_tuple(values["agent_run_ids"])),
     )
     document = {
         "workflow_id": str(workflow_id),
@@ -251,7 +318,7 @@ def run_process_evidence(
         raise ValueError("backpressure evidence requires more work than initial Worker capacity")
     started_at = time.monotonic()
     provider = LocalEmailProvider(working_directory=working_directory / "provider")
-    deployment = TestDeployment(
+    deployment = PlaygroundDeployment(
         working_directory=working_directory / "deployment",
         role_capacities=contract.initial_capacity,
         email_provider_url=provider.url,
@@ -267,24 +334,61 @@ def run_process_evidence(
         deployment.drain_role("workflow-worker")
         deployment.drain_role("delivery-worker")
         initial_api = next(process for process in initial_processes if process.role == "api")
-        initial_api_observation = _api_database_observation(initial_api)
+        capacity_api = deployment.scale_role("api", capacity=contract.burst_capacity["api"])[0]
+        api_operation = _renewal_request(-1)
+        initial_receipt = _submit_via_api(initial_api, api_operation)
+        capacity_receipt = _submit_via_api(capacity_api, api_operation)
+        if initial_receipt != capacity_receipt:
+            raise AssertionError("independent API capacity did not replay one durable Command")
+        initial_api_observation = _api_database_observation(
+            initial_api,
+            document_update={
+                "burst_capacity": contract.burst_capacity["api"],
+                "durable_operation": "renewal-submission",
+                "independent_processes_exercised": 2,
+                "exercised_process_ids": [initial_api.pid, capacity_api.pid],
+                "replay_identity_preserved": True,
+            },
+        )
         api_recovery_started = time.monotonic()
         lost_api = deployment.terminate_role("api")
-        api_replacement = deployment.scale_role("api", capacity=contract.burst_capacity["api"])[0]
+        gracefully_drained_api = deployment.drain_role("api")
+        if len(gracefully_drained_api) != 1 or any(
+            process.role == "api" for process in deployment.processes
+        ):
+            raise AssertionError("API pool did not drain to zero independent capacity")
+        api_replacements = deployment.scale_role("api", capacity=contract.burst_capacity["api"])
+        api_replacement = api_replacements[0]
+        recovery_receipt = _submit_via_api(api_replacement, api_operation)
         api_recovery_ms = round((time.monotonic() - api_recovery_started) * 1000)
-        if api_replacement.pid == initial_api.pid:
-            raise AssertionError("API restart did not use a fresh interpreter")
-        replacement_api_observation = _api_database_observation(api_replacement)
+        if recovery_receipt != initial_receipt or {process.pid for process in api_replacements} & {
+            initial_api.pid,
+            capacity_api.pid,
+        }:
+            raise AssertionError("API restart did not recover durable state in fresh interpreters")
+        replacement_api_observation = _api_database_observation(
+            api_replacement,
+            document_update={
+                "drained_capacity": contract.burst_capacity["api"],
+                "drained_process_ids": [lost_api.pid, gracefully_drained_api[0].pid],
+                "restarted_capacity": len(api_replacements),
+                "restarted_process_ids": [process.pid for process in api_replacements],
+                "durable_recovery": True,
+                "replay_identity_preserved": True,
+            },
+        )
         application = ExampleInsurance(
             database_url=deployment.database_url,
             email_provider_url=provider.url,
         )
         application.prepare()
-        threads = ThreadStore(database_url=deployment.database_url)
         inspection = EvidenceInspection(deployment.database_url)
 
-        effect_command, actor = prepare_renewal_approval(application, threads)
-        approve_renewal(application, effect_command, actor)
+        effect_command = _application_command(api_operation)
+        application.run_workflow_worker_once(worker_id="api-operation-facts")
+        application.run_workflow_worker_once(worker_id="api-operation-draft")
+        application.run_delivery_worker_once(worker_id="api-operation-delivery")
+        approve_renewal(application, effect_command, effect_command.actor)
         lost_workflow_process = deployment.scale_role("workflow-worker", capacity=1)[0]
         lost_attempt = _wait_attempt(
             inspection,
@@ -304,9 +408,11 @@ def run_process_evidence(
 
         workload_ids: list[UUID] = []
         for seed in range(workflow_count):
-            command = prepare_synthetic_renewal_start(application, threads, seed)
-            application.start_renewal_outreach(command)
-            workload_ids.append(command.input.workflow_id)
+            request = _renewal_request(seed)
+            receipt = _submit_via_api(api_replacements[seed % len(api_replacements)], request)
+            if receipt.workflow_id != request.workflow_id:
+                raise AssertionError("API returned a different durable Workflow identity")
+            workload_ids.append(request.workflow_id)
         initial = inspection.queue_state()
         if initial.pending_steps != workflow_count:
             raise AssertionError("queued Workflow count did not match pending Step depth")
@@ -360,7 +466,8 @@ def run_process_evidence(
             _verify_workload_outcome(application, workflow_id) for workflow_id in workload_ids
         )
         replacements = (
-            api_replacement,
+            capacity_api,
+            *api_replacements,
             *workflow_started,
             lost_workflow_process,
             *workflow_replacement,
@@ -391,6 +498,9 @@ def run_process_evidence(
             lock_wait_lower_bound_ms=lock_wait_lower_bound_ms,
             observed_throughput_per_second=workflow_count / workflow_drain_seconds,
             elapsed_ms=round((time.monotonic() - started_at) * 1000),
+            postgres_deployment=PostgresDeploymentPin.model_validate(
+                observe_postgres(deployment.database_url)
+            ),
         )
 
 
@@ -490,18 +600,24 @@ def run_process_release(
         (
             report.workload_correlations,
             Correlations(
-                instance_ids=(report.lost_attempt.instance_id,),
-                step_ids=(report.lost_attempt.step_id,),
-                attempt_ids=(report.lost_attempt.attempt_id,),
-                thread_ids=(report.lost_delivery.thread_id,),
-                delivery_ids=(report.lost_delivery.delivery_id,),
-                delivery_attempt_ids=(report.lost_delivery.delivery_attempt_id,),
-                worker_ids=tuple(
-                    process.worker_id
-                    for process in (*report.initial_processes, *report.replacement_processes)
-                    if process.worker_id is not None
+                runtime=RuntimeCorrelations(
+                    instance_ids=(report.lost_attempt.instance_id,),
+                    step_ids=(report.lost_attempt.step_id,),
+                    attempt_ids=(report.lost_attempt.attempt_id,),
                 ),
-                process_ids=process_ids,
+                application=ApplicationCorrelations(
+                    thread_ids=(report.lost_delivery.thread_id,),
+                    delivery_ids=(report.lost_delivery.delivery_id,),
+                    delivery_attempt_ids=(report.lost_delivery.delivery_attempt_id,),
+                ),
+                process=ProcessCorrelations(
+                    worker_ids=tuple(
+                        process.worker_id
+                        for process in (*report.initial_processes, *report.replacement_processes)
+                        if process.worker_id is not None
+                    ),
+                    process_ids=process_ids,
+                ),
             ),
         )
     )
@@ -533,6 +649,7 @@ def run_process_release(
             finished_at=finished_at,
             timeout_seconds=timeout_seconds,
             case_corpus_digest=corpus_digest,
+            postgres_deployments=(report.postgres_deployment,),
         ),
         cases=(case,),
         summary=DeterministicSummary(
