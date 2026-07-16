@@ -223,7 +223,11 @@ class EvidenceInspection:
                 "SELECT count(*) FROM openmagic_runtime.command_receipts"
             ).fetchone()
             delivery_rows = connection.execute(
-                "SELECT thread_id FROM openmagic_runtime.deliveries ORDER BY delivery_id"
+                "SELECT d.thread_id FROM openmagic_runtime.deliveries AS d "
+                "JOIN example_insurance.domain_events AS e ON e.event_id = d.domain_event_id "
+                "JOIN example_insurance.renewal_workflows AS w ON w.workflow_id = e.workflow_id "
+                "WHERE w.instance_id = %s ORDER BY d.delivery_id",
+                (instance_id,),
             ).fetchall()
             retry_row = connection.execute(
                 "SELECT count(*) FROM openmagic_runtime.trace_events "
@@ -247,8 +251,12 @@ class EvidenceInspection:
                 (instance_id,),
             ).fetchall()
             delivery_rows = connection.execute(
-                "SELECT delivery_attempt_id FROM openmagic_runtime.delivery_attempts "
-                "ORDER BY created_at, delivery_attempt_id"
+                "SELECT a.delivery_attempt_id FROM openmagic_runtime.delivery_attempts AS a "
+                "JOIN openmagic_runtime.deliveries AS d ON d.delivery_id = a.delivery_id "
+                "JOIN example_insurance.domain_events AS e ON e.event_id = d.domain_event_id "
+                "JOIN example_insurance.renewal_workflows AS w ON w.workflow_id = e.workflow_id "
+                "WHERE w.instance_id = %s ORDER BY a.created_at, a.delivery_attempt_id",
+                (instance_id,),
             ).fetchall()
         return (
             tuple(UUID(str(row[0])) for row in trace_rows),

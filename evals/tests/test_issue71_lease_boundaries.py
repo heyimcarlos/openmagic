@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import json
 import time
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import psycopg
 import pytest
@@ -109,13 +110,32 @@ def test_lease_authority_boundaries_use_database_time_without_a_grace_period() -
             )
         )
         assert cancelled.result.outcome == "cancelled"
+        cancellation_evidence = json.loads(
+            application.renewal_evidence_json(command.input.workflow_id)
+        )
+        cancellation_event = next(
+            event
+            for event in cancellation_evidence["outcomes"]["domain_events"]
+            if event["event_type"] == "renewal.outreach.cancelled"
+        )
+        assert cancellation_event["cause"] == {
+            "kind": "command",
+            "identifier": str(cancelled.command_id),
+        }
         record_renewal_case(
             case_id="domain-event.atomic-correlation",
             scenario_id="cancellation",
             application=application,
             database_url=database_url,
             workflow_id=command.input.workflow_id,
-            document={"outcome": cancelled.result.outcome},
+            document={
+                "outcome": cancelled.result.outcome,
+                "event_id": cancellation_event["event_id"],
+                "event_type": cancellation_event["event_type"],
+                "source_command_id": str(cancelled.command_id),
+            },
+            additional_command_ids=(cancelled.command_id,),
+            domain_event_ids=(UUID(cancellation_event["event_id"]),),
         )
 
         closure_command = prepare_synthetic_renewal_start(application, threads, 10_002)

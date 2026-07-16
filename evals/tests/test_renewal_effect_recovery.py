@@ -197,6 +197,20 @@ def test_fresh_process_loss_during_reconciliation_preserves_uncertainty(tmp_path
             item["classification"] == "uncertain"
             for item in evidence["outcomes"]["effect_evidence"]
         )
+        record_renewal_case(
+            case_id="recovery.fresh-process",
+            scenario_id="during-recovery",
+            application=application,
+            database_url=deployment.database_url,
+            workflow_id=command.input.workflow_id,
+            document={
+                "lost_process_id": lost.pid,
+                "recovered_process_id": recovered.pid,
+                "completion_event_count": evidence["outcomes"]["completion_event_count"],
+                "uncertain_observation_preserved": True,
+            },
+            process_ids=(lost.pid, recovered.pid),
+        )
 
 
 @pytest.mark.integration
@@ -325,6 +339,21 @@ def test_completion_event_and_instance_closure_recover_atomically(tmp_path) -> N
                 "after_commit_process_id": after_commit.pid,
                 "completion_event_count": evidence["outcomes"]["completion_event_count"],
                 "instance_state": evidence["outcomes"]["instance_state"],
+            },
+            process_ids=(lost.pid, recovered.pid, after_commit.pid),
+        )
+        record_renewal_case(
+            case_id="recovery.fresh-process",
+            scenario_id="after-accepted-result",
+            application=application,
+            database_url=deployment.database_url,
+            workflow_id=command.input.workflow_id,
+            document={
+                "lost_process_id": lost.pid,
+                "recovered_process_id": recovered.pid,
+                "after_commit_process_id": after_commit.pid,
+                "completion_event_count": evidence["outcomes"]["completion_event_count"],
+                "replayed_value_identically": evidence == replayed_evidence,
             },
             process_ids=(lost.pid, recovered.pid, after_commit.pid),
         )

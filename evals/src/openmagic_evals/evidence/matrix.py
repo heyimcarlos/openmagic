@@ -111,7 +111,7 @@ DETERMINISTIC_RELEASE_MATRIX = (
         "wait",
         (
             "evals/tests/test_renewal_approval.py::test_exact_approval_satisfies_one_wait_and_materializes_the_fenced_email_step",
-            "evals/tests/test_renewal_approval.py::test_approval_presentation_requires_acknowledged_delivery",
+            "evals/tests/test_renewal_approval.py::test_signal_before_wait_materialization_is_rejected_and_not_buffered",
         ),
         "One exact Wait is satisfied once and early or conflicting input is not buffered.",
         required_scenarios=("early-input-rejected", "exact-one-shot"),
@@ -157,10 +157,19 @@ DETERMINISTIC_RELEASE_MATRIX = (
         (
             "evals/tests/test_issue71_backpressure.py::test_separate_process_pools_drain_backpressure_after_forced_loss",
             "evals/tests/test_renewal_drafting.py::test_process_loss_after_claim_is_recovered_and_fenced_by_a_fresh_process",
+            "evals/tests/test_renewal_drafting.py::test_agent_process_loss_terminalizes_run_and_retries_without_phantom_authority",
+            "evals/tests/test_renewal_effect_recovery.py::test_completion_event_and_instance_closure_recover_atomically",
+            "evals/tests/test_renewal_effect_recovery.py::test_fresh_process_loss_during_reconciliation_preserves_uncertainty",
             "evals/tests/test_renewal_effect_recovery.py::test_fresh_process_loss_during_provider_io_reconciles_without_redispatch",
         ),
         "Fresh interpreters reconstruct authority from PostgreSQL after forced process loss.",
-        required_scenarios=("after-claim-loss", "during-provider-io"),
+        required_scenarios=(
+            "after-claim-loss",
+            "after-executor-before-commit",
+            "after-accepted-result",
+            "during-recovery",
+            "during-provider-io",
+        ),
     ),
     ReleaseCase(
         "external-effect.fenced-uncertainty",

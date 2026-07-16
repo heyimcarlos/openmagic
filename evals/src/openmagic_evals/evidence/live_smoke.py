@@ -16,15 +16,20 @@ from openmagic_evals.evidence.contracts import (
     AvailabilitySummary,
     CaseVerdict,
     Correlations,
+    DeterministicScenarioEvidence,
     LiveProviderPin,
     LiveSmokeArtifact,
 )
 from openmagic_evals.evidence.deadline import bounded_evidence
-from openmagic_evals.evidence.release import reproducibility_pin
+from openmagic_evals.evidence.reproducibility import reproducibility_pin
 
 
 def _digest(value: str) -> str:
     return "sha256:" + hashlib.sha256(value.encode()).hexdigest()
+
+
+def _document_digest(value: dict[str, object]) -> str:
+    return _digest(json.dumps(value, sort_keys=True, separators=(",", ":")))
 
 
 def provider_configuration_digest(*, provider: str, model: str, endpoint: str) -> str:
@@ -152,6 +157,7 @@ def run_live_smoke(
             }
     finished_at = datetime.now(UTC)
     status = "passed" if available else "unavailable" if not attempted else "infrastructure_error"
+    correlations = Correlations(provider_request_ids=provider_request_ids)
     artifact = LiveSmokeArtifact(
         reproducibility=reproducibility_pin(
             repository_root.resolve(),
@@ -176,8 +182,16 @@ def run_live_smoke(
                 expected_trials=1,
                 observed_trials=1,
                 seeds=(0,),
-                correlations=Correlations(provider_request_ids=provider_request_ids),
-                observation_digests=(_digest(json.dumps(observation, sort_keys=True)),),
+                correlations=correlations,
+                observation_digests=(_document_digest(observation),),
+                scenarios=(
+                    DeterministicScenarioEvidence(
+                        scenario_id=synthetic_case_id,
+                        correlations=correlations,
+                        observation=observation,
+                        observation_digest=_document_digest(observation),
+                    ),
+                ),
                 verdict=CaseVerdict(status=status, invariant_violations=()),
             ),
         ),

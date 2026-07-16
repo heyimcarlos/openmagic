@@ -128,9 +128,13 @@ def test_successful_provider_evidence_completes_and_closes_the_instance(tmp_path
                 database_url=database_url,
                 workflow_id=command.input.workflow_id,
                 document={
+                    "event_id": completed_event["event_id"],
                     "event_type": completed_event["event_type"],
                     "instance_state": snapshot.state,
+                    "source_command_id": completed_event["cause"]["identifier"],
                 },
+                additional_command_ids=(UUID(completed_event["cause"]["identifier"]),),
+                domain_event_ids=(UUID(completed_event["event_id"]),),
             )
 
 
@@ -239,6 +243,13 @@ def test_definite_non_application_exhaustion_fails_without_uncertain_reconciliat
             assert all(step.template_key != "reconcile_renewal_email" for step in snapshot.steps)
             assert len(provider.requests()) == 3
             evidence = json.loads(application.renewal_evidence_json(command.input.workflow_id))
+            failure_events = tuple(
+                item
+                for item in evidence["outcomes"]["domain_events"]
+                if item["event_type"] == "external_effect.not_applied"
+            )
+            assert len(failure_events) == 3
+            assert all(item["cause"]["kind"] == "command" for item in failure_events)
             record_renewal_case(
                 case_id="retry.finite-policy",
                 scenario_id="exhausted-budget",
@@ -261,10 +272,14 @@ def test_definite_non_application_exhaustion_fails_without_uncertain_reconciliat
                 workflow_id=command.input.workflow_id,
                 document={
                     "terminal_step_state": snapshot.steps[-1].state,
-                    "event_types": [
-                        item["event_type"] for item in evidence["outcomes"]["domain_events"]
-                    ],
+                    "event_ids": [item["event_id"] for item in failure_events],
+                    "event_types": [item["event_type"] for item in failure_events],
+                    "source_command_ids": [item["cause"]["identifier"] for item in failure_events],
                 },
+                additional_command_ids=tuple(
+                    UUID(item["cause"]["identifier"]) for item in failure_events
+                ),
+                domain_event_ids=tuple(UUID(item["event_id"]) for item in failure_events),
             )
             record_renewal_case(
                 case_id="external-effect.fenced-uncertainty",

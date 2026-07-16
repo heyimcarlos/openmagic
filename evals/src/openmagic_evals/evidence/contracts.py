@@ -303,8 +303,28 @@ class AgentTrialEvidence(EvidenceModel):
         return self
 
 
-class ArtifactCase(EvidenceModel):
-    case_kind: Literal["deterministic"] = "deterministic"
+class DeterministicScenarioEvidence(EvidenceModel):
+    scenario_id: str
+    correlations: Correlations
+    observation: dict[str, object]
+    observation_digest: str
+
+    @model_validator(mode="after")
+    def validate_observation(self) -> DeterministicScenarioEvidence:
+        if not self.scenario_id:
+            raise ValueError("deterministic scenario identity is required")
+        document = json.dumps(
+            self.observation,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        expected = "sha256:" + hashlib.sha256(document).hexdigest()
+        if self.observation_digest != expected:
+            raise ValueError("deterministic scenario digest does not match its observation")
+        return self
+
+
+class _ArtifactCaseBase(EvidenceModel):
     case_id: str
     case_schema_version: int = Field(gt=0)
     expected_trials: int = Field(gt=0)
@@ -315,7 +335,7 @@ class ArtifactCase(EvidenceModel):
     verdict: CaseVerdict
 
     @model_validator(mode="after")
-    def validate_denominator(self) -> ArtifactCase:
+    def validate_denominator(self) -> _ArtifactCaseBase:
         if self.observed_trials != self.expected_trials:
             raise ValueError("observed trials must equal the predeclared expected trials")
         if len(self.seeds) != self.observed_trials:
@@ -329,7 +349,23 @@ class ArtifactCase(EvidenceModel):
         return self
 
 
-class RaceCase(ArtifactCase):
+class ArtifactCase(_ArtifactCaseBase):
+    case_kind: Literal["deterministic"] = "deterministic"
+    scenarios: tuple[DeterministicScenarioEvidence, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_scenarios(self) -> ArtifactCase:
+        scenario_ids = tuple(item.scenario_id for item in self.scenarios)
+        if len(set(scenario_ids)) != len(scenario_ids):
+            raise ValueError("deterministic scenario identities must be unique")
+        if self.correlations != merge_correlations(
+            scenario.correlations for scenario in self.scenarios
+        ):
+            raise ValueError("deterministic case correlations must derive from its scenarios")
+        return self
+
+
+class RaceCase(_ArtifactCaseBase):
     case_kind: Literal["race"] = "race"
     race_trials: tuple[RaceTrialEvidence, ...] = Field(min_length=1)
 
@@ -344,14 +380,16 @@ class RaceCase(ArtifactCase):
         return self
 
 
-class ProcessCase(ArtifactCase):
+class ProcessCase(_ArtifactCaseBase):
     case_kind: Literal["process"] = "process"
     process_metrics: ProcessMetrics
 
 
-class AgentCaseEvidence(ArtifactCase):
+class AgentCaseEvidence(_ArtifactCaseBase):
     case_kind: Literal["agent"] = "agent"
+    configuration_key: str
     split: Literal["development", "held_out"]
+    prohibited_action_contract: tuple[str, ...] = Field(min_length=1)
     agent_trials: tuple[AgentTrialEvidence, ...] = Field(min_length=1)
     pass_threshold: float = Field(ge=0.0, le=1.0)
     passed_trials: int = Field(ge=0)
@@ -367,6 +405,11 @@ class AgentCaseEvidence(ArtifactCase):
             raise ValueError("Agent trials must own every recorded trajectory digest")
         if self.passed_trials > self.observed_trials:
             raise ValueError("Agent case pass count exceeds its denominator")
+        if any(
+            set(trial.prohibited_actions).difference(self.prohibited_action_contract)
+            for trial in self.agent_trials
+        ):
+            raise ValueError("Agent trial contains an action outside its predeclared contract")
         return self
 
 
@@ -506,18 +549,10 @@ class RaceArtifact(DeterministicArtifact):
     artifact_kind: Literal["race_corpus"] = "race_corpus"
     cases: tuple[RaceCase, ...] = Field(min_length=1)
 
-    @model_validator(mode="after")
-    def validate_race_lane(self) -> RaceArtifact:
-        return self
-
 
 class ProcessArtifact(DeterministicArtifact):
     artifact_kind: Literal["process_recovery"] = "process_recovery"
     cases: tuple[ProcessCase, ...] = Field(min_length=1)
-
-    @model_validator(mode="after")
-    def validate_process_lane(self) -> ProcessArtifact:
-        return self
 
 
 class AgentQualityArtifact(EvidenceModel):
@@ -525,7 +560,7 @@ class AgentQualityArtifact(EvidenceModel):
     artifact_kind: Literal["agent_quality"] = "agent_quality"
     lane: Literal["agent_quality"] = "agent_quality"
     reproducibility: ReproducibilityPin
-    agent_configuration: AgentConfigurationPin
+    agent_configurations: tuple[AgentConfigurationPin, ...] = Field(min_length=1)
     cases: tuple[AgentCaseEvidence, ...]
     summary: AgentQualitySummary
     limitations: tuple[str, ...]
@@ -534,6 +569,11 @@ class AgentQualityArtifact(EvidenceModel):
     def validate_agent_quality(self) -> AgentQualityArtifact:
         if not self.cases:
             raise ValueError("Agent quality requires versioned development or held-out cases")
+        configuration_keys = tuple(item.agent_key for item in self.agent_configurations)
+        if len(set(configuration_keys)) != len(configuration_keys):
+            raise ValueError("Agent configuration keys must be unique")
+        if any(case.configuration_key not in configuration_keys for case in self.cases):
+            raise ValueError("Agent case references an unknown pinned configuration")
         if any(len(case.agent_trials) != case.observed_trials for case in self.cases):
             raise ValueError("Agent quality requires every sanitized per-trial trajectory")
         development = sum(case.split == "development" for case in self.cases)
@@ -699,6 +739,7 @@ __all__ = [
     "CaseVerdict",
     "Correlations",
     "DeterministicArtifact",
+    "DeterministicScenarioEvidence",
     "DeterministicSummary",
     "DistributionSummary",
     "LiveProviderPin",

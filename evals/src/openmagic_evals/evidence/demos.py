@@ -6,13 +6,13 @@ import hashlib
 import json
 from datetime import UTC, datetime
 from pathlib import Path
-from uuid import UUID
 
 from openmagic_evals.evidence.artifact_io import write_artifact
 from openmagic_evals.evidence.contracts import (
     ArtifactCase,
     CaseVerdict,
     Correlations,
+    DeterministicScenarioEvidence,
     PlaygroundArtifact,
     PlaygroundSummary,
 )
@@ -21,21 +21,12 @@ from openmagic_evals.evidence.deterministic_observations import (
     collect_renewal_observation,
     collect_verification_observation,
 )
-from openmagic_evals.evidence.release import reproducibility_pin
+from openmagic_evals.evidence.reproducibility import reproducibility_pin
 
 
 def _digest(value: object) -> str:
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
-
-
-def _ids(value: object) -> tuple[UUID, ...]:
-    return tuple(UUID(str(item)) for item in value) if isinstance(value, list) else ()
-
-
-def _write(path: Path, artifact: PlaygroundArtifact) -> PlaygroundArtifact:
-    write_artifact(path, artifact)
-    return artifact
 
 
 def _demo_artifact(
@@ -51,43 +42,50 @@ def _demo_artifact(
     timeout_seconds: int,
 ) -> PlaygroundArtifact:
     finished_at = datetime.now(UTC)
-    return _write(
-        output,
-        PlaygroundArtifact(
-            reproducibility=reproducibility_pin(
-                repository_root.resolve(),
-                command=command,
-                started_at=started_at,
-                finished_at=finished_at,
-                timeout_seconds=timeout_seconds,
-                case_corpus_digest=_digest(case_id),
-            ),
-            cases=(
-                ArtifactCase(
-                    case_id=case_id,
-                    case_schema_version=1,
-                    expected_trials=1,
-                    observed_trials=1,
-                    seeds=(0,),
-                    correlations=correlations,
-                    observation_digests=(_digest(observation),),
-                    verdict=CaseVerdict(status="passed", invariant_violations=()),
+    artifact = PlaygroundArtifact(
+        reproducibility=reproducibility_pin(
+            repository_root.resolve(),
+            command=command,
+            started_at=started_at,
+            finished_at=finished_at,
+            timeout_seconds=timeout_seconds,
+            case_corpus_digest=_digest(case_id),
+        ),
+        cases=(
+            ArtifactCase(
+                case_id=case_id,
+                case_schema_version=1,
+                expected_trials=1,
+                observed_trials=1,
+                seeds=(0,),
+                correlations=correlations,
+                observation_digests=(_digest(observation),),
+                scenarios=(
+                    DeterministicScenarioEvidence(
+                        scenario_id=case_id,
+                        correlations=correlations,
+                        observation=observation,
+                        observation_digest=_digest(observation),
+                    ),
                 ),
-            ),
-            summary=PlaygroundSummary(
-                synthetic_data_only=True,
-                effects_enabled_by_default=False,
-                local_provider=True,
-                reset_verified=False,
-                process_controls_verified=process_controls,
-                contributes_to_correctness=False,
-            ),
-            limitations=(
-                "This is a synthetic demonstration and not correctness evidence.",
-                "The result applies only to the pinned local provider and build.",
+                verdict=CaseVerdict(status="passed", invariant_violations=()),
             ),
         ),
+        summary=PlaygroundSummary(
+            synthetic_data_only=True,
+            effects_enabled_by_default=False,
+            local_provider=True,
+            reset_verified=False,
+            process_controls_verified=process_controls,
+            contributes_to_correctness=False,
+        ),
+        limitations=(
+            "This is a synthetic demonstration and not correctness evidence.",
+            "The result applies only to the pinned local provider and build.",
+        ),
     )
+    write_artifact(output, artifact)
+    return artifact
 
 
 @bounded_evidence

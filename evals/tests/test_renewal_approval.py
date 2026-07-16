@@ -6,6 +6,7 @@ from dataclasses import replace
 from threading import Barrier
 from uuid import UUID, uuid4
 
+import psycopg
 import pytest
 from example_insurance.renewals import (
     ApproveRenewalDraft,
@@ -21,9 +22,14 @@ from example_insurance.renewals import (
     StartRenewalOutreachInput,
 )
 from openmagic_evals.evidence.case_recording import record_renewal_case
-from openmagic_evals.harness import prepare_renewal_approval, renewal_context
+from openmagic_evals.harness import (
+    prepare_renewal_approval,
+    prepare_synthetic_renewal_start,
+    renewal_context,
+)
 from openmagic_runtime.commands import Actor, Cause, CommandReceipt
 from openmagic_runtime.evidence import content_fingerprint
+from openmagic_runtime.kernel.control import AcceptSignal, KernelControl
 from openmagic_runtime.kernel.inspection import KernelInspection
 from openmagic_runtime.threads import CreateThread
 
@@ -90,6 +96,44 @@ def test_approval_presentation_requires_acknowledged_delivery() -> None:
         with pytest.raises(KeyError, match="presentation"):
             application.renewal_approval_presentation(command.input.workflow_id)
         assert before_delivery.result.outcome == "stale_presentation"
+
+
+def test_signal_before_wait_materialization_is_rejected_and_not_buffered() -> None:
+    with renewal_context() as (database_url, application, threads):
+        command = prepare_synthetic_renewal_start(application, threads, 69_001)
+        started = application.start_renewal_outreach(command)
+        early_wait_id = uuid4()
+        early_signal_id = uuid4()
+        early_signal = AcceptSignal(
+            signal_id=early_signal_id,
+            instance_id=started.result.instance_id,
+            wait_id=early_wait_id,
+            signal_type="renewal.draft.decision",
+            schema_version=1,
+            payload={
+                "workflow_id": str(command.input.workflow_id),
+                "draft_id": str(uuid4()),
+                "presentation_fingerprint": "early",
+                "recipient_email": "early@example.test",
+                "subject": "Early",
+                "body": "This must not be buffered.",
+            },
+            route_key="approve_email",
+        )
+        with (
+            psycopg.connect(database_url) as connection,
+            connection.transaction(),
+            pytest.raises(RuntimeError, match="Wait does not exist"),
+        ):
+            KernelControl(connection).accept_signal(early_signal)
+
+        application.run_workflow_worker_once(worker_id="early-facts")
+        application.run_workflow_worker_once(worker_id="early-draft")
+        snapshot = KernelInspection(database_url=database_url).snapshot(started.result.instance_id)
+
+        assert len(snapshot.waits) == 1
+        assert snapshot.waits[0].wait_id != early_wait_id
+        assert snapshot.waits[0].state == "unsatisfied"
         record_renewal_case(
             case_id="wait.one-shot",
             scenario_id="early-input-rejected",
@@ -97,9 +141,12 @@ def test_approval_presentation_requires_acknowledged_delivery() -> None:
             database_url=database_url,
             workflow_id=command.input.workflow_id,
             document={
-                "outcome": before_delivery.result.outcome,
-                "wait_state": snapshot.waits[-1].state,
+                "early_signal_id": str(early_signal_id),
+                "early_wait_id": str(early_wait_id),
+                "materialized_wait_id": str(snapshot.waits[0].wait_id),
+                "materialized_wait_state": snapshot.waits[0].state,
             },
+            worker_ids=("early-facts", "early-draft"),
         )
 
 
@@ -168,6 +215,16 @@ def test_exact_approval_satisfies_one_wait_and_materializes_the_fenced_email_ste
             "send_renewal_email",
             "pending",
         )
+        evidence = json.loads(application.renewal_evidence_json(start.input.workflow_id))
+        approval_event = next(
+            event
+            for event in evidence["outcomes"]["domain_events"]
+            if event["event_type"] == "renewal.draft.approved"
+        )
+        assert approval_event["cause"] == {
+            "kind": "command",
+            "identifier": str(command.command_id),
+        }
         record_renewal_case(
             case_id="wait.one-shot",
             scenario_id="exact-one-shot",
@@ -187,7 +244,14 @@ def test_exact_approval_satisfies_one_wait_and_materializes_the_fenced_email_ste
             application=application,
             database_url=database_url,
             workflow_id=start.input.workflow_id,
-            document={"approval_outcome": receipt.result.outcome},
+            document={
+                "approval_outcome": receipt.result.outcome,
+                "event_id": approval_event["event_id"],
+                "event_type": approval_event["event_type"],
+                "source_command_id": str(command.command_id),
+            },
+            additional_command_ids=(command.command_id,),
+            domain_event_ids=(UUID(approval_event["event_id"]),),
         )
 
 
@@ -290,6 +354,15 @@ def test_revision_creates_another_bounded_draft_and_exact_approval_wait() -> Non
         assert [item["template_key"] for item in step_states.values()].count(
             "draft_renewal_email"
         ) == 2
+        revision_event = next(
+            event
+            for event in evidence["outcomes"]["domain_events"]
+            if event["event_type"] == "renewal.draft.revision_requested"
+        )
+        assert revision_event["cause"] == {
+            "kind": "command",
+            "identifier": str(revision.command_id),
+        }
         record_renewal_case(
             case_id="domain-event.atomic-correlation",
             scenario_id="revision",
@@ -300,8 +373,13 @@ def test_revision_creates_another_bounded_draft_and_exact_approval_wait() -> Non
                 "revision_outcome": receipt.result.outcome,
                 "draft_count": 2,
                 "wait_states": [wait.state for wait in snapshot.waits],
+                "event_id": revision_event["event_id"],
+                "event_type": revision_event["event_type"],
+                "source_command_id": str(revision.command_id),
             },
             worker_ids=("revision", "revision-delivery"),
+            additional_command_ids=(revision.command_id,),
+            domain_event_ids=(UUID(revision_event["event_id"]),),
         )
 
         cross_wired = application.approve_renewal_draft(

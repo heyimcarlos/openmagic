@@ -90,29 +90,13 @@ def test_built_wheels_install_and_boot_in_clean_environments(tmp_path) -> None:
         ],
         environment=child_environment,
     )
-    evidence_repository = tmp_path / "evidence-repository"
-    evidence_repository.mkdir()
-    (evidence_repository / "uv.lock").write_bytes((ROOT / "uv.lock").read_bytes())
-    subprocess.run(["git", "init", "-q"], cwd=evidence_repository, check=True)
-    subprocess.run(
-        ["git", "config", "user.email", "test@example.test"],
-        cwd=evidence_repository,
-        check=True,
-    )
-    subprocess.run(["git", "config", "user.name", "Test"], cwd=evidence_repository, check=True)
-    subprocess.run(["git", "add", "uv.lock"], cwd=evidence_repository, check=True)
-    subprocess.run(
-        ["git", "commit", "-qm", "pinned wheel evidence"],
-        cwd=evidence_repository,
-        check=True,
-    )
     evidence_command = clean_evals / "bin/openmagic-evidence"
     _run(
         [
             str(evidence_command),
             "demo-renewal",
             "--repository-root",
-            str(evidence_repository),
+            str(ROOT),
             "--working-directory",
             str(tmp_path / "wheel-renewal-demo"),
             "--output",
@@ -127,7 +111,7 @@ def test_built_wheels_install_and_boot_in_clean_environments(tmp_path) -> None:
             str(evidence_command),
             "demo-verification",
             "--repository-root",
-            str(evidence_repository),
+            str(ROOT),
             "--output",
             str(tmp_path / "wheel-verification-demo.json"),
         ]
@@ -135,9 +119,17 @@ def test_built_wheels_install_and_boot_in_clean_environments(tmp_path) -> None:
     verification_artifact = json.loads(
         (tmp_path / "wheel-verification-demo.json").read_text(encoding="utf-8")
     )
+    source_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
     for artifact in (renewal_artifact, verification_artifact):
         assert artifact["reproducibility"]["command"][0] == "openmagic-evidence"
         assert artifact["reproducibility"]["build"]["checkout_clean"] is True
+        assert artifact["reproducibility"]["build"]["git_sha"] == source_sha
         assert set(artifact["reproducibility"]["build"]["distribution_digests"]) == {
             package for package, _, _ in distributions
         }

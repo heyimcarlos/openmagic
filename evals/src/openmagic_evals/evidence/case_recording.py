@@ -8,7 +8,7 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from example_insurance.renewals import ExampleInsurance
 
@@ -41,6 +41,8 @@ def record_renewal_case(
     worker_ids: tuple[str, ...] = (),
     process_ids: tuple[int, ...] = (),
     provider_request_ids: tuple[str, ...] = (),
+    additional_command_ids: tuple[UUID, ...] = (),
+    domain_event_ids: tuple[UUID, ...] | None = None,
 ) -> None:
     """Project exact durable identities from the renewal scenario that proved a case."""
 
@@ -55,7 +57,9 @@ def record_renewal_case(
         case_id=case_id,
         scenario_id=scenario_id,
         correlations=Correlations(
-            command_ids=(UUID(str(values["command_id"])),),
+            command_ids=tuple(
+                dict.fromkeys((UUID(str(values["command_id"])), *additional_command_ids))
+            ),
             workflow_ids=(UUID(str(values["workflow_id"])),),
             instance_ids=(instance_id,),
             step_ids=_ids(values["step_ids"]),
@@ -66,7 +70,9 @@ def record_renewal_case(
             thread_ids=(UUID(str(values["thread_id"])),),
             message_ids=_ids(values["message_ids"]),
             agent_run_ids=_ids(values["agent_run_ids"]),
-            domain_event_ids=_ids(values["domain_event_ids"]),
+            domain_event_ids=(
+                _ids(values["domain_event_ids"]) if domain_event_ids is None else domain_event_ids
+            ),
             delivery_ids=_ids(values["delivery_ids"]),
             delivery_attempt_ids=delivery_attempt_ids,
             external_effect_ids=_ids(values["logical_effect_ids"]),
@@ -94,8 +100,9 @@ def record_case_observation(
     directory = Path(configured)
     directory.mkdir(parents=True, exist_ok=True)
     identity = hashlib.sha256(f"{case_id}\0{scenario_id}".encode()).hexdigest()
-    target = directory / f"{identity}.json"
-    temporary = directory / f".{identity}.{os.getpid()}.tmp"
+    emission_id = uuid4().hex
+    target = directory / f"{identity}.{os.getpid()}.{emission_id}.json"
+    temporary = directory / f".{identity}.{os.getpid()}.{emission_id}.tmp"
     payload = {
         "case_id": case_id,
         "scenario_id": scenario_id,

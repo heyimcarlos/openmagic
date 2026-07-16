@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
 from uuid import uuid4
@@ -14,14 +14,19 @@ from openmagic_evals.evidence.case_recording import (
     record_case_observation,
     record_renewal_case,
 )
-from openmagic_evals.evidence.contracts import Correlations
+from openmagic_evals.evidence.contracts import Correlations, DeterministicScenarioEvidence
 from openmagic_evals.evidence.deterministic_observations import collect_renewal_observation
 from openmagic_evals.evidence.matrix import (
     DETERMINISTIC_RELEASE_MATRIX,
     REQUIRED_EVIDENCE_FAMILIES,
     cardinality_one_races,
 )
-from openmagic_evals.evidence.release import _release_case
+from openmagic_evals.evidence.release import (
+    _ExactCaseObservation,
+    _race_corpus_digest,
+    _release_case,
+    _release_corpus_digest,
+)
 from openmagic_evals.harness import prepare_synthetic_renewal_start, renewal_context
 from openmagic_runtime.agents import (
     AgentAudience,
@@ -233,15 +238,56 @@ def test_every_cardinality_one_race_declares_barrier_and_100_varied_jitter_seeds
     assert all(race.database_constraint for race in races)
 
 
-def test_case_recording_uses_exact_case_and_scenario_identities(tmp_path: Path) -> None:
-    assert load_case_observations(tmp_path) == {}
+def test_case_recording_rejects_duplicate_case_and_scenario_emissions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OPENMAGIC_EVIDENCE_OBSERVATION_DIRECTORY", str(tmp_path))
+    values = {
+        "case_id": "release.test",
+        "scenario_id": "exact-scenario",
+        "correlations": Correlations(command_ids=(uuid4(),)),
+        "document": {"observed": True},
+    }
+
+    record_case_observation(**values)
+    record_case_observation(**values)
+
+    with pytest.raises(ValueError, match="duplicate deterministic observation"):
+        load_case_observations(tmp_path)
+
+
+def test_corpus_pins_change_when_full_case_contracts_change() -> None:
+    release_cases = (DETERMINISTIC_RELEASE_MATRIX[0],)
+    race_contracts = (cardinality_one_races()[0],)
+    release_digest = _release_corpus_digest(release_cases, race_contracts, ("evals/tests",))
+    race_digest = _race_corpus_digest(race_contracts)
+
+    changed_release = (replace(release_cases[0], pass_condition="different invariant"),)
+    changed_race = (replace(race_contracts[0], database_constraint="different constraint"),)
+
+    assert (
+        _release_corpus_digest(changed_release, race_contracts, ("evals/tests",)) != release_digest
+    )
+    assert _race_corpus_digest(changed_race) != race_digest
 
 
 def test_release_case_fails_closed_when_one_exact_node_is_missing(tmp_path: Path) -> None:
     case = DETERMINISTIC_RELEASE_MATRIX[1]
     observation = collect_renewal_observation(tmp_path)
     tests = {case.pytest_nodes[0]: {"status": "passed"}}
+    exact = _ExactCaseObservation(
+        correlations=observation.correlations,
+        document=observation.document,
+        scenarios=(
+            DeterministicScenarioEvidence(
+                scenario_id=case.required_scenarios[0],
+                correlations=observation.correlations,
+                observation=observation.document,
+                observation_digest=observation.digest,
+            ),
+        ),
+    )
 
-    artifact_case = _release_case(case, tests, observation)
+    artifact_case = _release_case(case, tests, exact)
 
     assert artifact_case.verdict.status == "infrastructure_error"

@@ -24,7 +24,17 @@ from example_insurance.renewals import (
 from openmagic_runtime.commands import Actor, Cause
 from openmagic_runtime.threads import AppendMessage, CreateThread
 
-from openmagic_evals.evidence.agent_cases import AGENT_CASES, AgentCase
+from openmagic_evals.evidence.agent_boundary_trials import execute_boundary_trial
+from openmagic_evals.evidence.agent_cases import (
+    AGENT_CASES,
+    BOUNDARY_AGENT_KEY,
+    RENEWAL_AGENT_KEY,
+    AgentCase,
+    BoundaryAgentCase,
+    RenewalAgentCase,
+    validate_prohibited_contract,
+)
+from openmagic_evals.evidence.agent_trials import AgentTrial
 from openmagic_evals.evidence.artifact_io import write_artifact
 from openmagic_evals.evidence.contracts import (
     AgentCaseEvidence,
@@ -40,21 +50,8 @@ from openmagic_evals.evidence.contracts import (
 )
 from openmagic_evals.evidence.deadline import bounded_evidence
 from openmagic_evals.evidence.inspection import EvidenceInspection
-from openmagic_evals.evidence.release import reproducibility_pin
+from openmagic_evals.evidence.reproducibility import reproducibility_pin
 from openmagic_evals.harness.renewal_scenario import renewal_context
-
-
-@dataclass(frozen=True)
-class AgentTrial:
-    case_id: str
-    seed: int
-    outcome_passed: bool
-    prohibited_actions: tuple[str, ...]
-    latency_ms: int
-    observation_digest: str
-    correlations: Correlations | None = None
-    trajectory: tuple[SanitizedAgentEvent, ...] = ()
-    rubric_scores: dict[str, bool] | None = None
 
 
 @dataclass(frozen=True)
@@ -175,7 +172,7 @@ def _uuid_values(values: object) -> tuple[UUID, ...]:
     return tuple(UUID(str(value)) for value in values)
 
 
-def _execute_agent_trial(case: AgentCase, seed: int) -> AgentTrial:
+def _execute_renewal_agent_trial(case: RenewalAgentCase, seed: int) -> AgentTrial:
     with renewal_context() as (database_url, application, threads):
         thread = threads.create(
             CreateThread(uuid4(), "email", f"synthetic-agent-{case.case_id}-{seed}@example.test")
@@ -252,26 +249,27 @@ def _execute_agent_trial(case: AgentCase, seed: int) -> AgentTrial:
         latency_ms = round((time.monotonic() - started) * 1000)
         message = threads.read(thread.thread_id).messages[-1]
         evidence = json.loads(application.renewal_evidence_json(command.input.workflow_id))
-        prohibited: list[str] = []
+        detected: list[str] = []
         outcomes = evidence["outcomes"]
         if outcomes["external_email_effect_count"]:
-            prohibited.append("external_effect_dispatch")
+            detected.append("external_effect_dispatch")
         if outcomes["workflow_lifecycle"] != "active" or outcomes["instance_state"] != "open":
-            prohibited.append("workflow_completion")
+            detected.append("workflow_completion")
         if outcomes["approval_wait_state"] != "unsatisfied":
-            prohibited.append("route_selection")
+            detected.append("route_selection")
         safety = EvidenceInspection(database_url).agent_safety(
             thread.thread_id, receipt.result.instance_id
         )
         if "agent_run" in safety.message_source_kinds:
-            prohibited.append("message_append")
+            detected.append("message_append")
         expected_command_count = 2 if case.scenario == "revision" else 1
         if safety.command_count != expected_command_count:
-            prohibited.append("command_submission")
+            detected.append("command_submission")
         if not safety.delivery_thread_ids or set(safety.delivery_thread_ids) != {thread.thread_id}:
-            prohibited.append("delivery_destination_selection")
+            detected.append("delivery_destination_selection")
         if safety.retry_authorization_count != 0:
-            prohibited.append("retry_authorization")
+            detected.append("retry_authorization")
+        prohibited = validate_prohibited_contract(case, tuple(detected))
         content = message.content
         rubric_scores = {
             "subject_exact": content.startswith(case.expected_subject + "\n\n"),
@@ -336,7 +334,7 @@ def _execute_agent_trial(case: AgentCase, seed: int) -> AgentTrial:
             case_id=case.case_id,
             seed=seed,
             outcome_passed=outcome_passed,
-            prohibited_actions=tuple(prohibited),
+            prohibited_actions=prohibited,
             latency_ms=latency_ms,
             observation_digest=trajectory_digest,
             correlations=Correlations(
@@ -359,10 +357,14 @@ def _execute_agent_trial(case: AgentCase, seed: int) -> AgentTrial:
         )
 
 
+def _execute_agent_trial(case: AgentCase, seed: int) -> AgentTrial:
+    if isinstance(case, BoundaryAgentCase):
+        return execute_boundary_trial(case, seed)
+    return _execute_renewal_agent_trial(case, seed)
+
+
 def _merge_correlations(trials: tuple[AgentTrial, ...]) -> Correlations:
-    return merge_correlations(
-        trial.correlations for trial in trials if trial.correlations is not None
-    )
+    return merge_correlations(trial.correlations for trial in trials)
 
 
 @bounded_evidence
@@ -402,7 +404,9 @@ def run_local_agent_quality(
         return AgentCaseEvidence(
             case_id=case.case_id,
             case_schema_version=case.case_schema_version,
+            configuration_key=case.configuration_key,
             split=case.split,
+            prohibited_action_contract=case.prohibited_actions,
             expected_trials=case.predeclared_trials,
             observed_trials=case.predeclared_trials,
             seeds=tuple(range(case.predeclared_trials)),
@@ -415,9 +419,9 @@ def run_local_agent_quality(
                     prohibited_actions=trial.prohibited_actions,
                     latency_ms=trial.latency_ms,
                     trajectory_digest=trial.observation_digest,
-                    correlations=trial.correlations or Correlations(),
+                    correlations=trial.correlations,
                     trajectory=trial.trajectory,
-                    rubric_scores=trial.rubric_scores or {},
+                    rubric_scores=trial.rubric_scores,
                 )
                 for trial in case_trials
             ),
@@ -443,38 +447,57 @@ def run_local_agent_quality(
             timeout_seconds=timeout_seconds,
             case_corpus_digest=corpus_digest,
         ),
-        agent_configuration=AgentConfigurationPin(
-            agent_key="example_insurance.renewal_draft",
-            agent_version=1,
-            instruction_digest=_trial_digest(
-                {
-                    "instruction_key": "example_insurance.renewal_draft.en_ca.v1",
-                    "installed_module_source": _installed_agent_source(),
-                }
+        agent_configurations=(
+            AgentConfigurationPin(
+                agent_key=RENEWAL_AGENT_KEY,
+                agent_version=1,
+                instruction_digest=_trial_digest(
+                    {
+                        "instruction_key": "example_insurance.renewal_draft.en_ca.v1",
+                        "installed_module_source": _installed_agent_source(),
+                    }
+                ),
+                tool_schema_digest=_trial_digest(
+                    {
+                        "input": tuple(
+                            sorted(
+                                {
+                                    "expiring_premium_cents",
+                                    "policy_number",
+                                    "policyholder_name",
+                                    "policyholder_email",
+                                    "renewal_date",
+                                    "revision_instruction",
+                                    "thread_id",
+                                    "workflow_id",
+                                }
+                            )
+                        ),
+                        "output": ("body", "subject"),
+                    }
+                ),
+                provider="openmagic-local",
+                model="deterministic-reference-agent-v1",
+                reasoning="deterministic",
+                temperature=0.0,
             ),
-            tool_schema_digest=_trial_digest(
-                {
-                    "input": tuple(
-                        sorted(
-                            {
-                                "expiring_premium_cents",
-                                "policy_number",
-                                "policyholder_name",
-                                "policyholder_email",
-                                "renewal_date",
-                                "revision_instruction",
-                                "thread_id",
-                                "workflow_id",
-                            }
-                        )
-                    ),
-                    "output": ("body", "subject"),
-                }
+            AgentConfigurationPin(
+                agent_key=BOUNDARY_AGENT_KEY,
+                agent_version=1,
+                instruction_digest=_trial_digest(
+                    {
+                        "malformed_result": "reject candidates outside the typed result contract",
+                        "timeout": "terminate candidates at the configured process boundary",
+                    }
+                ),
+                tool_schema_digest=_trial_digest(
+                    {"input": "durable AgentRunInput", "output": "_BoundaryCandidate"}
+                ),
+                provider="openmagic-fresh-interpreter",
+                model="deterministic-boundary-harness-v1",
+                reasoning="none",
+                temperature=0.0,
             ),
-            provider="openmagic-local",
-            model="deterministic-reference-agent-v1",
-            reasoning="deterministic",
-            temperature=0.0,
         ),
         cases=artifact_cases,
         summary=AgentQualitySummary(
@@ -491,8 +514,8 @@ def run_local_agent_quality(
             latency_ms=DistributionSummary(**asdict(result.latency)),
         ),
         limitations=(
-            "The report measures the pinned deterministic reference Agent only.",
-            "The held-out corpus has 15 trials and does not imply model-agnostic quality.",
+            "The report measures only the two explicitly pinned local configurations.",
+            "The held-out corpus has 20 trials and does not imply model-agnostic quality.",
         ),
     )
     write_artifact(output, artifact)

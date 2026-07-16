@@ -37,7 +37,7 @@ from openmagic_evals.evidence.inspection import (
     EvidenceInspection,
     QueueState,
 )
-from openmagic_evals.evidence.release import reproducibility_pin
+from openmagic_evals.evidence.reproducibility import reproducibility_pin
 from openmagic_evals.harness import LocalEmailProvider
 from openmagic_evals.harness.deployment import ManagedProcess, ProcessRole, TestDeployment
 from openmagic_evals.harness.renewal_scenario import (

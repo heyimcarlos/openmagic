@@ -20,6 +20,7 @@ from openmagic_evals.evidence.contracts import (
     CaseVerdict,
     Correlations,
     DeterministicArtifact,
+    DeterministicScenarioEvidence,
     DeterministicSummary,
     DistributionSummary,
     RaceCase,
@@ -90,6 +91,13 @@ def _case(
         ).hexdigest()
     )
     if not agent:
+        observation = {"case_id": case_id}
+        scenario_digest = (
+            "sha256:"
+            + hashlib.sha256(
+                json.dumps(observation, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+        )
         return ArtifactCase(
             case_id=case_id,
             case_schema_version=1,
@@ -98,12 +106,22 @@ def _case(
             seeds=(0,),
             correlations=correlations,
             observation_digests=("sha256:" + "7" * 64,),
+            scenarios=(
+                DeterministicScenarioEvidence(
+                    scenario_id=case_id,
+                    correlations=correlations,
+                    observation=observation,
+                    observation_digest=scenario_digest,
+                ),
+            ),
             verdict=CaseVerdict(status="passed", invariant_violations=()),
         )
     return AgentCaseEvidence(
         case_id="agent.development.test",
         case_schema_version=1,
+        configuration_key="test",
         split="development",
+        prohibited_action_contract=("external_effect_dispatch",),
         expected_trials=1,
         observed_trials=1,
         seeds=(0,),
@@ -180,15 +198,17 @@ def test_claim_report_rejects_artifacts_from_different_builds(tmp_path: Path) ->
     )
     agent = AgentQualityArtifact(
         reproducibility=_pin("2" * 40),
-        agent_configuration=AgentConfigurationPin(
-            agent_key="test",
-            agent_version=1,
-            instruction_digest="sha256:" + "8" * 64,
-            tool_schema_digest="sha256:" + "9" * 64,
-            provider="local",
-            model="test",
-            reasoning="none",
-            temperature=0,
+        agent_configurations=(
+            AgentConfigurationPin(
+                agent_key="test",
+                agent_version=1,
+                instruction_digest="sha256:" + "8" * 64,
+                tool_schema_digest="sha256:" + "9" * 64,
+                provider="local",
+                model="test",
+                reasoning="none",
+                temperature=0,
+            ),
         ),
         cases=(
             _case(agent=True),

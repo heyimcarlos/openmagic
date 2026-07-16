@@ -1549,6 +1549,19 @@ def test_agent_process_loss_terminalizes_run_and_retries_without_phantom_authori
             },
             process_ids=(lost_process.pid, recovery_process.pid),
         )
+        record_renewal_case(
+            case_id="recovery.fresh-process",
+            scenario_id="after-executor-before-commit",
+            application=application,
+            database_url=deployment.database_url,
+            workflow_id=command.input.workflow_id,
+            document={
+                "lost_process_id": lost_process.pid,
+                "recovery_process_id": recovery_process.pid,
+                "agent_run_states": evidence["outcomes"]["agent_run_states"],
+            },
+            process_ids=(lost_process.pid, recovery_process.pid),
+        )
 
 
 def test_delivery_process_loss_after_claim_recovers_without_duplicate_message(tmp_path) -> None:

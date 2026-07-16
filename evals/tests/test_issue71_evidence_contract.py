@@ -18,6 +18,7 @@ from openmagic_evals.evidence.contracts import (
     CaseVerdict,
     Correlations,
     DeterministicArtifact,
+    DeterministicScenarioEvidence,
     DeterministicSummary,
     DistributionSummary,
     ProcessMetrics,
@@ -72,14 +73,30 @@ def _pin() -> ReproducibilityPin:
 
 
 def _case(case_id: str = "command.exact_replay") -> ArtifactCase:
+    correlations = Correlations(command_ids=("018f2f00-0000-7000-8000-000000000001",))
+    observation = {"outcome": "passed"}
+    observation_digest = (
+        "sha256:"
+        + hashlib.sha256(
+            json.dumps(observation, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+    )
     return ArtifactCase(
         case_id=case_id,
         case_schema_version=1,
         expected_trials=1,
         observed_trials=1,
         seeds=(0,),
-        correlations=Correlations(command_ids=("018f2f00-0000-7000-8000-000000000001",)),
+        correlations=correlations,
         observation_digests=("sha256:" + "d" * 64,),
+        scenarios=(
+            DeterministicScenarioEvidence(
+                scenario_id=case_id,
+                correlations=correlations,
+                observation=observation,
+                observation_digest=observation_digest,
+            ),
+        ),
         verdict=CaseVerdict(status="passed", invariant_violations=()),
     )
 
@@ -126,7 +143,9 @@ def _agent_case() -> AgentCaseEvidence:
     return AgentCaseEvidence(
         case_id="agent.development.tool-choice",
         case_schema_version=1,
+        configuration_key="renewal_outreach",
         split="development",
+        prohibited_action_contract=("external_effect_dispatch",),
         expected_trials=1,
         observed_trials=1,
         seeds=(0,),
@@ -188,6 +207,7 @@ def test_artifacts_reject_incomplete_denominators_and_lane_substitution() -> Non
             seeds=(0, 1, 2, 3),
             correlations=Correlations(),
             observation_digests=("sha256:" + "e" * 64,) * 4,
+            scenarios=_case().scenarios,
             verdict=CaseVerdict(status="passed", invariant_violations=()),
         )
 
@@ -249,7 +269,7 @@ def test_race_trial_requires_cardinality_one_and_durable_correlations() -> None:
     with pytest.raises(ValueError, match="Agent quality cannot determine"):
         AgentQualityArtifact(
             reproducibility=_pin(),
-            agent_configuration=_agent_configuration(),
+            agent_configurations=(_agent_configuration(),),
             cases=(_agent_case(),),
             summary=AgentQualitySummary(
                 development_cases=1,

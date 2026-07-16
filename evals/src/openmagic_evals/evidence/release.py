@@ -2,23 +2,15 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import subprocess
 import sys
 import tempfile
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
-from importlib.metadata import distribution, version
-from importlib.util import find_spec
 from pathlib import Path
 from typing import Any
-
-import psycopg
-from example_insurance.migrations import apply_migrations
-from example_insurance.renewal_definition import RENEWAL_DEFINITION
-from example_insurance.verification_definition import VERIFICATION_DEFINITION
-from openmagic_runtime.evidence import content_fingerprint
 
 from openmagic_evals.evidence.artifact_io import write_artifact
 from openmagic_evals.evidence.case_recording import (
@@ -29,18 +21,17 @@ from openmagic_evals.evidence.case_recording import (
 from openmagic_evals.evidence.contracts import (
     REQUIRED_NEGATIVE_CLAIMS,
     ArtifactCase,
-    BuildPin,
     CaseVerdict,
+    Correlations,
     DeterministicArtifact,
+    DeterministicScenarioEvidence,
     DeterministicSummary,
     RaceArtifact,
     RaceCase,
     RaceTrialEvidence,
-    ReproducibilityPin,
     merge_correlations,
 )
 from openmagic_evals.evidence.deadline import bounded_evidence
-from openmagic_evals.evidence.deterministic_observations import DeterministicObservation
 from openmagic_evals.evidence.matrix import (
     DETERMINISTIC_RELEASE_MATRIX,
     RaceContract,
@@ -48,161 +39,12 @@ from openmagic_evals.evidence.matrix import (
     cardinality_one_races,
 )
 from openmagic_evals.evidence.race_models import RaceCorpus
-from openmagic_evals.evidence.race_transitions import transition_race_definitions
 from openmagic_evals.evidence.races import run_all_races
-from openmagic_evals.harness._postgres import POSTGRES_IMAGE, postgres_container
-
-_DISTRIBUTIONS = (
-    "example-insurance",
-    "openmagic-api",
-    "openmagic-evals",
-    "openmagic-runtime",
-)
-_DISTRIBUTION_PACKAGES = {
-    "example-insurance": "example_insurance",
-    "openmagic-api": "openmagic_api",
-    "openmagic-evals": "openmagic_evals",
-    "openmagic-runtime": "openmagic_runtime",
-}
+from openmagic_evals.evidence.reproducibility import reproducibility_pin, sha256
 
 
 def _sha256(value: bytes) -> str:
-    return "sha256:" + hashlib.sha256(value).hexdigest()
-
-
-def _git(root: Path, *arguments: str) -> str:
-    completed = subprocess.run(
-        ["git", *arguments],
-        cwd=root,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    return completed.stdout.strip()
-
-
-def _build_pin(root: Path) -> BuildPin:
-    status = _git(root, "status", "--porcelain", "--untracked-files=normal")
-    return BuildPin(
-        git_sha=_git(root, "rev-parse", "HEAD"),
-        checkout_clean=not status,
-        lock_digest=_sha256((root / "uv.lock").read_bytes()),
-        distributions={name: version(name) for name in _DISTRIBUTIONS},
-        distribution_digests={name: _distribution_digest(root, name) for name in _DISTRIBUTIONS},
-    )
-
-
-def _distribution_digest(_root: Path, name: str) -> str:
-    item = distribution(name)
-    content = hashlib.sha256()
-    for file in sorted(item.files or (), key=str):
-        relative = Path(str(file))
-        if not any(part.endswith(".dist-info") for part in relative.parts) or relative.name not in {
-            "METADATA",
-            "WHEEL",
-            "entry_points.txt",
-            "top_level.txt",
-        }:
-            continue
-        path = Path(str(item.locate_file(file)))
-        if not path.is_file():
-            continue
-        content.update(relative.as_posix().encode())
-        content.update(b"\0")
-        content.update(path.read_bytes())
-        content.update(b"\0")
-    package_name = _DISTRIBUTION_PACKAGES[name]
-    package_spec = find_spec(package_name)
-    if package_spec is None or package_spec.origin is None:
-        raise RuntimeError(f"installed distribution package is unavailable: {package_name}")
-    package_root = Path(package_spec.origin).parent
-    for path in sorted(package_root.rglob("*")):
-        if not path.is_file() or any(
-            part == "__pycache__" or part.startswith(".") for part in path.parts
-        ):
-            continue
-        relative = path.relative_to(package_root.parent)
-        content.update(relative.as_posix().encode())
-        content.update(b"\0")
-        content.update(path.read_bytes())
-        content.update(b"\0")
-    return "sha256:" + content.hexdigest()
-
-
-def reproducibility_pin(
-    root: Path,
-    *,
-    command: tuple[str, ...],
-    started_at: datetime,
-    finished_at: datetime,
-    timeout_seconds: int,
-    case_corpus_digest: str,
-) -> ReproducibilityPin:
-    definitions = {
-        "example_insurance.renewal_outreach:2": "sha256:" + content_fingerprint(RENEWAL_DEFINITION),
-        "example_insurance.verification_delivery:1": "sha256:"
-        + content_fingerprint(VERIFICATION_DEFINITION),
-    }
-    definitions.update(
-        {
-            f"{definition.identity.key}:{definition.identity.version}": "sha256:"
-            + content_fingerprint(definition)
-            for definition in transition_race_definitions()
-        }
-    )
-    with postgres_container(database_name="openmagic_test_evidence_pin") as postgres:
-        database_url = postgres.get_connection_url(driver=None)
-        apply_migrations(database_url)
-        with psycopg.connect(database_url) as connection:
-            row = connection.execute(
-                "SELECT current_setting('server_version'), "
-                "current_setting('transaction_isolation'), "
-                "current_setting('synchronous_commit'), "
-                "current_setting('TimeZone'), "
-                "current_setting('max_connections')"
-            ).fetchone()
-            application_head = connection.execute(
-                "SELECT version FROM example_insurance.migration_history "
-                "ORDER BY version DESC LIMIT 1"
-            ).fetchone()
-            runtime_head = connection.execute(
-                "SELECT version FROM openmagic_runtime.migration_history "
-                "ORDER BY version DESC LIMIT 1"
-            ).fetchone()
-    if row is None:
-        raise RuntimeError("PostgreSQL did not return its observed configuration")
-    if application_head is None or runtime_head is None:
-        raise RuntimeError("PostgreSQL did not return its observed migration heads")
-    migration_heads = {
-        "example_insurance": str(application_head[0]),
-        "openmagic_runtime": str(runtime_head[0]),
-    }
-    postgres_configuration = {
-        "max_connections": str(row[4]),
-        "synchronous_commit": str(row[2]),
-        "timezone": str(row[3]),
-        "transaction_isolation": str(row[1]),
-    }
-    configuration_document = json.dumps(
-        postgres_configuration, sort_keys=True, separators=(",", ":")
-    ).encode()
-    return ReproducibilityPin(
-        build=_build_pin(root),
-        suite_version="issue-71.v1",
-        command=command,
-        environment_allowlist=("PATH", "PYTHONNOUSERSITE"),
-        started_at=started_at,
-        finished_at=finished_at,
-        timeout_seconds=timeout_seconds,
-        postgres_version=str(row[0]),
-        postgres_image=POSTGRES_IMAGE,
-        postgres_configuration=postgres_configuration,
-        postgres_configuration_digest=_sha256(configuration_document),
-        migration_heads=migration_heads,
-        definition_digests=definitions,
-        case_corpus_digest=case_corpus_digest,
-        sandbox_digest=_sha256(POSTGRES_IMAGE.encode()),
-    )
+    return sha256(value)
 
 
 def _case_digest(case_id: str, results: dict[str, Any], seeds: tuple[int, ...]) -> tuple[str, ...]:
@@ -216,6 +58,41 @@ def _case_digest(case_id: str, results: dict[str, Any], seeds: tuple[int, ...]) 
         )
         for seed in seeds
     )
+
+
+def _release_corpus_digest(
+    release_cases: tuple[ReleaseCase, ...],
+    race_contracts: tuple[RaceContract, ...],
+    pytest_nodes: tuple[str, ...],
+) -> str:
+    return _sha256(
+        json.dumps(
+            {
+                "matrix": [asdict(case) for case in release_cases],
+                "races": [asdict(case) for case in race_contracts],
+                "nodes": pytest_nodes,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    )
+
+
+def _race_corpus_digest(contracts: tuple[RaceContract, ...]) -> str:
+    return _sha256(
+        json.dumps(
+            {"races": [asdict(case) for case in contracts]},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    )
+
+
+@dataclass(frozen=True)
+class _ExactCaseObservation:
+    correlations: Correlations
+    document: dict[str, object]
+    scenarios: tuple[DeterministicScenarioEvidence, ...]
 
 
 def _matching_results(
@@ -236,7 +113,7 @@ def _matching_results(
 def _release_case(
     case: ReleaseCase,
     tests: dict[str, dict[str, Any]],
-    observation: DeterministicObservation,
+    observation: _ExactCaseObservation,
 ) -> ArtifactCase:
     matched = _matching_results(tests, case.pytest_nodes)
     statuses = tuple(result["status"] for result in matched.values())
@@ -273,6 +150,7 @@ def _release_case(
         seeds=(0,),
         correlations=observation.correlations,
         observation_digests=_case_digest(case.case_id, digest_input, (0,)),
+        scenarios=observation.scenarios,
         verdict=CaseVerdict(status=status, invariant_violations=violations),
     )
 
@@ -280,7 +158,7 @@ def _release_case(
 def _exact_observation(
     case: ReleaseCase,
     recorded: dict[str, tuple[RecordedCaseObservation, ...]],
-) -> DeterministicObservation:
+) -> _ExactCaseObservation:
     observations = recorded.get(case.case_id, ())
     observed_scenarios = tuple(item.scenario_id for item in observations)
     if observed_scenarios != tuple(sorted(case.required_scenarios)):
@@ -289,13 +167,32 @@ def _exact_observation(
             f"expected {tuple(sorted(case.required_scenarios))!r}"
         )
     correlations, document = merge_case_observations(observations)
-    return DeterministicObservation(correlations=correlations, document=document)
+    scenarios = tuple(
+        DeterministicScenarioEvidence(
+            scenario_id=item.scenario_id,
+            correlations=item.correlations,
+            observation=item.document,
+            observation_digest=_sha256(
+                json.dumps(
+                    item.document,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+            ),
+        )
+        for item in observations
+    )
+    return _ExactCaseObservation(
+        correlations=correlations,
+        document=document,
+        scenarios=scenarios,
+    )
 
 
 def _trace_completeness_case(
     case: ReleaseCase,
     tests: dict[str, dict[str, Any]],
-    observation: DeterministicObservation,
+    observation: _ExactCaseObservation,
 ) -> ArtifactCase:
     contract = _release_case(case, tests, observation)
     correlations = observation.correlations
@@ -412,16 +309,8 @@ def run_deterministic_release(
         "--timeout-seconds",
         str(timeout_seconds),
     )
-    corpus_digest = _sha256(
-        json.dumps(
-            {
-                "matrix": [case.case_id for case in selected_release_cases],
-                "races": [case.case_id for case in selected_race_contracts],
-                "nodes": selected_nodes,
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode()
+    corpus_digest = _release_corpus_digest(
+        selected_release_cases, selected_race_contracts, selected_nodes
     )
     started_at = datetime.now(UTC)
     with tempfile.TemporaryDirectory(prefix="openmagic-evidence-") as directory:
@@ -542,13 +431,7 @@ def run_race_release(
         "--timeout-seconds",
         str(timeout_seconds),
     )
-    corpus_digest = _sha256(
-        json.dumps(
-            {"races": [case.case_id for case in contracts], "seeds": list(range(100))},
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode()
-    )
+    corpus_digest = _race_corpus_digest(contracts)
     started_at = datetime.now(UTC)
     corpora = {corpus.case_id: corpus for corpus in run_all_races()}
     cases = tuple(_race_case(contract, corpora[contract.case_id]) for contract in contracts)
@@ -588,4 +471,4 @@ def run_race_release(
     return artifact
 
 
-__all__ = ["reproducibility_pin", "run_deterministic_release", "run_race_release"]
+__all__ = ["run_deterministic_release", "run_race_release"]

@@ -18,11 +18,13 @@ from openmagic_evals.evidence.contracts import (
     ArtifactCase,
     CaseVerdict,
     Correlations,
+    DeterministicScenarioEvidence,
     PlaygroundArtifact,
     PlaygroundSummary,
+    merge_correlations,
 )
 from openmagic_evals.evidence.deadline import bounded_evidence
-from openmagic_evals.evidence.release import reproducibility_pin
+from openmagic_evals.evidence.reproducibility import reproducibility_pin
 from openmagic_evals.harness import (
     LocalEmailProvider,
     TestDeployment,
@@ -170,6 +172,19 @@ def verify_playground(
         }
         process_ids = (*original_pids, *restarted_pids, provider_pid)
     finished_at = datetime.now(UTC)
+    case_correlations = merge_correlations((first_correlations, second_correlations)).model_copy(
+        update={"process_ids": process_ids}
+    )
+    case_observation = {
+        "original_process_count": len(original_pids),
+        "restarted_process_count": len(restarted_pids),
+        "schema_passed": schema.passed,
+        "fixture": first_observation,
+        "fixture_reproduced_after_reset": True,
+        "provider_disconnection_tolerated": True,
+        "provider_request_count": 0,
+        "intentional_failure": failure_observation,
+    }
     artifact = PlaygroundArtifact(
         reproducibility=reproducibility_pin(
             repository_root.resolve(),
@@ -186,59 +201,14 @@ def verify_playground(
                 expected_trials=1,
                 observed_trials=1,
                 seeds=(0,),
-                correlations=Correlations(
-                    command_ids=(
-                        *first_correlations.command_ids,
-                        *second_correlations.command_ids,
-                    ),
-                    workflow_ids=(
-                        *first_correlations.workflow_ids,
-                        *second_correlations.workflow_ids,
-                    ),
-                    instance_ids=(
-                        *first_correlations.instance_ids,
-                        *second_correlations.instance_ids,
-                    ),
-                    step_ids=(*first_correlations.step_ids, *second_correlations.step_ids),
-                    attempt_ids=(
-                        *first_correlations.attempt_ids,
-                        *second_correlations.attempt_ids,
-                    ),
-                    wait_ids=(*first_correlations.wait_ids, *second_correlations.wait_ids),
-                    thread_ids=(
-                        *first_correlations.thread_ids,
-                        *second_correlations.thread_ids,
-                    ),
-                    message_ids=(
-                        *first_correlations.message_ids,
-                        *second_correlations.message_ids,
-                    ),
-                    agent_run_ids=(
-                        *first_correlations.agent_run_ids,
-                        *second_correlations.agent_run_ids,
-                    ),
-                    domain_event_ids=(
-                        *first_correlations.domain_event_ids,
-                        *second_correlations.domain_event_ids,
-                    ),
-                    delivery_ids=(
-                        *first_correlations.delivery_ids,
-                        *second_correlations.delivery_ids,
-                    ),
-                    process_ids=process_ids,
-                ),
-                observation_digests=(
-                    _digest(
-                        {
-                            "original_process_count": len(original_pids),
-                            "restarted_process_count": len(restarted_pids),
-                            "schema_passed": schema.passed,
-                            "fixture": first_observation,
-                            "fixture_reproduced_after_reset": True,
-                            "provider_disconnection_tolerated": True,
-                            "provider_request_count": 0,
-                            "intentional_failure": failure_observation,
-                        }
+                correlations=case_correlations,
+                observation_digests=(_digest(case_observation),),
+                scenarios=(
+                    DeterministicScenarioEvidence(
+                        scenario_id="synthetic-reset-and-process-control",
+                        correlations=case_correlations,
+                        observation=case_observation,
+                        observation_digest=_digest(case_observation),
                     ),
                 ),
                 verdict=CaseVerdict(status="passed", invariant_violations=()),
