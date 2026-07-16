@@ -16,6 +16,34 @@ class DeliveryProposalConflict(RuntimeError):
     """Raised when a proposal differs from the frozen Delivery intent."""
 
 
+DeliveryStatus = Literal["pending", "delivered", "failed", "suppressed"]
+DeliveryAttemptState = Literal["running", "succeeded", "failed", "abandoned"]
+
+
+def delivery_status(value: object) -> DeliveryStatus:
+    if value == "pending":
+        return "pending"
+    if value == "delivered":
+        return "delivered"
+    if value == "failed":
+        return "failed"
+    if value == "suppressed":
+        return "suppressed"
+    raise RuntimeError("Delivery has an invalid status")
+
+
+def delivery_attempt_state(value: object) -> DeliveryAttemptState:
+    if value == "running":
+        return "running"
+    if value == "succeeded":
+        return "succeeded"
+    if value == "failed":
+        return "failed"
+    if value == "abandoned":
+        return "abandoned"
+    raise RuntimeError("Delivery Attempt has an invalid state")
+
+
 @dataclass(frozen=True)
 class DeliveryRetryPolicy:
     version: int
@@ -86,9 +114,13 @@ __all__ = [
     "ClaimDelivery",
     "ClaimedDelivery",
     "DeliveryAcknowledgement",
+    "DeliveryAttemptState",
     "DeliveryFailureDisposition",
     "DeliveryIntent",
     "DeliveryProposalConflict",
     "DeliveryRetryPolicy",
+    "DeliveryStatus",
     "StaleDeliveryAuthority",
+    "delivery_attempt_state",
+    "delivery_status",
 ]

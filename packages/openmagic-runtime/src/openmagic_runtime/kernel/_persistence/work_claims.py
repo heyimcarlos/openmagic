@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import UUID, uuid4
 
+import psycopg
 from psycopg import Connection
 from psycopg.rows import dict_row
 
@@ -183,4 +184,14 @@ class AttemptClaimRecords:
         return 1 if record is None else int(record["attempt_count"]) + 1
 
 
-__all__ = ["AttemptClaimRecords"]
+def claim_once_record(*, database_url: str, request: ClaimWork) -> ClaimedAttempt | None:
+    try:
+        with psycopg.connect(database_url) as connection, connection.transaction():
+            return AttemptClaimRecords(connection).claim(request)
+    except psycopg.errors.UniqueViolation as error:
+        if error.diag.constraint_name == "one_leased_attempt_per_step":
+            return None
+        raise
+
+
+__all__ = ["AttemptClaimRecords", "claim_once_record"]

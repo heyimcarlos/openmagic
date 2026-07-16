@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 from uuid import UUID, uuid4
 
+import psycopg
 from psycopg import Connection
 from psycopg.rows import dict_row
 
@@ -12,7 +13,8 @@ from openmagic_runtime._delivery_contracts import ClaimDelivery, ClaimedDelivery
 from openmagic_runtime._persistence.delivery_work_models import (
     ClaimableDeliveryRecord,
     ClaimedDeliveryRecord,
-    ExpiredDeliveryRecord,
+    ExpiredDeliveryAttemptRecord,
+    ExpiredDeliveryContextRecord,
 )
 
 
@@ -81,29 +83,39 @@ class DeliveryClaimRecords:
 
     def _recover_one_expired(self) -> None:
         with self._connection.cursor(row_factory=dict_row) as cursor:
-            record = cursor.execute(
-                "SELECT d.delivery_id, d.retry_policy, a.attempt_number "
+            delivery_record = cursor.execute(
+                "SELECT d.delivery_id, d.retry_policy "
                 "FROM openmagic_runtime.deliveries AS d "
-                "JOIN openmagic_runtime.delivery_attempts AS a "
-                "ON a.delivery_id = d.delivery_id "
-                "WHERE d.status = 'pending' AND a.state = 'running' "
-                "AND a.lease_expires_at <= clock_timestamp() "
-                "ORDER BY d.created_at, d.delivery_id FOR UPDATE OF d, a "
-                "SKIP LOCKED LIMIT 1"
+                "WHERE d.status = 'pending' AND EXISTS ("
+                "SELECT 1 FROM openmagic_runtime.delivery_attempts AS a "
+                "WHERE a.delivery_id = d.delivery_id AND a.state = 'running' "
+                "AND a.lease_expires_at <= clock_timestamp()) "
+                "ORDER BY d.created_at, d.delivery_id "
+                "FOR UPDATE OF d SKIP LOCKED LIMIT 1"
             ).fetchone()
-        if record is None:
+            if delivery_record is None:
+                return
+            expired = ExpiredDeliveryContextRecord.decode(delivery_record)
+            attempt_record = cursor.execute(
+                "SELECT attempt_number FROM openmagic_runtime.delivery_attempts "
+                "WHERE delivery_id = %s AND state = 'running' "
+                "AND lease_expires_at <= clock_timestamp() "
+                "ORDER BY created_at, delivery_attempt_id FOR UPDATE LIMIT 1",
+                (expired.delivery_id,),
+            ).fetchone()
+        if attempt_record is None:
             return
-        expired = ExpiredDeliveryRecord.decode(record)
+        attempt = ExpiredDeliveryAttemptRecord.decode(attempt_record)
         self._connection.execute(
             "UPDATE openmagic_runtime.delivery_attempts SET state = 'abandoned', "
             "completed_at = clock_timestamp() WHERE delivery_id = %s AND state = 'running' "
             "AND lease_expires_at <= clock_timestamp()",
             (expired.delivery_id,),
         )
-        if expired.attempt_number >= expired.policy.max_attempts:
+        if attempt.attempt_number >= expired.policy.max_attempts:
             self._mark_delivery_failed(expired.delivery_id)
             return
-        delay = expired.policy.delays_seconds[expired.attempt_number - 1]
+        delay = expired.policy.delays_seconds[attempt.attempt_number - 1]
         self._connection.execute(
             "UPDATE openmagic_runtime.deliveries SET next_eligible_at = "
             "clock_timestamp() + (%s * interval '1 second') WHERE delivery_id = %s",
@@ -140,4 +152,16 @@ class DeliveryClaimRecords:
         )
 
 
-__all__ = ["DeliveryClaimRecords"]
+def claim_delivery_once_record(
+    *, database_url: str, request: ClaimDelivery
+) -> ClaimedDelivery | None:
+    try:
+        with psycopg.connect(database_url) as connection, connection.transaction():
+            return DeliveryClaimRecords(connection).claim(request)
+    except psycopg.errors.UniqueViolation as error:
+        if error.diag.constraint_name == "one_running_delivery_attempt":
+            return None
+        raise
+
+
+__all__ = ["DeliveryClaimRecords", "claim_delivery_once_record"]

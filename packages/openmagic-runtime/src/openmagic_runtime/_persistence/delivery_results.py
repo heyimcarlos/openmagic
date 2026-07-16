@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
+import psycopg
 from psycopg import Connection
 from psycopg.rows import dict_row
 
@@ -18,7 +19,8 @@ from openmagic_runtime._delivery_contracts import (
 from openmagic_runtime._persistence.delivery_work_models import (
     DeliveryAcknowledgementRecord,
     DeliveryAttemptAuthorityRecord,
-    DeliveryFailureAuthorityRecord,
+    DeliveryFailureAttemptRecord,
+    DeliveryFailureContextRecord,
     DeliveryRecord,
 )
 
@@ -70,8 +72,8 @@ class DeliveryResultRecords:
                 message_id,
                 delivery.thread_id,
                 int(sequence_record["next_sequence"]),
-                delivery.message_author["kind"],
-                delivery.message_author["identifier"],
+                delivery.message_author.kind,
+                delivery.message_author.identifier,
                 claim.delivery_id,
                 delivery.message_content,
             ),
@@ -114,18 +116,19 @@ class DeliveryResultRecords:
         worker_id: str,
         failure_class: str,
     ) -> DeliveryFailureDisposition:
-        authority = self._lock_failure_authority(claim)
+        context = self._lock_failure_context(claim.delivery_id)
+        authority = self._lock_failure_attempt(claim)
         if (
             authority.state != "running"
             or authority.worker_id != worker_id
             or not authority.lease_valid
             or authority.attempt_number != claim.attempt_number
-            or authority.thread_id != claim.thread_id
-            or authority.delivery_status != "pending"
+            or context.thread_id != claim.thread_id
+            or context.status != "pending"
         ):
             raise StaleDeliveryAuthority("Delivery Attempt authority is stale")
-        retryable = authority.policy.retryable_failure_classes
-        terminal = authority.policy.terminal_failure_classes
+        retryable = context.policy.retryable_failure_classes
+        terminal = context.policy.terminal_failure_classes
         if failure_class not in retryable and failure_class not in terminal:
             raise DeliveryProposalConflict("Delivery failure class is not qualified by policy")
         self._connection.execute(
@@ -133,8 +136,8 @@ class DeliveryResultRecords:
             "completed_at = clock_timestamp() WHERE delivery_attempt_id = %s",
             (claim.delivery_attempt_id,),
         )
-        if failure_class in retryable and claim.attempt_number < authority.policy.max_attempts:
-            delay = authority.policy.delays_seconds[claim.attempt_number - 1]
+        if failure_class in retryable and claim.attempt_number < context.policy.max_attempts:
+            delay = context.policy.delays_seconds[claim.attempt_number - 1]
             self._connection.execute(
                 "UPDATE openmagic_runtime.deliveries SET next_eligible_at = "
                 "clock_timestamp() + (%s * interval '1 second') WHERE delivery_id = %s",
@@ -178,22 +181,44 @@ class DeliveryResultRecords:
             raise StaleDeliveryAuthority("Delivery Attempt authority is stale")
         return DeliveryAttemptAuthorityRecord.decode(record)
 
-    def _lock_failure_authority(self, claim: ClaimedDelivery) -> DeliveryFailureAuthorityRecord:
+    def _lock_failure_context(self, delivery_id: UUID) -> DeliveryFailureContextRecord:
         with self._connection.cursor(row_factory=dict_row) as cursor:
             record = cursor.execute(
-                "SELECT a.state, a.worker_id, "
-                "a.lease_expires_at > clock_timestamp() AS lease_valid, "
-                "a.attempt_number, d.thread_id, d.retry_policy, "
-                "d.status AS delivery_status "
-                "FROM openmagic_runtime.delivery_attempts AS a "
-                "JOIN openmagic_runtime.deliveries AS d ON d.delivery_id = a.delivery_id "
-                "WHERE a.delivery_attempt_id = %s AND a.delivery_id = %s "
-                "FOR UPDATE OF a, d",
+                "SELECT thread_id, retry_policy, status "
+                "FROM openmagic_runtime.deliveries WHERE delivery_id = %s FOR UPDATE",
+                (delivery_id,),
+            ).fetchone()
+        if record is None:
+            raise RuntimeError("Delivery not found")
+        return DeliveryFailureContextRecord.decode(record)
+
+    def _lock_failure_attempt(self, claim: ClaimedDelivery) -> DeliveryFailureAttemptRecord:
+        with self._connection.cursor(row_factory=dict_row) as cursor:
+            record = cursor.execute(
+                "SELECT state, worker_id, "
+                "lease_expires_at > clock_timestamp() AS lease_valid, attempt_number "
+                "FROM openmagic_runtime.delivery_attempts "
+                "WHERE delivery_attempt_id = %s AND delivery_id = %s FOR UPDATE",
                 (claim.delivery_attempt_id, claim.delivery_id),
             ).fetchone()
         if record is None:
             raise StaleDeliveryAuthority("Delivery Attempt authority is stale")
-        return DeliveryFailureAuthorityRecord.decode(record)
+        return DeliveryFailureAttemptRecord.decode(record)
 
 
-__all__ = ["DeliveryResultRecords"]
+def acknowledge_delivery_record(
+    *,
+    database_url: str,
+    claim: ClaimedDelivery,
+    worker_id: str,
+    proposed_thread_id: UUID,
+) -> DeliveryAcknowledgement:
+    with psycopg.connect(database_url) as connection, connection.transaction():
+        return DeliveryResultRecords(connection).acknowledge(
+            claim,
+            worker_id=worker_id,
+            proposed_thread_id=proposed_thread_id,
+        )
+
+
+__all__ = ["DeliveryResultRecords", "acknowledge_delivery_record"]

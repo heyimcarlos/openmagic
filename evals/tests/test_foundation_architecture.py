@@ -203,10 +203,15 @@ def test_role_rejects_sql_outside_its_declared_owners(
 def test_runtime_transaction_owners_do_not_import_public_control_facades() -> None:
     runtime = ROOT / "packages/openmagic-runtime/src/openmagic_runtime"
     owners = (
-        runtime / "_persistence/delivery_control.py",
+        runtime / "_persistence/delivery_claims.py",
+        runtime / "_persistence/delivery_intents.py",
+        runtime / "_persistence/delivery_results.py",
         runtime / "_persistence/delivery_records.py",
         runtime / "kernel/_persistence/control_records.py",
-        runtime / "kernel/_persistence/work_records.py",
+        runtime / "kernel/_persistence/work_authority.py",
+        runtime / "kernel/_persistence/work_claims.py",
+        runtime / "kernel/_persistence/work_recovery.py",
+        runtime / "kernel/_persistence/work_results.py",
     )
 
     imports = python_imports(owners)
@@ -214,6 +219,8 @@ def test_runtime_transaction_owners_do_not_import_public_control_facades() -> No
     assert "openmagic_runtime.delivery" not in imports
     assert "openmagic_runtime.kernel.control" not in imports
     assert "openmagic_runtime.kernel.work" not in imports
+    assert not (runtime / "_persistence/delivery_control.py").exists()
+    assert not (runtime / "kernel/_persistence/work_records.py").exists()
 
 
 def test_runtime_persistence_uses_named_rows() -> None:

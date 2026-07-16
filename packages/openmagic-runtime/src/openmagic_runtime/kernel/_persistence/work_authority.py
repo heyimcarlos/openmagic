@@ -8,12 +8,22 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
+import psycopg
 from psycopg import Connection
 from psycopg.rows import dict_row
 
 from openmagic_runtime._canonical import canonical_digest
+from openmagic_runtime._persistence.durable_values import (
+    boolean_value,
+    integer_value,
+    mapping_value,
+    string_value,
+    timestamp_value,
+    uuid_value,
+)
 from openmagic_runtime.kernel._persistence.trace import append_trace, read_trace_replay
 from openmagic_runtime.kernel._persistence.transition_records import read_instance_definition
+from openmagic_runtime.kernel._record_decoding import attempt_state
 from openmagic_runtime.kernel._work_contracts import (
     AttemptExecutionAuthority,
     ClaimedAttempt,
@@ -21,6 +31,7 @@ from openmagic_runtime.kernel._work_contracts import (
     StaleAuthority,
 )
 from openmagic_runtime.kernel.definitions import StepTemplate, verified_definition
+from openmagic_runtime.kernel.inspection_types import AttemptState
 
 
 def step_template(
@@ -35,8 +46,8 @@ def step_template(
 
 @dataclass(frozen=True)
 class AttemptAuthorityRecord:
-    state: str
-    worker_id: str | None
+    state: AttemptState
+    worker_id: str
     lease_valid: bool
     deadline_valid: bool
     observation: dict[str, Any] | None
@@ -49,25 +60,35 @@ class AttemptAuthorityRecord:
     lease_expires_at: datetime
     checked_at: datetime
 
+    def __post_init__(self) -> None:
+        completed_fields = self.observation is not None and self.observation_digest is not None
+        if self.state == "completed" and not completed_fields:
+            raise RuntimeError("Completed Attempt authority is missing its accepted result")
+        if self.state != "completed" and (
+            self.observation is not None or self.observation_digest is not None
+        ):
+            raise RuntimeError("Uncompleted Attempt authority contains an accepted result")
+
     @classmethod
     def decode(cls, record: Mapping[str, Any]) -> AttemptAuthorityRecord:
         observation = record["observation"]
         observation_digest = record["observation_digest"]
-        worker_id = record["worker_id"]
         return cls(
-            state=str(record["state"]),
-            worker_id=None if worker_id is None else str(worker_id),
-            lease_valid=bool(record["lease_valid"]),
-            deadline_valid=bool(record["deadline_valid"]),
-            observation=None if observation is None else dict(observation),
-            observation_digest=None if observation_digest is None else str(observation_digest),
-            instance_id=UUID(str(record["instance_id"])),
-            step_id=UUID(str(record["step_id"])),
-            attempt_number=int(record["attempt_number"]),
-            template_key=str(record["template_key"]),
-            input=dict(record["input"]),
-            lease_expires_at=record["lease_expires_at"],
-            checked_at=record["checked_at"],
+            state=attempt_state(record["state"]),
+            worker_id=string_value(record["worker_id"]),
+            lease_valid=boolean_value(record["lease_valid"]),
+            deadline_valid=boolean_value(record["deadline_valid"]),
+            observation=None if observation is None else mapping_value(observation),
+            observation_digest=(
+                None if observation_digest is None else string_value(observation_digest)
+            ),
+            instance_id=uuid_value(record["instance_id"]),
+            step_id=uuid_value(record["step_id"]),
+            attempt_number=integer_value(record["attempt_number"]),
+            template_key=string_value(record["template_key"]),
+            input=mapping_value(record["input"]),
+            lease_expires_at=timestamp_value(record["lease_expires_at"]),
+            checked_at=timestamp_value(record["checked_at"]),
         )
 
     def claim(
@@ -109,11 +130,28 @@ class AttemptAuthorityRecord:
                 lease_expires_at=self.lease_expires_at,
             )
 
+    def completed_observation(self) -> dict[str, Any]:
+        if self.state != "completed" or self.observation is None:
+            raise RuntimeError("Attempt authority has no completed observation")
+        return dict(self.observation)
+
 
 def lock_attempt_authority(
     connection: Connection[tuple[Any, ...]], attempt_id: UUID
 ) -> AttemptAuthorityRecord:
     with connection.cursor(row_factory=dict_row) as cursor:
+        identity = cursor.execute(
+            "SELECT instance_id FROM openmagic_runtime.attempts WHERE attempt_id = %s",
+            (attempt_id,),
+        ).fetchone()
+        if identity is None:
+            raise StaleAuthority("Attempt authority does not exist")
+        locked_instance = cursor.execute(
+            "SELECT instance_id FROM openmagic_runtime.instances WHERE instance_id = %s FOR UPDATE",
+            (identity["instance_id"],),
+        ).fetchone()
+        if locked_instance is None:
+            raise StaleAuthority("Attempt authority does not exist")
         record = cursor.execute(
             "SELECT a.state, a.worker_id, "
             "a.lease_expires_at > clock_timestamp() AS lease_valid, "
@@ -123,8 +161,7 @@ def lock_attempt_authority(
             "clock_timestamp() AS checked_at "
             "FROM openmagic_runtime.attempts AS a "
             "JOIN openmagic_runtime.steps AS s ON s.step_id = a.step_id "
-            "JOIN openmagic_runtime.instances AS i ON i.instance_id = a.instance_id "
-            "WHERE a.attempt_id = %s FOR UPDATE OF i, a, s",
+            "WHERE a.attempt_id = %s FOR UPDATE OF a, s",
             (attempt_id,),
         ).fetchone()
     if record is None:
@@ -153,9 +190,7 @@ class AttemptAuthorityRecords:
             return AttemptExecutionAuthority(
                 claim=authority.claim(attempt_id=attempt.attempt_id, template=template),
                 directive="replay",
-                accepted_observation=None
-                if authority.observation is None
-                else dict(authority.observation),
+                accepted_observation=authority.completed_observation(),
             )
         authority.require_live_lease(worker_id)
         return AttemptExecutionAuthority(
@@ -229,9 +264,21 @@ class AttemptAuthorityRecords:
         return result
 
 
+def renew_once_record(
+    *, database_url: str, attempt: ClaimedAttempt, worker_id: str, renewal_id: UUID
+) -> RenewedAttemptLease:
+    with psycopg.connect(database_url) as connection, connection.transaction():
+        return AttemptAuthorityRecords(connection).renew(
+            attempt,
+            worker_id=worker_id,
+            renewal_id=renewal_id,
+        )
+
+
 __all__ = [
     "AttemptAuthorityRecord",
     "AttemptAuthorityRecords",
     "lock_attempt_authority",
+    "renew_once_record",
     "step_template",
 ]

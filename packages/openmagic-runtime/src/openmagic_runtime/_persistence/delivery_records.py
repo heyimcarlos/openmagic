@@ -4,38 +4,26 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any
 from uuid import UUID
 
 from psycopg import Connection
 from psycopg.rows import dict_row
 
-DeliveryStatus = Literal["pending", "delivered", "failed", "suppressed"]
-DeliveryAttemptState = Literal["running", "succeeded", "failed", "abandoned"]
-
-
-def delivery_status(value: object) -> DeliveryStatus:
-    if value == "pending":
-        return "pending"
-    if value == "delivered":
-        return "delivered"
-    if value == "failed":
-        return "failed"
-    if value == "suppressed":
-        return "suppressed"
-    raise RuntimeError("Delivery has an invalid status")
-
-
-def delivery_attempt_state(value: object) -> DeliveryAttemptState:
-    if value == "running":
-        return "running"
-    if value == "succeeded":
-        return "succeeded"
-    if value == "failed":
-        return "failed"
-    if value == "abandoned":
-        return "abandoned"
-    raise RuntimeError("Delivery Attempt has an invalid state")
+from openmagic_runtime._delivery_contracts import (
+    DeliveryAttemptState,
+    DeliveryStatus,
+    delivery_attempt_state,
+    delivery_status,
+)
+from openmagic_runtime._persistence.durable_values import (
+    integer_value,
+    invalid_durable_value,
+    nonempty_string,
+    string_value,
+    timestamp_value,
+    uuid_value,
+)
 
 
 @dataclass(frozen=True)
@@ -50,12 +38,12 @@ class DeliveredMessage:
     @classmethod
     def decode(cls, record: Mapping[str, Any]) -> DeliveredMessage:
         return cls(
-            message_id=UUID(str(record["message_id"])),
-            thread_id=UUID(str(record["thread_id"])),
-            sequence=int(record["sequence"]),
-            content=str(record["content"]),
-            source_kind=str(record["source_kind"]),
-            source_id=UUID(str(record["source_id"])),
+            message_id=uuid_value(record["message_id"]),
+            thread_id=uuid_value(record["thread_id"]),
+            sequence=integer_value(record["sequence"]),
+            content=string_value(record["content"]),
+            source_kind=nonempty_string(record["source_kind"]),
+            source_id=uuid_value(record["source_id"]),
         )
 
 
@@ -81,15 +69,19 @@ class RuntimeDeliveryEvidence:
     def decode(cls, record: Mapping[str, Any]) -> RuntimeDeliveryEvidence:
         delivered_message = record["delivered_message_id"]
         return cls(
-            delivery_id=UUID(str(record["delivery_id"])),
+            delivery_id=uuid_value(record["delivery_id"]),
             status=delivery_status(record["status"]),
             delivered_message_id=(
-                UUID(str(delivered_message)) if delivered_message is not None else None
+                uuid_value(delivered_message) if delivered_message is not None else None
             ),
-            attempt_states=tuple(
-                delivery_attempt_state(value) for value in record["attempt_states"]
-            ),
+            attempt_states=_attempt_states(record["attempt_states"]),
         )
+
+
+def _attempt_states(value: object) -> tuple[DeliveryAttemptState, ...]:
+    if not isinstance(value, list):
+        raise invalid_durable_value()
+    return tuple(delivery_attempt_state(item) for item in value)
 
 
 def deliveries_for_domain_event(
@@ -128,7 +120,7 @@ def _delivery_presentation(
     if record is None:
         return None
     delivered_message = record["delivered_message_id"]
-    delivered_message_id = UUID(str(delivered_message)) if delivered_message is not None else None
+    delivered_message_id = uuid_value(delivered_message) if delivered_message is not None else None
     message: DeliveredMessage | None = None
     if delivered_message_id is not None:
         message_query = (
@@ -141,8 +133,11 @@ def _delivery_presentation(
             message_record = cursor.execute(message_query, (delivered_message_id,)).fetchone()
         if message_record is not None:
             message = DeliveredMessage.decode(message_record)
+    acknowledged_at = record["acknowledged_at"]
+    if acknowledged_at is not None:
+        timestamp_value(acknowledged_at)
     return DeliveryPresentation(
-        delivery_id=UUID(str(record["delivery_id"])),
+        delivery_id=uuid_value(record["delivery_id"]),
         domain_event_id=domain_event_id,
         thread_id=thread_id,
         status=delivery_status(record["status"]),
