@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+import os
+import signal
+import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from functools import partial
+from multiprocessing import active_children
 from pathlib import Path
+from threading import Thread
 from uuid import uuid4
 
 import pytest
@@ -17,6 +23,7 @@ from openmagic_runtime.agents import (
     AgentTask,
 )
 from openmagic_runtime.execution import (
+    AgentExecutionFailure,
     AttemptExecution,
     CancellationToken,
     FreshAgentExecutor,
@@ -33,10 +40,38 @@ def _candidate_factory():
     return lambda execution: Candidate(str(execution.run_input.task.input.value("value")))
 
 
+def _malformed_candidate_factory():
+    return lambda _execution: "not-a-typed-candidate"
+
+
+def _failing_candidate_factory():
+    def fail(_execution: AgentExecutionInput) -> Candidate:
+        raise ValueError("synthetic child failure")
+
+    return fail
+
+
 def _slow_candidate_factory(marker: Path):
     def run(execution: AgentExecutionInput) -> Candidate:
         time.sleep(1.5)
         marker.write_text(str(execution.run_input.task.input.value("value")))
+        return Candidate("late")
+
+    return run
+
+
+def _term_resistant_candidate_factory(pid_file: Path):
+    def run(_execution: AgentExecutionInput) -> Candidate:
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        descendant = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(10)",
+            ]
+        )
+        pid_file.write_text(f"{os.getpid()} {descendant.pid}", encoding="utf-8")
+        time.sleep(10)
         return Candidate("late")
 
     return run
@@ -83,9 +118,35 @@ def test_fresh_agent_executor_returns_only_its_typed_candidate() -> None:
         timeout_seconds=1,
     )
 
-    observation = executor.execute(_execution(), CancellationToken())
+    observation = executor.run(_execution(), CancellationToken())
 
     assert observation.value == {"value": "candidate"}
+
+
+def test_fresh_agent_executor_rejects_malformed_candidate_type() -> None:
+    executor = FreshAgentExecutor(
+        _malformed_candidate_factory,
+        result_class=Candidate,
+        encoder=lambda candidate: {"value": candidate.value},
+        timeout_seconds=1,
+    )
+
+    with pytest.raises(AgentExecutionFailure, match="outside its typed contract") as raised:
+        executor.run(_execution(), CancellationToken())
+    assert raised.value.reason == "malformed_result"
+
+
+def test_fresh_agent_executor_preserves_typed_child_failure() -> None:
+    executor = FreshAgentExecutor(
+        _failing_candidate_factory,
+        result_class=Candidate,
+        encoder=lambda candidate: {"value": candidate.value},
+        timeout_seconds=1,
+    )
+
+    with pytest.raises(AgentExecutionFailure, match="synthetic child failure") as raised:
+        executor.run(_execution(), CancellationToken())
+    assert raised.value.reason == "child_process_failure"
 
 
 def test_fresh_agent_executor_terminates_work_after_timeout(tmp_path: Path) -> None:
@@ -98,8 +159,80 @@ def test_fresh_agent_executor_terminates_work_after_timeout(tmp_path: Path) -> N
         timeout_seconds=1,
     )
 
-    with pytest.raises(RuntimeError, match="bounded timeout"):
-        executor.execute(_execution(), CancellationToken())
+    with pytest.raises(AgentExecutionFailure, match="bounded timeout") as raised:
+        executor.run(_execution(), CancellationToken())
+    assert raised.value.reason == "bounded_timeout"
     time.sleep(0.7)
 
     assert not marker.exists()
+
+
+def test_fresh_agent_executor_kills_and_reaps_term_resistant_child(tmp_path: Path) -> None:
+    pid_file = tmp_path / "agent-pid"
+    executor = FreshAgentExecutor(
+        partial(_term_resistant_candidate_factory, pid_file),
+        result_class=Candidate,
+        encoder=lambda candidate: {"value": candidate.value},
+        timeout_seconds=1,
+    )
+
+    with pytest.raises(AgentExecutionFailure) as raised:
+        executor.run(_execution(), CancellationToken())
+    assert raised.value.reason == "bounded_timeout"
+    process_ids = tuple(int(value) for value in pid_file.read_text(encoding="utf-8").split())
+    for process_id in process_ids:
+        stat = Path(f"/proc/{process_id}/stat")
+        assert not stat.exists() or stat.read_text(encoding="utf-8").rpartition(")")[2].split()[
+            0
+        ] in {"X", "Z"}
+
+
+def test_fresh_agent_executor_cancellation_reaps_ready_session_tree(tmp_path: Path) -> None:
+    pid_file = tmp_path / "cancelled-agent-pids"
+    cancellation = CancellationToken()
+    executor = FreshAgentExecutor(
+        partial(_term_resistant_candidate_factory, pid_file),
+        result_class=Candidate,
+        encoder=lambda candidate: {"value": candidate.value},
+        timeout_seconds=5,
+    )
+
+    def cancel_when_candidate_starts() -> None:
+        deadline = time.monotonic() + 3
+        while not pid_file.is_file() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        cancellation.cancel()
+
+    canceller = Thread(target=cancel_when_candidate_starts)
+    canceller.start()
+    with pytest.raises(AgentExecutionFailure) as raised:
+        executor.run(_execution(), cancellation)
+    canceller.join(timeout=1)
+
+    assert raised.value.reason == "cancelled"
+    assert not canceller.is_alive()
+    process_ids = tuple(int(value) for value in pid_file.read_text(encoding="utf-8").split())
+    for process_id in process_ids:
+        stat = Path(f"/proc/{process_id}/stat")
+        assert not stat.exists() or stat.read_text(encoding="utf-8").rpartition(")")[2].split()[
+            0
+        ] in {"X", "Z"}
+
+
+def test_fresh_agent_executor_cleans_scope_when_spawn_cannot_start() -> None:
+    existing_children = {child.pid for child in active_children()}
+
+    def local_factory():
+        return _candidate_factory()
+
+    executor = FreshAgentExecutor(
+        local_factory,
+        result_class=Candidate,
+        encoder=lambda candidate: {"value": candidate.value},
+        timeout_seconds=1,
+    )
+
+    with pytest.raises((AttributeError, TypeError), match=r"local object|pickle"):
+        executor.run(_execution(), CancellationToken())
+
+    assert {child.pid for child in active_children()} <= existing_children

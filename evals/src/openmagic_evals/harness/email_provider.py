@@ -65,6 +65,11 @@ class EmailProviderHandler(BaseHTTPRequestHandler):
                 ).fetchall()
             self._respond(200, {"requests": [dict(row) for row in rows]})
             return
+        if self.path == "/request-count":
+            with _connect(self.server.state_path) as connection:
+                row = connection.execute("SELECT count(*) FROM requests").fetchone()
+            self._respond(200, {"request_count": int(row[0]) if row is not None else 0})
+            return
         if self.path == "/reconciliations":
             with _connect(self.server.state_path) as connection:
                 rows = connection.execute(
@@ -296,3 +301,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+__all__ = ["EmailProviderHandler", "EmailProviderServer", "main"]

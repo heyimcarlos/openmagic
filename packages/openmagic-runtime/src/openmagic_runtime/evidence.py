@@ -7,18 +7,35 @@ from dataclasses import asdict, dataclass
 from typing import Any
 from uuid import UUID
 
-import psycopg
 from psycopg import Connection
 
 from openmagic_runtime._canonical import canonical_bytes, canonical_digest
-from openmagic_runtime.delivery import RuntimeDeliveryEvidence, deliveries_for_domain_event
-from openmagic_runtime.kernel._evidence_records import (
+from openmagic_runtime._persistence.delivery_records import delivery_evidence
+from openmagic_runtime._persistence.health_records import read_database_health
+from openmagic_runtime.delivery import (
+    RuntimeDeliveryAttemptEvidence,
+    RuntimeDeliveryEvidence,
+    deliveries_for_domain_event,
+)
+from openmagic_runtime.kernel._persistence.evidence_records import (
     RuntimeAgentRunEvidence,
     RuntimeAttemptEvidence,
+    RuntimeAttemptLeaseEvidence,
     RuntimeInstanceEvidence,
     RuntimeStepEvidence,
     RuntimeWaitEvidence,
+    read_attempt_lease_evidence,
     read_instance_evidence,
+)
+
+POSTGRES_EVIDENCE_CONFIGURATION_KEYS = frozenset(
+    {
+        "default_transaction_isolation",
+        "max_connections",
+        "observer_transaction_isolation",
+        "synchronous_commit",
+        "timezone",
+    }
 )
 
 
@@ -41,19 +58,13 @@ class RuntimeDatabaseHealth:
 def inspect_runtime_database(database_url: str) -> RuntimeDatabaseHealth:
     """Read runtime-owned deployment identity without retaining a session."""
 
-    with psycopg.connect(database_url) as connection:
-        database = connection.execute("SELECT current_database()").fetchone()
-        runtime_schema = connection.execute(
-            "SELECT to_regnamespace('openmagic_runtime') IS NOT NULL"
-        ).fetchone()
-    if database is None:
-        raise RuntimeError("PostgreSQL did not report the current database")
-    if runtime_schema is None or not runtime_schema[0]:
+    record = read_database_health(database_url)
+    if not record.runtime_schema_ready:
         raise RuntimeError("OpenMagic Runtime schema is not installed")
     return RuntimeDatabaseHealth(
         status="ready",
         pid=os.getpid(),
-        database=str(database[0]),
+        database=record.database,
         runtime_schema_ready=True,
     )
 
@@ -80,15 +91,24 @@ class RuntimeEvidenceReader:
     def instance(self, instance_id: UUID) -> RuntimeInstanceEvidence:
         return read_instance_evidence(self._connection, instance_id)
 
+    def attempt_lease(self, attempt_id: UUID) -> RuntimeAttemptLeaseEvidence:
+        return read_attempt_lease_evidence(self._connection, attempt_id)
+
     def deliveries(self, domain_event_id: UUID) -> tuple[RuntimeDeliveryEvidence, ...]:
         return deliveries_for_domain_event(self._connection, domain_event_id)
 
+    def delivery(self, delivery_id: UUID) -> RuntimeDeliveryEvidence:
+        return delivery_evidence(self._connection, delivery_id)
+
 
 __all__ = [
+    "POSTGRES_EVIDENCE_CONFIGURATION_KEYS",
     "EvidenceRecord",
     "RuntimeAgentRunEvidence",
     "RuntimeAttemptEvidence",
+    "RuntimeAttemptLeaseEvidence",
     "RuntimeDatabaseHealth",
+    "RuntimeDeliveryAttemptEvidence",
     "RuntimeDeliveryEvidence",
     "RuntimeEvidenceReader",
     "RuntimeInstanceEvidence",

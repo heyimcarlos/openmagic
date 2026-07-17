@@ -42,6 +42,7 @@ build/
 
 # Generated documentation / analysis artifacts
 repomix-output.txt
+.artifacts/
 
 .reference
 .worktrees

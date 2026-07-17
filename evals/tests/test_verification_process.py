@@ -15,7 +15,7 @@ from example_insurance.renewals import (
     SubmitVerificationCodeInput,
 )
 from openmagic_evals.harness import (
-    TestDeployment,
+    PlaygroundDeployment,
     issue_verification_challenge,
     renewal_context,
 )
@@ -119,7 +119,7 @@ def test_process_termination_restart_reconstructs_verification_from_postgresql(
     tmp_path: Path,
 ) -> None:
     secret = "issue-70-separate-process-secret"
-    with TestDeployment(
+    with PlaygroundDeployment(
         working_directory=tmp_path,
         verification_code_secret=secret,
     ) as deployment:

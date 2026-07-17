@@ -27,6 +27,7 @@ from example_insurance.renewal_effects import (
 from example_insurance.renewals import (
     ExampleInsurance,
 )
+from openmagic_evals.evidence.case_recording import record_renewal_case
 from openmagic_evals.harness import (
     LocalEmailProvider,
     approve_renewal,
@@ -36,9 +37,8 @@ from openmagic_evals.harness._postgres import postgres_container
 from openmagic_runtime.commands import Actor, Cause
 from openmagic_runtime.evidence import content_fingerprint
 from openmagic_runtime.execution import AttemptExecution, CancellationToken
-from openmagic_runtime.kernel.control import KernelControl
+from openmagic_runtime.kernel.control import KernelControl, ResolveDeferredStep
 from openmagic_runtime.kernel.inspection import KernelInspection
-from openmagic_runtime.kernel.transitions import ResolveDeferredStep
 from openmagic_runtime.threads import ThreadStore
 
 
@@ -106,6 +106,36 @@ def test_successful_provider_evidence_completes_and_closes_the_instance(tmp_path
             assert grant["decision_id"] == decision["decision_id"]
             assert effect["approval_grant_id"] == grant["approval_grant_id"]
             assert applied_evidence["logical_effect_id"] == effect["logical_effect_id"]
+            record_renewal_case(
+                case_id="completion.evidence-backed",
+                scenario_id="accepted-evidence",
+                application=application,
+                database_url=database_url,
+                workflow_id=command.input.workflow_id,
+                document={
+                    "instance_state": snapshot.state,
+                    "completion_event_type": completed_event["event_type"],
+                    "provider_requests": len(requests),
+                },
+                worker_ids=("email",),
+                process_ids=(provider.pid,),
+                provider_request_ids=(str(requests[0]["provider_request_id"]),),
+            )
+            record_renewal_case(
+                case_id="domain-event.atomic-correlation",
+                scenario_id="success",
+                application=application,
+                database_url=database_url,
+                workflow_id=command.input.workflow_id,
+                document={
+                    "event_id": completed_event["event_id"],
+                    "event_type": completed_event["event_type"],
+                    "instance_state": snapshot.state,
+                    "source_command_id": completed_event["cause"]["identifier"],
+                },
+                additional_command_ids=(UUID(completed_event["cause"]["identifier"]),),
+                domain_event_ids=(UUID(completed_event["event_id"]),),
+            )
 
 
 def test_definite_non_application_retries_the_same_effect_identity_then_completes(
@@ -154,6 +184,24 @@ def test_definite_non_application_retries_the_same_effect_identity_then_complete
                 "definite_not_applied",
                 "success",
             ]
+            record_renewal_case(
+                case_id="retry.finite-policy",
+                scenario_id="safe-retry-schedule",
+                application=application,
+                database_url=database_url,
+                workflow_id=command.input.workflow_id,
+                document={
+                    "provider_behaviors": [request["behavior"] for request in requests],
+                    "same_idempotency_key": requests[0]["idempotency_key"]
+                    == requests[1]["idempotency_key"],
+                    "instance_state": completed.state,
+                },
+                worker_ids=("email",),
+                process_ids=(provider.pid,),
+                provider_request_ids=tuple(
+                    str(request["provider_request_id"]) for request in requests
+                ),
+            )
 
 
 def test_definite_non_application_exhaustion_fails_without_uncertain_reconciliation(
@@ -194,6 +242,57 @@ def test_definite_non_application_exhaustion_fails_without_uncertain_reconciliat
             assert snapshot.steps[-1].state == "failed"
             assert all(step.template_key != "reconcile_renewal_email" for step in snapshot.steps)
             assert len(provider.requests()) == 3
+            evidence = json.loads(application.renewal_evidence_json(command.input.workflow_id))
+            failure_events = tuple(
+                item
+                for item in evidence["outcomes"]["domain_events"]
+                if item["event_type"] == "external_effect.not_applied"
+            )
+            assert len(failure_events) == 3
+            assert all(item["cause"]["kind"] == "command" for item in failure_events)
+            record_renewal_case(
+                case_id="retry.finite-policy",
+                scenario_id="exhausted-budget",
+                application=application,
+                database_url=database_url,
+                workflow_id=command.input.workflow_id,
+                document={
+                    "attempt_count": len(provider.requests()),
+                    "terminal_step_state": snapshot.steps[-1].state,
+                    "reconciliation_materialized": False,
+                },
+                worker_ids=("email",),
+                process_ids=(provider.pid,),
+            )
+            record_renewal_case(
+                case_id="domain-event.atomic-correlation",
+                scenario_id="failure",
+                application=application,
+                database_url=database_url,
+                workflow_id=command.input.workflow_id,
+                document={
+                    "terminal_step_state": snapshot.steps[-1].state,
+                    "event_ids": [item["event_id"] for item in failure_events],
+                    "event_types": [item["event_type"] for item in failure_events],
+                    "source_command_ids": [item["cause"]["identifier"] for item in failure_events],
+                },
+                additional_command_ids=tuple(
+                    UUID(item["cause"]["identifier"]) for item in failure_events
+                ),
+                domain_event_ids=tuple(UUID(item["event_id"]) for item in failure_events),
+            )
+            record_renewal_case(
+                case_id="external-effect.fenced-uncertainty",
+                scenario_id="provider-failure",
+                application=application,
+                database_url=database_url,
+                workflow_id=command.input.workflow_id,
+                document={
+                    "provider_attempts": len(provider.requests()),
+                    "terminal_step_state": snapshot.steps[-1].state,
+                },
+                process_ids=(provider.pid,),
+            )
 
 
 def test_reconciliation_cannot_reopen_an_exhausted_effect_attempt_budget(tmp_path) -> None:
@@ -312,6 +411,33 @@ def test_response_loss_defers_email_retry_until_fresh_provider_reconciliation(
             assert reconciled.template_key == "reconcile_renewal_email"
             assert completed.state == "closed"
             assert len(provider.requests()) == 1
+            requests = provider.requests()
+            record_renewal_case(
+                case_id="external-effect.fenced-uncertainty",
+                scenario_id="response-loss",
+                application=application,
+                database_url=database_url,
+                workflow_id=command.input.workflow_id,
+                document={
+                    "requests_before_reconciliation": len(requests_before_reconciliation),
+                    "requests_after_reconciliation": len(requests),
+                    "provider_restarted": provider.pid != previous_provider_pid,
+                },
+                process_ids=(previous_provider_pid, provider.pid),
+                provider_request_ids=(str(requests[0]["provider_request_id"]),),
+            )
+            record_renewal_case(
+                case_id="external-effect.fenced-uncertainty",
+                scenario_id="reconciliation",
+                application=application,
+                database_url=database_url,
+                workflow_id=command.input.workflow_id,
+                document={
+                    "instance_state": completed.state,
+                    "redispatch_count": len(requests) - 1,
+                },
+                process_ids=(previous_provider_pid, provider.pid),
+            )
     finally:
         provider.stop()
 
@@ -366,7 +492,7 @@ def test_email_provider_client_dispatches_typed_permit_without_database(tmp_path
             effect=effect,
         )
 
-        observation = EmailProviderClient(provider_url=provider.url).execute(
+        observation = EmailProviderClient(provider_url=provider.url).dispatch(
             permit,
             CancellationToken(),
         )
@@ -433,7 +559,7 @@ def test_provider_executor_rejects_mismatched_permit_bound_input(tmp_path) -> No
                 AuthorizedEmailEffectExecutor(
                     database_url=database_url,
                     client=EmailProviderClient(provider_url=provider.url),
-                ).execute(
+                ).run(
                     replace(execution, input={**execution.input, **mismatch}),
                     CancellationToken(),
                 )
@@ -473,7 +599,7 @@ def test_dispatch_and_provider_evidence_commands_return_exact_replay_receipts(tm
         observation = AuthorizedEmailEffectExecutor(
             database_url=database_url,
             client=EmailProviderClient(provider_url=provider.url),
-        ).execute(
+        ).run(
             AttemptExecution(
                 instance_id=attempt.instance_id,
                 step_id=attempt.step_id,

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from openmagic_runtime.kernel.records import StepState
+from openmagic_runtime.kernel.inspection import StepState
 
 from example_insurance.renewal_effect_policy import EffectCertainty
 

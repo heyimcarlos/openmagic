@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
+from queue import Queue
 from uuid import uuid4
 
 import psycopg
@@ -17,7 +19,7 @@ from openmagic_evals.harness import (
     renewal_context,
 )
 from openmagic_runtime.commands import Cause
-from openmagic_runtime.delivery import DeliveryWork
+from openmagic_runtime.delivery import DeliveryWork, StaleDeliveryAuthority
 from openmagic_runtime.kernel.inspection import KernelInspection
 
 
@@ -150,6 +152,71 @@ def test_verification_delivery_retry_recovers_through_fresh_attempt() -> None:
         assert acknowledged.thread_id == scenario.identifier_thread_id
         assert evidence_after_recovery == evidence_before
         assert accepted.result.verification_outcome == "verified"
+
+
+def test_delivery_acknowledgement_and_failure_share_one_lock_order() -> None:
+    with renewal_context(verification_code_secret=b"issue-71-delivery-lock-order") as (
+        database_url,
+        application,
+        threads,
+    ):
+        issue_verification_challenge(application, threads, deliver=False)
+        claim = application.claim_delivery_attempt(
+            worker_id="delivery-lock-order-worker",
+            claim_request_id=uuid4(),
+        )
+        assert claim is not None
+        failure_pids: Queue[int] = Queue()
+
+        def fail() -> str:
+            with psycopg.connect(database_url) as connection, connection.transaction():
+                failure_pids.put(connection.info.backend_pid)
+                try:
+                    DeliveryWork(connection).report_failure(
+                        claim,
+                        worker_id="delivery-lock-order-worker",
+                        failure_class="policy_rejected",
+                    )
+                except StaleDeliveryAuthority:
+                    return "stale"
+            return "failed"
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            with (
+                psycopg.connect(database_url) as acknowledgement_connection,
+                acknowledgement_connection.transaction(),
+            ):
+                locked = acknowledgement_connection.execute(
+                    "SELECT delivery_id FROM openmagic_runtime.deliveries "
+                    "WHERE delivery_id = %s FOR UPDATE",
+                    (claim.delivery_id,),
+                ).fetchone()
+                assert locked is not None
+                failure = executor.submit(fail)
+                failure_pid = failure_pids.get(timeout=5)
+                acknowledgement_pid = acknowledgement_connection.info.backend_pid
+                with psycopg.connect(database_url, autocommit=True) as observer:
+                    deadline = time.monotonic() + 5
+                    blocked_by_acknowledgement = False
+                    while time.monotonic() < deadline:
+                        blocked = observer.execute(
+                            "SELECT %s = ANY(pg_blocking_pids(%s))",
+                            (acknowledgement_pid, failure_pid),
+                        ).fetchone()
+                        blocked_by_acknowledgement = blocked is not None and bool(blocked[0])
+                        if blocked_by_acknowledgement:
+                            break
+                        time.sleep(0.01)
+                assert blocked_by_acknowledgement
+                acknowledgement = DeliveryWork(acknowledgement_connection).acknowledge(
+                    claim,
+                    worker_id="delivery-lock-order-worker",
+                    proposed_thread_id=claim.thread_id,
+                )
+            failure_outcome = failure.result(timeout=10)
+
+        assert acknowledgement.delivery_attempt_id == claim.delivery_attempt_id
+        assert failure_outcome == "stale"
 
 
 def test_public_observation_submission_uses_the_verification_attempt_route() -> None:

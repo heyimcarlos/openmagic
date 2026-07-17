@@ -21,6 +21,9 @@ from example_insurance.renewals import (
     SubmitVerificationCodeResult,
 )
 from example_insurance.verification_codes import VerificationCodes
+from openmagic_evals.evidence.case_recording import record_case_observation
+from openmagic_evals.evidence.contracts import Correlations
+from openmagic_evals.evidence.inspection import EvidenceInspection
 from openmagic_evals.harness import (
     VerificationScenario,
     issue_verification_challenge,
@@ -258,7 +261,7 @@ def test_terminal_policy_receipts_preserve_every_named_rejection(
 
 def test_verification_code_is_single_use_replay_safe_and_serialized() -> None:
     with renewal_context(verification_code_secret=b"issue-70-code-race-secret") as (
-        _,
+        database_url,
         application,
         threads,
     ):
@@ -339,6 +342,44 @@ def test_verification_code_is_single_use_replay_safe_and_serialized() -> None:
         )
         assert (
             application.submit_verification_code(commands[winner_index]) == receipts[winner_index]
+        )
+        verification = EvidenceInspection(database_url).verification_demo(
+            required.result.challenge_id
+        )
+        assert verification is not None
+        record_case_observation(
+            case_id="replay.public-identities",
+            scenario_id="exact-replay-and-conflict",
+            correlations=Correlations(
+                runtime={
+                    "command_ids": (protected.command_id, commands[winner_index].command_id),
+                    "workflow_ids": (renewal.input.workflow_id, verification.workflow_id),
+                    "instance_ids": (verification.instance_id,),
+                    "instance_definitions": (
+                        {
+                            "instance_id": verification.instance_id,
+                            "definition_key": "example_insurance.verification_delivery",
+                            "definition_version": 1,
+                        },
+                    ),
+                    "step_ids": tuple(step_id for step_id, _ in verification.step_attempt_ids),
+                    "attempt_ids": tuple(
+                        attempt_id for _, attempt_id in verification.step_attempt_ids
+                    ),
+                },
+                application={
+                    "thread_ids": (renewal.input.thread_id,),
+                    "verification_challenge_ids": (required.result.challenge_id,),
+                    "verification_session_ids": (verification.session_id,),
+                },
+            ),
+            document={
+                "conflicting_reuse_rejected": True,
+                "competing_outcomes": sorted(
+                    receipt.result.verification_outcome for receipt in receipts
+                ),
+                "winner_replayed_value_identically": True,
+            },
         )
 
 

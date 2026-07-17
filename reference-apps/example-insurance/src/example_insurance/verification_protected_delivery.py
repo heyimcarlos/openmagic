@@ -10,9 +10,9 @@ from openmagic_runtime.commands import Actor, Cause
 from openmagic_runtime.delivery import DeliveryControl
 from psycopg import Connection
 
-from example_insurance.renewal_records import record_event
-from example_insurance.renewal_workflow_records import protected_renewal_details
-from example_insurance.verification_challenge_records import (
+from example_insurance._persistence.renewal_records import record_event
+from example_insurance._persistence.renewal_workflow_records import protected_renewal_details
+from example_insurance._persistence.verification_challenge_records import (
     record_authorized_command,
     resolve_protected_command,
 )

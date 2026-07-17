@@ -3,110 +3,48 @@ from __future__ import annotations
 import random
 import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from threading import Barrier
 from uuid import uuid4
 
 import psycopg
+import pytest
 from example_insurance.migrations import apply_migrations
+from openmagic_evals.evidence.case_recording import record_case_observation
+from openmagic_evals.evidence.contracts import Correlations
+from openmagic_evals.evidence.race_definitions import SIGNAL_RELEASE_DEFINITION
 from openmagic_evals.harness._postgres import postgres_container
-from openmagic_runtime.kernel.control import KernelControl, StartInstance, start_instance
-from openmagic_runtime.kernel.definitions import (
-    DefinitionCatalog,
-    DefinitionIdentity,
-    FieldBinding,
-    FieldContract,
-    RetryPolicy,
-    Route,
-    RouteOutput,
-    StepTemplate,
-    WaitTemplate,
-    WorkflowDefinition,
+from openmagic_runtime.kernel.control import (
+    AcceptSignal,
+    CloseInstance,
+    KernelControl,
+    SignalConflict,
+    SignalConflictReason,
+    SignalReceipt,
+    StartInstance,
+    start_instance,
 )
+from openmagic_runtime.kernel.definitions import DefinitionCatalog
 from openmagic_runtime.kernel.inspection import KernelInspection
-from openmagic_runtime.kernel.transitions import AcceptSignal, CloseInstance
-
-
-def signal_race_definition() -> WorkflowDefinition:
-    subject = (FieldContract("subject_id", "uuid"),)
-    return WorkflowDefinition(
-        identity=DefinitionIdentity("eval.signal_race", 1),
-        instance_input_contract=subject,
-        step_templates=(
-            StepTemplate(
-                key="winner",
-                executor_key="eval.signal_winner.v1",
-                input_contract=subject,
-                observation_contract=(FieldContract("result", "string"),),
-                output_contract=(FieldContract("result", "string"),),
-                lease_seconds=1,
-                maximum_attempt_seconds=2,
-                retry_policy=RetryPolicy(()),
-            ),
-        ),
-        wait_templates=(
-            WaitTemplate(
-                key="decision",
-                signal_type="eval.signal.decision",
-                input_contract=subject,
-            ),
-        ),
-        routes=(
-            Route(
-                key="start",
-                activation="start",
-                activation_contract=subject,
-                outputs=(
-                    RouteOutput(
-                        slot="decision",
-                        kind="wait",
-                        template_key="decision",
-                        input_bindings=(FieldBinding("subject_id", "subject_id"),),
-                    ),
-                ),
-            ),
-            Route(
-                key="approve",
-                activation="signal",
-                activation_contract=subject,
-                outputs=(
-                    RouteOutput(
-                        slot="approved",
-                        kind="step",
-                        template_key="winner",
-                        input_bindings=(FieldBinding("subject_id", "subject_id"),),
-                    ),
-                ),
-            ),
-            Route(
-                key="revise",
-                activation="signal",
-                activation_contract=subject,
-                outputs=(
-                    RouteOutput(
-                        slot="revision",
-                        kind="step",
-                        template_key="winner",
-                        input_bindings=(FieldBinding("subject_id", "subject_id"),),
-                    ),
-                ),
-            ),
-        ),
-    )
 
 
 def test_competing_signals_have_one_winner_in_100_seeded_real_transaction_races() -> None:
     with postgres_container(database_name=f"openmagic_test_{uuid4().hex}") as postgres:
         database_url = postgres.get_connection_url(driver=None)
         apply_migrations(database_url)
-        DefinitionCatalog(database_url=database_url).register(signal_race_definition())
+        DefinitionCatalog(database_url=database_url).register(SIGNAL_RELEASE_DEFINITION)
+        instance_ids = []
+        step_ids = []
+        wait_ids = []
+        signal_ids = []
         for seed in range(100):
             subject_id = uuid4()
             started = start_instance(
                 database_url=database_url,
                 request=StartInstance(
                     command_id=uuid4(),
-                    definition_key="eval.signal_race",
-                    definition_version=1,
+                    definition_key=SIGNAL_RELEASE_DEFINITION.identity.key,
+                    definition_version=SIGNAL_RELEASE_DEFINITION.identity.version,
                     instance_input={"subject_id": str(subject_id)},
                     route_input={"subject_id": str(subject_id)},
                 ),
@@ -151,7 +89,7 @@ def test_competing_signals_have_one_winner_in_100_seeded_real_transaction_races(
                 try:
                     with psycopg.connect(database_url) as connection, connection.transaction():
                         return KernelControl(connection).accept_signal(request)
-                except RuntimeError as error:
+                except SignalConflict as error:
                     return error
 
             with ThreadPoolExecutor(max_workers=2) as executor:
@@ -161,24 +99,57 @@ def test_competing_signals_have_one_winner_in_100_seeded_real_transaction_races(
                 outcomes = tuple(future.result() for future in futures)
             snapshot = KernelInspection(database_url=database_url).snapshot(started.instance_id)
 
-            assert sum(not isinstance(outcome, RuntimeError) for outcome in outcomes) == 1, seed
-            assert sum(isinstance(outcome, RuntimeError) for outcome in outcomes) == 1, seed
+            conflicts = tuple(
+                outcome for outcome in outcomes if isinstance(outcome, SignalConflict)
+            )
+            assert len(conflicts) == 1, seed
+            assert conflicts[0].reason is SignalConflictReason.WAIT_ALREADY_SATISFIED, seed
             assert len(snapshot.steps) == 1, seed
             assert snapshot.waits[0].state == "satisfied", seed
+            winner = next(outcome for outcome in outcomes if isinstance(outcome, SignalReceipt))
+            instance_ids.append(started.instance_id)
+            step_ids.append(snapshot.steps[0].step_id)
+            wait_ids.append(wait_id)
+            signal_ids.append(winner.signal_id)
+        record_case_observation(
+            case_id="signal.competing",
+            scenario_id="100-seed-competing-signals",
+            correlations=Correlations(
+                runtime={
+                    "instance_ids": tuple(instance_ids),
+                    "instance_definitions": tuple(
+                        {
+                            "instance_id": instance_id,
+                            "definition_key": SIGNAL_RELEASE_DEFINITION.identity.key,
+                            "definition_version": SIGNAL_RELEASE_DEFINITION.identity.version,
+                        }
+                        for instance_id in instance_ids
+                    ),
+                    "step_ids": tuple(step_ids),
+                    "wait_ids": tuple(wait_ids),
+                    "signal_ids": tuple(signal_ids),
+                }
+            ),
+            document={
+                "seeds": list(range(100)),
+                "winner_count": len(signal_ids),
+                "accepted_signals_per_wait": 1,
+            },
+        )
 
 
 def test_concurrent_exact_signal_and_closure_replays_return_one_receipt() -> None:
     with postgres_container(database_name=f"openmagic_test_{uuid4().hex}") as postgres:
         database_url = postgres.get_connection_url(driver=None)
         apply_migrations(database_url)
-        DefinitionCatalog(database_url=database_url).register(signal_race_definition())
+        DefinitionCatalog(database_url=database_url).register(SIGNAL_RELEASE_DEFINITION)
         subject_id = uuid4()
         started = start_instance(
             database_url=database_url,
             request=StartInstance(
                 command_id=uuid4(),
-                definition_key="eval.signal_race",
-                definition_version=1,
+                definition_key=SIGNAL_RELEASE_DEFINITION.identity.key,
+                definition_version=SIGNAL_RELEASE_DEFINITION.identity.version,
                 instance_input={"subject_id": str(subject_id)},
                 route_input={"subject_id": str(subject_id)},
             ),
@@ -201,6 +172,14 @@ def test_concurrent_exact_signal_and_closure_replays_return_one_receipt() -> Non
             signal_futures = tuple(executor.submit(accept) for _ in range(2))
             signal_receipts = tuple(future.result() for future in signal_futures)
         assert signal_receipts[0] == signal_receipts[1]
+
+        with (
+            psycopg.connect(database_url) as connection,
+            connection.transaction(),
+            pytest.raises(SignalConflict) as conflict,
+        ):
+            KernelControl(connection).accept_signal(replace(signal, route_key="revise"))
+        assert conflict.value.reason is SignalConflictReason.IDENTITY_REUSED
 
         closure = CloseInstance(uuid4(), started.instance_id)
 

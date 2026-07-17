@@ -22,7 +22,13 @@ from example_insurance.renewals import (
     StartRenewalOutreachInput,
     StartRenewalOutreachResult,
 )
-from openmagic_evals.harness import TestDeployment
+from openmagic_evals.evidence.case_recording import (
+    record_case_observation,
+    record_renewal_case,
+)
+from openmagic_evals.evidence.contracts import Correlations
+from openmagic_evals.evidence.inspection import EvidenceInspection
+from openmagic_evals.harness import PlaygroundDeployment
 from openmagic_evals.harness._postgres import postgres_container
 from openmagic_runtime.agents import (
     AgentAudience,
@@ -81,6 +87,7 @@ from openmagic_runtime.kernel.work import (
     renew_once,
 )
 from openmagic_runtime.threads import AppendMessage, CreateThread, ThreadContext, ThreadStore
+from psycopg import sql
 
 
 @dataclass(frozen=True)
@@ -513,10 +520,22 @@ def test_start_command_commits_and_replays_value_identically() -> None:
         ]
         assert snapshot.waits == ()
         assert isinstance(first.result.instance_id, UUID)
+        record_renewal_case(
+            case_id="transaction.command-atomicity",
+            scenario_id="after-commit-response-loss",
+            application=application,
+            database_url=database_url,
+            workflow_id=command.input.workflow_id,
+            document={
+                "receipt_replayed_value_identically": replay == first,
+                "conflicting_reuse_rejected": True,
+            },
+        )
 
 
 def test_command_validation_rejects_nested_types_and_semantics_before_commit() -> None:
     with _renewal_postgres_context() as context:
+        database_url = context.database_url
         application = context.application
         threads = context.threads
         thread = threads.create(CreateThread(uuid4(), "email", "broker-command-validation"))
@@ -549,9 +568,81 @@ def test_command_validation_rejects_nested_types_and_semantics_before_commit() -
             application.start_renewal_outreach(invalid_type)
         with pytest.raises(InvalidCommand):
             application.start_renewal_outreach(invalid_semantics)
+        assert EvidenceInspection(database_url).command_receipts(command_id) == 0
+        record_case_observation(
+            case_id="transaction.command-atomicity",
+            scenario_id="before-commit-validation",
+            correlations=Correlations(),
+            document={
+                "invalid_type_receipts": 0,
+                "invalid_semantics_receipts": 0,
+            },
+        )
         receipt = _start_prepared(application, corrected)
 
         assert receipt.command_id == command_id
+
+
+def test_command_handler_fault_rolls_back_application_kernel_event_and_receipt() -> None:
+    with _renewal_postgres_context() as context:
+        application = context.application
+        thread = context.threads.create(
+            CreateThread(uuid4(), "email", "broker-command-handler-fault")
+        )
+        command = _renewal_command(
+            thread_id=thread.thread_id,
+            policy_number="OM-HANDLER-ROLLBACK",
+            policyholder_name="Handler Rollback",
+            renewal_date="2027-02-28",
+            expiring_premium_cents=101_000,
+        )
+        _record_command_facts(application, command)
+        with psycopg.connect(context.database_url) as connection, connection.transaction():
+            connection.execute(
+                "CREATE FUNCTION openmagic_runtime.eval_fail_instance_insert() "
+                "RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN "
+                "RAISE EXCEPTION 'synthetic instance fault'; END $$"
+            )
+            connection.execute(
+                "CREATE TRIGGER eval_fail_instance_insert BEFORE INSERT ON "
+                "openmagic_runtime.instances FOR EACH ROW EXECUTE FUNCTION "
+                "openmagic_runtime.eval_fail_instance_insert()"
+            )
+
+        with pytest.raises(psycopg.errors.RaiseException, match="synthetic instance fault"):
+            application.start_renewal_outreach(command)
+        rolled_back = EvidenceInspection(context.database_url).transaction_state(
+            command.command_id,
+            command.input.workflow_id,
+        )
+        with psycopg.connect(context.database_url) as connection, connection.transaction():
+            connection.execute(
+                "DROP TRIGGER eval_fail_instance_insert ON openmagic_runtime.instances"
+            )
+            connection.execute("DROP FUNCTION openmagic_runtime.eval_fail_instance_insert()")
+        receipt = application.start_renewal_outreach(command)
+        committed = EvidenceInspection(context.database_url).transaction_state(
+            command.command_id,
+            command.input.workflow_id,
+        )
+
+        assert rolled_back == type(rolled_back)(0, 0, 0, 0, 0, 0)
+        assert committed.command_receipts == 1
+        assert committed.workflows == 1
+        assert committed.instances == 1
+        assert committed.domain_events == 0
+        record_renewal_case(
+            case_id="transaction.command-atomicity",
+            scenario_id="during-handler-rollback",
+            application=application,
+            database_url=context.database_url,
+            workflow_id=command.input.workflow_id,
+            document={
+                "rolled_back": rolled_back.__dict__,
+                "committed": committed.__dict__,
+                "instance_id": str(receipt.result.instance_id),
+            },
+        )
 
 
 def test_exact_attempt_result_replay_does_not_repeat_route_effects() -> None:
@@ -639,7 +730,7 @@ def test_exact_attempt_result_replay_does_not_repeat_route_effects() -> None:
             )
 
 
-def test_workflow_worker_uses_one_executor_seam_for_facts_and_agent_draft() -> None:
+def test_workflow_worker_does_not_echo_untrusted_thread_context_into_agent_draft() -> None:
     with _renewal_postgres_context() as context:
         database_url = context.database_url
         application = context.application
@@ -706,7 +797,7 @@ def test_workflow_worker_uses_one_executor_seam_for_facts_and_agent_draft() -> N
         assert second_attempt.agent_run_id is not None
         assert second_attempt.agent_runtime_generation == 1
         assert agent_evidence is not None
-        assert "preferred formal greeting" in str(agent_evidence[0])
+        assert "preferred formal greeting" not in str(agent_evidence[0])
         assert agent_evidence[1]["configuration"] == {
             "agent_key": "example_insurance.renewal_draft",
             "agent_version": 1,
@@ -817,6 +908,116 @@ def test_start_route_replay_returns_the_same_complete_occurrence_batch() -> None
         assert len(first.steps) == 1
         assert first.waits == {}
         assert snapshot.observed_through_sequence == 1
+        trace_event_ids, _ = EvidenceInspection(database_url).renewal_demo_ids(first.instance_id)
+        record_case_observation(
+            case_id="route.finite-materialization",
+            scenario_id="complete-batch-replay",
+            correlations=Correlations(
+                runtime={
+                    "command_ids": (command_id,),
+                    "instance_ids": (first.instance_id,),
+                    "instance_definitions": (
+                        {
+                            "instance_id": first.instance_id,
+                            "definition_key": "example_insurance.renewal_outreach",
+                            "definition_version": 2,
+                        },
+                    ),
+                    "step_ids": tuple(step.step_id for step in snapshot.steps),
+                    "trace_event_ids": trace_event_ids,
+                }
+            ),
+            document={
+                "replayed_value_identically": replay == first,
+                "materialized_steps": len(first.steps),
+                "materialized_waits": len(first.waits),
+            },
+        )
+
+
+@pytest.mark.parametrize(
+    ("table", "scenario_id"),
+    [
+        ("steps", "step-boundary-rollback"),
+        ("trace_events", "trace-boundary-rollback"),
+    ],
+)
+def test_start_route_fault_rolls_back_the_whole_occurrence_batch(
+    table: str,
+    scenario_id: str,
+) -> None:
+    with _renewal_postgres_context() as context:
+        command_id = uuid4()
+        workflow_id = uuid4()
+        request = StartInstance(
+            command_id=command_id,
+            definition_key="example_insurance.renewal_outreach",
+            definition_version=2,
+            instance_input={
+                "workflow_id": str(workflow_id),
+                "thread_id": str(uuid4()),
+                "policy_id": str(uuid4()),
+            },
+            route_input={
+                "policy_id": str(uuid4()),
+                "policy_number": "OM-ROUTE-FAULT",
+                "policyholder_name": "Route Fault",
+                "policyholder_email": "route-fault@example.test",
+                "renewal_date": "2027-06-30",
+                "expiring_premium_cents": 100_000,
+            },
+        )
+        function_name = f"eval_fail_{table}_insert"
+        with psycopg.connect(context.database_url) as connection, connection.transaction():
+            connection.execute(
+                sql.SQL(
+                    "CREATE FUNCTION openmagic_runtime.{}() RETURNS trigger "
+                    "LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION "
+                    "'synthetic route fault'; END $$"
+                ).format(sql.Identifier(function_name))
+            )
+            connection.execute(
+                sql.SQL(
+                    "CREATE TRIGGER eval_route_fault BEFORE INSERT ON "
+                    "openmagic_runtime.{} FOR EACH ROW EXECUTE FUNCTION "
+                    "openmagic_runtime.{}()"
+                ).format(
+                    sql.Identifier(table),
+                    sql.Identifier(function_name),
+                )
+            )
+        with pytest.raises(psycopg.errors.RaiseException, match="synthetic route fault"):
+            start_instance(database_url=context.database_url, request=request)
+        state = EvidenceInspection(context.database_url).transaction_state(
+            command_id,
+            workflow_id,
+        )
+        with psycopg.connect(context.database_url) as connection, connection.transaction():
+            connection.execute(
+                sql.SQL("DROP TRIGGER eval_route_fault ON openmagic_runtime.{}").format(
+                    sql.Identifier(table)
+                )
+            )
+            connection.execute(
+                sql.SQL("DROP FUNCTION openmagic_runtime.{}()").format(
+                    sql.Identifier(function_name)
+                )
+            )
+
+        assert state.instances == 0
+        assert state.steps == 0
+        assert state.trace_events == 0
+        record_case_observation(
+            case_id="route.finite-materialization",
+            scenario_id=scenario_id,
+            correlations=Correlations(),
+            document={
+                "fault_table": table,
+                "instances": state.instances,
+                "steps": state.steps,
+                "trace_events": state.trace_events,
+            },
+        )
 
 
 def test_competing_command_and_step_claims_preserve_cardinality_one() -> None:
@@ -940,6 +1141,29 @@ def test_stale_workflow_result_and_wrong_thread_delivery_proposal_are_rejected()
 
         assert acknowledgement.thread_id == intended.thread_id
         assert threads.read(wrong.thread_id).messages == ()
+        record_renewal_case(
+            case_id="delivery.exact-thread",
+            scenario_id="crash-before-append",
+            application=application,
+            database_url=database_url,
+            workflow_id=command.input.workflow_id,
+            document={
+                "expired_attempt_rejected": True,
+                "replacement_thread_id": str(acknowledgement.thread_id),
+            },
+            worker_ids=("delivery-worker", "replacement-delivery-worker"),
+        )
+        record_renewal_case(
+            case_id="delivery.exact-thread",
+            scenario_id="wrong-thread",
+            application=application,
+            database_url=database_url,
+            workflow_id=command.input.workflow_id,
+            document={
+                "wrong_thread_rejected": True,
+                "wrong_thread_message_count": len(threads.read(wrong.thread_id).messages),
+            },
+        )
 
 
 def test_one_domain_event_can_create_multiple_exact_destination_delivery_obligations() -> None:
@@ -1098,6 +1322,8 @@ def test_delivery_appends_once_to_only_the_frozen_exact_thread() -> None:
         )
         intended_thread = threads.read(intended.thread_id)
         other_thread = threads.read(other.thread_id)
+        start_replay = application.start_renewal_outreach(command)
+        evidence = json.loads(application.renewal_evidence_json(command.input.workflow_id))
 
         assert replay == acknowledgement
         assert acknowledgement.thread_id == intended.thread_id
@@ -1107,10 +1333,46 @@ def test_delivery_appends_once_to_only_the_frozen_exact_thread() -> None:
         assert "OM-8192" in intended_thread.messages[0].content
         assert "forged" not in intended_thread.messages[0].content
         assert other_thread.messages == ()
+        assert len(evidence["correlations"]["delivery_ids"]) == 1
+        record_renewal_case(
+            case_id="delivery.exact-thread",
+            scenario_id="duplicate-creation",
+            application=application,
+            database_url=context.database_url,
+            workflow_id=command.input.workflow_id,
+            document={
+                "start_replay_command_id": str(start_replay.command_id),
+                "delivery_count": len(evidence["correlations"]["delivery_ids"]),
+            },
+        )
+        record_renewal_case(
+            case_id="delivery.exact-thread",
+            scenario_id="competing-claim",
+            application=application,
+            database_url=context.database_url,
+            workflow_id=command.input.workflow_id,
+            document={
+                "claim_winners": len(winners),
+                "exact_thread": acknowledgement.thread_id == intended.thread_id,
+                "other_thread_messages": len(other_thread.messages),
+            },
+            worker_ids=("delivery-a", "delivery-b"),
+        )
+        record_renewal_case(
+            case_id="acknowledgement.atomic-append",
+            scenario_id="atomic-append",
+            application=application,
+            database_url=context.database_url,
+            workflow_id=command.input.workflow_id,
+            document={
+                "acknowledgement_replayed": replay == acknowledgement,
+                "message_count": len(intended_thread.messages),
+            },
+        )
 
 
 def test_fresh_worker_processes_recover_the_complete_sanitized_evidence_chain(tmp_path) -> None:
-    with TestDeployment(working_directory=tmp_path) as deployment:
+    with PlaygroundDeployment(working_directory=tmp_path) as deployment:
         deployment.terminate_role("workflow-worker")
         deployment.terminate_role("delivery-worker")
         context = _prepared_renewal_context(deployment.database_url)
@@ -1170,7 +1432,7 @@ def test_fresh_worker_processes_recover_the_complete_sanitized_evidence_chain(tm
 
 
 def test_process_loss_after_claim_is_recovered_and_fenced_by_a_fresh_process(tmp_path) -> None:
-    with TestDeployment(working_directory=tmp_path) as deployment:
+    with PlaygroundDeployment(working_directory=tmp_path) as deployment:
         deployment.terminate_role("workflow-worker")
         deployment.terminate_role("delivery-worker")
         context = _prepared_renewal_context(deployment.database_url)
@@ -1204,12 +1466,25 @@ def test_process_loss_after_claim_is_recovered_and_fenced_by_a_fresh_process(tmp
         assert evidence["outcomes"]["attempt_states"].count("completed") == 2
         assert len(evidence["correlations"]["attempt_ids"]) == 3
         assert evidence["invariant_violations"] == []
+        record_renewal_case(
+            case_id="recovery.fresh-process",
+            scenario_id="after-claim-loss",
+            application=application,
+            database_url=deployment.database_url,
+            workflow_id=command.input.workflow_id,
+            document={
+                "lost_process_id": lost_process.pid,
+                "recovery_process_id": recovery_process.pid,
+                "attempt_states": evidence["outcomes"]["attempt_states"],
+            },
+            process_ids=(lost_process.pid, recovery_process.pid),
+        )
 
 
 def test_agent_process_loss_terminalizes_run_and_retries_without_phantom_authority(
     tmp_path,
 ) -> None:
-    with TestDeployment(working_directory=tmp_path) as deployment:
+    with PlaygroundDeployment(working_directory=tmp_path) as deployment:
         deployment.terminate_role("workflow-worker")
         deployment.terminate_role("delivery-worker")
         context = _prepared_renewal_context(deployment.database_url)
@@ -1270,10 +1545,36 @@ def test_agent_process_loss_terminalizes_run_and_retries_without_phantom_authori
         assert evidence["outcomes"]["agent_run_states"] == ["abandoned", "completed"]
         assert "running" not in evidence["outcomes"]["agent_run_states"]
         assert len(evidence["correlations"]["agent_run_ids"]) == 2
+        record_renewal_case(
+            case_id="executor.typed-malformed-timeout",
+            scenario_id="late",
+            application=application,
+            database_url=deployment.database_url,
+            workflow_id=command.input.workflow_id,
+            document={
+                "lost_process_id": lost_process.pid,
+                "recovery_process_id": recovery_process.pid,
+                "agent_run_states": evidence["outcomes"]["agent_run_states"],
+            },
+            process_ids=(lost_process.pid, recovery_process.pid),
+        )
+        record_renewal_case(
+            case_id="recovery.fresh-process",
+            scenario_id="after-executor-before-commit",
+            application=application,
+            database_url=deployment.database_url,
+            workflow_id=command.input.workflow_id,
+            document={
+                "lost_process_id": lost_process.pid,
+                "recovery_process_id": recovery_process.pid,
+                "agent_run_states": evidence["outcomes"]["agent_run_states"],
+            },
+            process_ids=(lost_process.pid, recovery_process.pid),
+        )
 
 
 def test_delivery_process_loss_after_claim_recovers_without_duplicate_message(tmp_path) -> None:
-    with TestDeployment(working_directory=tmp_path) as deployment:
+    with PlaygroundDeployment(working_directory=tmp_path) as deployment:
         deployment.terminate_role("workflow-worker")
         deployment.terminate_role("delivery-worker")
         context = _prepared_renewal_context(deployment.database_url)
@@ -1323,6 +1624,31 @@ def test_delivery_process_loss_after_claim_recovers_without_duplicate_message(tm
         assert recovery_process.pid != lost_process.pid
         assert evidence["outcomes"]["delivery_attempt_states"] == [["abandoned", "succeeded"]]
         assert len(threads.read(thread.thread_id).messages) == 1
+        record_renewal_case(
+            case_id="delivery.exact-thread",
+            scenario_id="crash-after-append",
+            application=application,
+            database_url=deployment.database_url,
+            workflow_id=command.input.workflow_id,
+            document={
+                "lost_process_id": lost_process.pid,
+                "recovery_process_id": recovery_process.pid,
+                "message_count": len(threads.read(thread.thread_id).messages),
+            },
+            process_ids=(lost_process.pid, recovery_process.pid),
+        )
+        record_renewal_case(
+            case_id="acknowledgement.atomic-append",
+            scenario_id="post-append-loss-recovery",
+            application=application,
+            database_url=deployment.database_url,
+            workflow_id=command.input.workflow_id,
+            document={
+                "attempt_states": evidence["outcomes"]["delivery_attempt_states"],
+                "message_count": len(threads.read(thread.thread_id).messages),
+            },
+            process_ids=(lost_process.pid, recovery_process.pid),
+        )
         assert evidence["invariant_violations"] == []
 
 

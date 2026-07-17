@@ -13,21 +13,21 @@ from openmagic_runtime.kernel.control import KernelControl
 from openmagic_runtime.kernel.work import ClaimedAttempt, DispositionRequired
 from psycopg import Connection
 
-from example_insurance.renewal_attempt_records import (
+from example_insurance._persistence.renewal_attempt_records import (
     accept_renewal_attempt_result,
     recover_expired_renewal_attempt,
 )
-from example_insurance.renewal_commands import WorkflowAttemptResult
-from example_insurance.renewal_effect_control import RenewalEffectControl
-from example_insurance.renewal_effect_types import RenewalEmailEffect
-from example_insurance.renewal_policies import RenewalDeliveryPolicy, RenewalWorkflowPolicy
-from example_insurance.renewal_records import CommandEventLineage, record_event
-from example_insurance.renewal_workflow_records import (
+from example_insurance._persistence.renewal_records import CommandEventLineage, record_event
+from example_insurance._persistence.renewal_workflow_records import (
     activation_receipt,
     bind_draft_ready_event,
     load_draft_for_step,
     record_draft,
 )
+from example_insurance.renewal_commands import WorkflowAttemptResult
+from example_insurance.renewal_effect_control import RenewalEffectControl
+from example_insurance.renewal_effect_types import RenewalEmailEffect
+from example_insurance.renewal_policies import RenewalDeliveryPolicy, RenewalWorkflowPolicy
 
 EffectTemplate = Literal["send_renewal_email", "reconcile_renewal_email"]
 

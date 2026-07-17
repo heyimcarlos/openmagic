@@ -18,7 +18,8 @@ from openmagic_runtime.execution import (
     CancellationToken,
 )
 
-from example_insurance.renewal_command_records import load_committed_dispatch_permit
+from example_insurance._persistence.renewal_command_records import load_committed_dispatch_permit
+from example_insurance._persistence.transaction_modes import set_read_only
 from example_insurance.renewal_effect_types import ExternalEffectPermit, logical_effect_id
 
 
@@ -76,7 +77,7 @@ class EmailProviderClient:
         self._provider_url = provider_url.rstrip("/")
         self._timeout_seconds = timeout_seconds
 
-    def execute(
+    def dispatch(
         self, permit: ExternalEffectPermit, cancellation: CancellationToken
     ) -> AttemptObservation:
         if cancellation.cancelled:
@@ -119,19 +120,19 @@ class AuthorizedEmailEffectExecutor:
         self._database_url = database_url
         self._client = client
 
-    def execute(
+    def run(
         self, execution: AttemptExecution, cancellation: CancellationToken
     ) -> AttemptObservation:
         command_id, result_digest = _permit_reference(execution)
         with psycopg.connect(self._database_url) as connection, connection.transaction():
-            connection.execute("SET TRANSACTION READ ONLY")
+            set_read_only(connection)
             permit = load_committed_dispatch_permit(
                 connection,
                 command_id=command_id,
                 result_digest=result_digest,
             )
         _validate_permit(execution, permit)
-        return self._client.execute(permit, cancellation)
+        return self._client.dispatch(permit, cancellation)
 
 
 class EmailReconciliationExecutor:
@@ -139,7 +140,7 @@ class EmailReconciliationExecutor:
         self._provider_url = provider_url.rstrip("/")
         self._timeout_seconds = timeout_seconds
 
-    def execute(
+    def run(
         self, execution: AttemptExecution, cancellation: CancellationToken
     ) -> AttemptObservation:
         if cancellation.cancelled:

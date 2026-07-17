@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -19,6 +18,7 @@ from example_insurance.renewals import (
     StartRenewalOutreach,
     StartRenewalOutreachInput,
 )
+from openmagic_playground.renewal_observation import decode_renewal_projection
 from openmagic_runtime.commands import Actor, Cause
 from openmagic_runtime.threads import CreateThread, ThreadStore
 
@@ -44,6 +44,43 @@ def renewal_context(
         )
         application.prepare()
         yield database_url, application, ThreadStore(database_url=database_url)
+
+
+def prepare_synthetic_renewal_start(
+    application: ExampleInsurance,
+    threads: ThreadStore,
+    seed: int,
+) -> StartRenewalOutreach:
+    """Prepare one synthetic renewal start without submitting it."""
+    thread = threads.create(
+        CreateThread(uuid4(), "email", f"synthetic-renewal-{seed}@example.test")
+    )
+    command = StartRenewalOutreach(
+        command_id=uuid4(),
+        actor=Actor("party", str(uuid4())),
+        cause=Cause("message", str(uuid4())),
+        input=StartRenewalOutreachInput(
+            workflow_id=uuid4(),
+            thread_id=thread.thread_id,
+            policy_id=uuid4(),
+            policy_number=f"OM-SYNTHETIC-{seed}",
+            policyholder_name=f"Synthetic Party {seed}",
+            policyholder_email=f"synthetic-party-{seed}@example.test",
+            renewal_date="2028-12-31",
+            expiring_premium_cents=100_000 + seed,
+        ),
+    )
+    application.replace_renewal_facts(
+        RenewalFacts(
+            policy_id=command.input.policy_id,
+            policy_number=command.input.policy_number,
+            policyholder_name=command.input.policyholder_name,
+            policyholder_email=command.input.policyholder_email,
+            renewal_date=command.input.renewal_date,
+            expiring_premium_cents=command.input.expiring_premium_cents,
+        )
+    )
+    return command
 
 
 def prepare_renewal_approval(
@@ -129,9 +166,9 @@ def wait_for_renewal_completion(
     """Wait for the deployed workers to complete a renewal Workflow."""
     deadline = time.monotonic() + 20
     while time.monotonic() < deadline:
-        evidence = json.loads(application.renewal_evidence_json(workflow_id))
-        if evidence["outcomes"]["workflow_lifecycle"] == "completed":
-            return evidence
+        projection = decode_renewal_projection(application.renewal_evidence_json(workflow_id))
+        if projection.outcomes.workflow_lifecycle == "completed":
+            return projection.model_dump(mode="json")
         time.sleep(0.02)
     raise AssertionError("Renewal Workflow did not complete")
 
@@ -155,6 +192,7 @@ def wait_for_database_fault_window(database_url: str, query_prefix: str) -> None
 __all__ = [
     "approve_renewal",
     "prepare_renewal_approval",
+    "prepare_synthetic_renewal_start",
     "renewal_context",
     "wait_for_database_fault_window",
     "wait_for_renewal_completion",

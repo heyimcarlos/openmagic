@@ -8,7 +8,7 @@ from uuid import UUID
 
 from openmagic_runtime.delivery import DeliveryStatus
 from openmagic_runtime.evidence import content_fingerprint
-from openmagic_runtime.kernel.records import WaitState
+from openmagic_runtime.kernel.inspection import WaitState
 
 from example_insurance.renewal_effect_types import RenewalEmailEffect
 from example_insurance.renewal_lifecycle_policy import WorkflowLifecycle
@@ -152,6 +152,15 @@ class ApprovalDecisionFacts:
     durable: DurableApprovalPresentation
 
 
+@dataclass(frozen=True)
+class ApprovalDecisionAuthority:
+    lifecycle: WorkflowLifecycle
+    authorized_actor_kind: str
+    authorized_actor_id: str
+    authority_revoked: bool
+    durable: DurableApprovalPresentation
+
+
 ApprovalRejectionOutcome = Literal[
     "authority_revoked",
     "stale_presentation",
@@ -197,6 +206,7 @@ class RenewalApprovalPolicy:
 __all__ = [
     "ApprovalAcceptedDecision",
     "ApprovalDecision",
+    "ApprovalDecisionAuthority",
     "ApprovalDecisionFacts",
     "ApprovalDecisionKind",
     "ApprovalPresentationIdentity",

@@ -74,23 +74,31 @@ def _apply_bundle(
 def apply_migrations(database_url: str) -> tuple[AppliedMigrationBundle, ...]:
     """Apply the installed runtime baseline before the application baseline."""
 
+    with psycopg.connect(database_url) as connection, connection.transaction():
+        return apply_migrations_on(connection)
+
+
+def apply_migrations_on(
+    connection: Connection[tuple[object, ...]],
+) -> tuple[AppliedMigrationBundle, ...]:
+    """Apply both owned bundles inside the caller-owned transaction."""
+
     discovered = {entry.name: entry for entry in entry_points(group="openmagic.migrations")}
     missing = tuple(name for name in _EXPECTED_BUNDLES if name not in discovered)
     if missing:
         raise RuntimeError(f"required migration bundles are not installed: {', '.join(missing)}")
 
     results: list[AppliedMigrationBundle] = []
-    with psycopg.connect(database_url) as connection, connection.transaction():
-        for name in _EXPECTED_BUNDLES:
-            factory = discovered[name].load()
-            bundle: _MigrationBundle = factory()
-            results.append(
-                AppliedMigrationBundle(
-                    owner=bundle.owner,
-                    schema=bundle.schema,
-                    versions=_apply_bundle(connection, bundle),
-                )
+    for name in _EXPECTED_BUNDLES:
+        factory = discovered[name].load()
+        bundle: _MigrationBundle = factory()
+        results.append(
+            AppliedMigrationBundle(
+                owner=bundle.owner,
+                schema=bundle.schema,
+                versions=_apply_bundle(connection, bundle),
             )
+        )
     return tuple(results)
 
 
@@ -103,4 +111,4 @@ def main() -> None:
         print(f"{result.owner}: {result.schema} ({versions})")
 
 
-__all__ = ["AppliedMigrationBundle", "apply_migrations", "main"]
+__all__ = ["AppliedMigrationBundle", "apply_migrations", "apply_migrations_on", "main"]

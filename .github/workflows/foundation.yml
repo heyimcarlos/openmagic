@@ -1,4 +1,4 @@
-name: Runtime foundation
+name: Runtime reference baseline
 
 on:
   pull_request:
@@ -16,7 +16,7 @@ concurrency:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
         with:
@@ -28,5 +28,7 @@ jobs:
       - run: uv sync --all-packages --locked --group dev
       - run: uv run ruff format --check .
       - run: uv run ruff check .
-      - run: uv run ty check packages/openmagic-runtime/src reference-apps/example-insurance/src apps/api/src evals/src
+      - run: uv run ty check packages/openmagic-runtime/src reference-apps/example-insurance/src apps/api/src evals/src apps/playground/src
+      - run: uv run ty check packages/openmagic-runtime/tests reference-apps/example-insurance/tests apps/playground/tests evals/tests
       - run: uv run pytest
+      - run: uv run pytest evals/tests/test_foundation_wheels.py

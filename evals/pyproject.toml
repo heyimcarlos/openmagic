@@ -6,12 +6,15 @@ requires-python = ">=3.11,<3.15"
 dependencies = [
     "example-insurance==0.1.0",
     "openmagic-api==0.1.0",
+    "openmagic-playground==0.1.0",
     "openmagic-runtime==0.1.0",
+    "pydantic>=2.12.0,<3.0.0",
     "psycopg[binary]>=3.3.0,<4.0.0",
     "testcontainers[postgres]>=4.10.0,<5.0.0",
 ]
 
 [project.scripts]
+openmagic-evidence = "openmagic_evals.evidence.__main__:main"
 openmagic-local-email-provider = "openmagic_evals.harness.email_provider:main"
 
 [build-system]

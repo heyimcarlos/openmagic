@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import os
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from multiprocessing import get_context
 from threading import Event, Thread
 from time import monotonic
-from typing import Any, Generic, Protocol, TypeVar
+from typing import Any, Generic, Literal, Protocol, TypeVar
 from uuid import UUID
 
 from openmagic_runtime.agents import AgentExecutionInput
+from openmagic_runtime.processes import OwnedProcess
 
 
 @dataclass(frozen=True)
@@ -46,8 +49,26 @@ class ExecutionAuthorityLost(RuntimeError):
     """Raised when execution is cancelled because its durable authority ended."""
 
 
+AgentExecutionFailureReason = Literal[
+    "cancelled",
+    "missing_input",
+    "bounded_timeout",
+    "missing_result",
+    "child_process_failure",
+    "malformed_result",
+]
+
+
+class AgentExecutionFailure(RuntimeError):
+    """A typed failure at the fresh Agent process boundary."""
+
+    def __init__(self, reason: AgentExecutionFailureReason, message: str) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
 class Executor(Protocol):
-    def execute(
+    def run(
         self, execution: AttemptExecution, cancellation: CancellationToken
     ) -> AttemptObservation: ...
 
@@ -95,7 +116,7 @@ def execute_with_renewable_authority(
     maintainer.start()
     try:
         try:
-            result = executor.execute(execution, cancellation)
+            result = executor.run(execution, cancellation)
         except BaseException:
             if authority_failure:
                 raise ExecutionAuthorityLost("Attempt execution lost durable authority") from (
@@ -119,7 +140,7 @@ class DeterministicExecutor:
     def __init__(self, operation: Callable[[dict[str, Any]], dict[str, Any]]) -> None:
         self._operation = operation
 
-    def execute(
+    def run(
         self, execution: AttemptExecution, cancellation: CancellationToken
     ) -> AttemptObservation:
         if cancellation.cancelled:
@@ -133,17 +154,97 @@ class DeterministicExecutor:
 CandidateT = TypeVar("CandidateT")
 
 
+@dataclass(frozen=True)
+class _AgentSessionReady:
+    process_id: int
+
+
 def _run_agent_child(
     factory: Callable[[], Callable[[AgentExecutionInput], Any]],
     input_value: AgentExecutionInput,
     sender: Any,
 ) -> None:
     try:
+        os.setsid()
+        sender.send(_AgentSessionReady(process_id=os.getpid()))
         sender.send(("result", factory()(input_value)))
+    except AgentExecutionFailure as error:
+        sender.send(("failure", error.reason, str(error)))
     except BaseException as error:
-        sender.send(("error", type(error).__name__, str(error)))
+        sender.send(
+            (
+                "failure",
+                "child_process_failure",
+                f"Agent execution failed: {type(error).__name__}: {error}",
+            )
+        )
     finally:
         sender.close()
+
+
+def _observe_agent_session(receiver: Any, process_id: int, timeout: float) -> None:
+    if not receiver.poll(timeout):
+        raise AgentExecutionFailure(
+            "child_process_failure",
+            "Agent child did not establish its owned process session",
+        )
+    try:
+        message = receiver.recv()
+    except EOFError as error:
+        raise AgentExecutionFailure(
+            "child_process_failure",
+            "Agent child ended before establishing its owned process session",
+        ) from error
+    if type(message) is not _AgentSessionReady or message.process_id != process_id:
+        raise AgentExecutionFailure(
+            "malformed_result",
+            "Agent child sent an invalid process-session handshake",
+        )
+
+
+@contextmanager
+def _agent_process_scope(
+    process: Any,
+    receiver: Any,
+    sender: Any,
+    *,
+    startup_timeout: float,
+) -> Iterator[None]:
+    owner: OwnedProcess | None = None
+    try:
+        process.start()
+        process_id = process.pid
+        if not isinstance(process_id, int):
+            raise AgentExecutionFailure(
+                "child_process_failure",
+                "Started Agent child did not expose its process identity",
+            )
+        _observe_agent_session(receiver, process_id, startup_timeout)
+        owner = OwnedProcess.multiprocessing(process, resources=(sender, receiver))
+        sender.close()
+        yield
+    except BaseException as execution_error:
+        cleanup_errors = (
+            owner.reap(timeout_seconds=1).errors
+            if owner is not None
+            else OwnedProcess.cleanup_multiprocessing_start(
+                process,
+                resources=(sender, receiver),
+                timeout_seconds=1,
+            ).errors
+        )
+        if cleanup_errors:
+            raise BaseExceptionGroup(
+                "Agent execution and cleanup failed",
+                [execution_error, *cleanup_errors],
+            ) from execution_error
+        raise
+    else:
+        if owner is None:
+            raise AssertionError("started Agent process did not establish ownership")
+        cleanup_errors = owner.reap(timeout_seconds=1).errors
+        if cleanup_errors:
+            raise BaseExceptionGroup("Agent process cleanup failed", list(cleanup_errors))
 
 
 class FreshAgentExecutor(Generic[CandidateT]):
@@ -162,13 +263,15 @@ class FreshAgentExecutor(Generic[CandidateT]):
         self._encoder = encoder
         self._timeout_seconds = timeout_seconds
 
-    def execute(
+    def run(
         self, execution: AttemptExecution, cancellation: CancellationToken
     ) -> AttemptObservation:
         if cancellation.cancelled:
-            raise RuntimeError("Attempt execution was cancelled")
+            raise AgentExecutionFailure("cancelled", "Attempt execution was cancelled")
         if execution.agent_input is None:
-            raise RuntimeError("Agent execution requires its durable typed Run Input")
+            raise AgentExecutionFailure(
+                "missing_input", "Agent execution requires its durable typed Run Input"
+            )
         context = get_context("spawn")
         receiver, sender = context.Pipe(duplex=False)
         process = context.Process(
@@ -176,40 +279,46 @@ class FreshAgentExecutor(Generic[CandidateT]):
             args=(self._factory, execution.agent_input, sender),
             name="openmagic-agent-attempt",
         )
-        process.start()
-        sender.close()
         deadline = monotonic() + self._timeout_seconds
-        try:
+        with _agent_process_scope(
+            process,
+            receiver,
+            sender,
+            startup_timeout=self._timeout_seconds,
+        ):
             while process.is_alive() and monotonic() < deadline and not cancellation.cancelled:
                 process.join(timeout=0.01)
             if process.is_alive():
-                process.terminate()
-                process.join(timeout=1)
-                if process.is_alive():
-                    process.kill()
-                    process.join(timeout=1)
                 if cancellation.cancelled:
-                    raise RuntimeError("Attempt execution was cancelled")
-                raise RuntimeError("Agent execution exceeded its bounded timeout")
+                    raise AgentExecutionFailure("cancelled", "Attempt execution was cancelled")
+                raise AgentExecutionFailure(
+                    "bounded_timeout", "Agent execution exceeded its bounded timeout"
+                )
             if not receiver.poll():
-                raise RuntimeError("Agent process ended without a candidate")
-            message = receiver.recv()
-            if message[0] == "error":
-                raise RuntimeError(f"Agent execution failed: {message[1]}: {message[2]}")
+                raise AgentExecutionFailure(
+                    "missing_result", "Agent process ended without a candidate"
+                )
+            try:
+                message = receiver.recv()
+            except EOFError as error:
+                raise AgentExecutionFailure(
+                    "missing_result", "Agent process ended without a candidate"
+                ) from error
+            if message[0] == "failure":
+                raise AgentExecutionFailure(message[1], message[2])
             result = message[1]
-        finally:
-            receiver.close()
-            if process.is_alive():
-                process.kill()
-                process.join(timeout=1)
         if cancellation.cancelled:
-            raise RuntimeError("Attempt execution was cancelled")
+            raise AgentExecutionFailure("cancelled", "Attempt execution was cancelled")
         if type(result) is not self._result_class:
-            raise RuntimeError("Agent returned a candidate outside its typed contract")
+            raise AgentExecutionFailure(
+                "malformed_result", "Agent returned a candidate outside its typed contract"
+            )
         return AttemptObservation(value=self._encoder(result))
 
 
 __all__ = [
+    "AgentExecutionFailure",
+    "AgentExecutionFailureReason",
     "AttemptExecution",
     "AttemptObservation",
     "CancellationToken",

@@ -5,13 +5,12 @@ from __future__ import annotations
 from typing import Any
 from uuid import UUID
 
-from openmagic_runtime.kernel.records import lock_instance
+from openmagic_runtime.kernel.inspection import KernelTransactionInspection
 from psycopg import Connection
 
-from example_insurance.renewal_workflow_records import lock_instance_for_workflow
-from example_insurance.verification_authority_records import lock_authority
-from example_insurance.verification_challenge_lifecycle import VerificationChallengeLifecycle
-from example_insurance.verification_challenge_records import (
+from example_insurance._persistence.renewal_workflow_records import lock_instance_for_workflow
+from example_insurance._persistence.verification_authority_records import lock_authority
+from example_insurance._persistence.verification_challenge_records import (
     DurableChallenge,
     DurableProtectedCommand,
     challenge_is_expired,
@@ -21,6 +20,7 @@ from example_insurance.verification_challenge_records import (
     record_failed_code,
     resolve_terminal_challenge,
 )
+from example_insurance.verification_challenge_lifecycle import VerificationChallengeLifecycle
 from example_insurance.verification_codes import VerificationCodes
 from example_insurance.verification_commands import (
     ProtectedOutcome,
@@ -65,7 +65,11 @@ class VerificationSubmissionControl:
         value = command.input
         code_matches = self._codes.accepts(value.challenge_id, value.code)
         identity = read_challenge_identity(connection, value.challenge_id)
-        if identity is None or lock_instance(connection, identity.delivery_instance_id) is None:
+        if (
+            identity is None
+            or KernelTransactionInspection(connection).lock_instance(identity.delivery_instance_id)
+            is None
+        ):
             return self._result(command, "invalid_code")
         if lock_instance_for_workflow(connection, identity.protected_workflow_id) is None:
             return self._reject_closed_workflow(command, connection)
@@ -129,6 +133,7 @@ class VerificationSubmissionControl:
             )
         session_id = establish_session(
             connection,
+            submit_command_id=command.command_id,
             challenge=challenge,
             session_ttl_seconds=self._session_ttl_seconds,
         )

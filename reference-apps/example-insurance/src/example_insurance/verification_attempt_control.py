@@ -7,29 +7,30 @@ from uuid import UUID, uuid5
 
 from openmagic_runtime.commands import Actor, Cause
 from openmagic_runtime.delivery import DeliveryControl
-from openmagic_runtime.kernel.control import KernelControl
-from openmagic_runtime.kernel.transitions import CloseInstance
+from openmagic_runtime.kernel.control import CloseInstance, KernelControl
 from openmagic_runtime.kernel.work import ClaimedAttempt, DispositionRequired, KernelWork
 from psycopg import Connection
 
-from example_insurance.renewal_commands import WorkflowAttemptResult
-from example_insurance.verification_authority_records import lock_identifier_destination
-from example_insurance.verification_challenge_records import (
+from example_insurance._persistence.verification_authority_records import (
+    lock_identifier_destination,
+)
+from example_insurance._persistence.verification_challenge_records import (
     challenge_is_expired,
     lock_challenge,
     resolve_terminal_challenge,
 )
-from example_insurance.verification_codes import VerificationCodes
-from example_insurance.verification_policy import (
-    VERIFICATION_ATTEMPT_RETRY_POLICY,
-    VERIFICATION_DELIVERY_RETRY_POLICY,
-)
-from example_insurance.verification_workflow_records import (
+from example_insurance._persistence.verification_workflow_records import (
     complete_verification_workflow,
     expired_verification_instances,
     fail_verification_workflow,
     lock_verification_attempt,
     record_verification_event,
+)
+from example_insurance.renewal_commands import WorkflowAttemptResult
+from example_insurance.verification_codes import VerificationCodes
+from example_insurance.verification_policy import (
+    VERIFICATION_ATTEMPT_RETRY_POLICY,
+    VERIFICATION_DELIVERY_RETRY_POLICY,
 )
 
 _CLOSURE_NAMESPACE = UUID("64d018be-17fb-4970-9c1c-9e00d4fa504d")

@@ -5,10 +5,16 @@ from __future__ import annotations
 from typing import Any
 
 from openmagic_runtime.commands import StateConflict
-from openmagic_runtime.kernel.control import KernelControl
-from openmagic_runtime.kernel.transitions import CloseInstance
+from openmagic_runtime.kernel.control import CloseInstance, KernelControl
 from psycopg import Connection
 
+from example_insurance._persistence.renewal_lifecycle_records import (
+    cancel_workflow,
+    lock_lifecycle_authority,
+    lock_revocation_authority,
+    revoke_authority,
+)
+from example_insurance._persistence.renewal_records import CommandEventLineage, record_event
 from example_insurance.renewal_commands import (
     CancelRenewalOutreach,
     CancelRenewalOutreachResult,
@@ -19,13 +25,6 @@ from example_insurance.renewal_lifecycle_policy import (
     CancellationFacts,
     RenewalLifecyclePolicy,
 )
-from example_insurance.renewal_lifecycle_records import (
-    cancel_workflow,
-    lock_lifecycle_authority,
-    lock_revocation_authority,
-    revoke_authority,
-)
-from example_insurance.renewal_records import CommandEventLineage, record_event
 
 
 class RenewalLifecycleControl:

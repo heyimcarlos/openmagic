@@ -1,0 +1,8 @@
+{
+  "corpus_blob": "3f0368360d14229aa22f3cd610bc940a278f1e3e",
+  "corpus_digest": "sha256:b42591dfc877ead3ecad5eae5a6e94b3475910d3e3d7e85d61c335edde5f0f3e",
+  "corpus_introduced_at_commit": "3fcc8f97d1ad6ab7dc54a30371b21ec40815f394",
+  "corpus_version": "issue-71.agent-heldout.v11",
+  "locked_source_digest": "sha256:c11d3e36c415e954647eefb0900cc9f93cfc09853b0cf4b61725b085acc4c767",
+  "runner_frozen_at_commit": "7108b7d2d6acf89ae50889d33e57fc4e3a66f152"
+}

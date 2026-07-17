@@ -42,6 +42,16 @@ from openmagic_runtime.kernel.work import (
 from openmagic_runtime.threads import ThreadAccess, ThreadStore
 from psycopg import Connection
 
+from example_insurance._persistence.renewal_fact_records import RenewalFactRecords
+from example_insurance._persistence.renewal_records import CommandEventLineage
+from example_insurance._persistence.renewal_workflow_records import (
+    record_workflow,
+    workflow_exists,
+)
+from example_insurance._persistence.transaction_modes import set_repeatable_read_only
+from example_insurance._persistence.verification_workflow_records import (
+    has_active_verification_workflows,
+)
 from example_insurance.application_registry import application_command_dispatcher
 from example_insurance.renewal_attempt_control import RenewalAttemptControl
 from example_insurance.renewal_commands import (
@@ -83,17 +93,12 @@ from example_insurance.renewal_effects import (
     committed_permit_execution_input,
 )
 from example_insurance.renewal_evidence import RenewalEvidenceProjector
-from example_insurance.renewal_facts import RenewalFacts, RenewalFactSource
+from example_insurance.renewal_facts import RenewalFacts
 from example_insurance.renewal_lifecycle import RenewalLifecycleControl
-from example_insurance.renewal_records import CommandEventLineage
 from example_insurance.renewal_registry import (
     RenewalCommandHandlers,
 )
 from example_insurance.renewal_review_control import RenewalReviewControl
-from example_insurance.renewal_workflow_records import (
-    record_workflow,
-    workflow_exists,
-)
 from example_insurance.verification_attempt_control import VerificationAttemptControl
 from example_insurance.verification_codes import VerificationCodes
 from example_insurance.verification_commands import (
@@ -114,9 +119,6 @@ from example_insurance.verification_commands import (
 from example_insurance.verification_control import VerificationControl
 from example_insurance.verification_definition import VERIFICATION_DEFINITION
 from example_insurance.verification_registry import VerificationCommandHandlers
-from example_insurance.verification_workflow_records import (
-    has_active_verification_workflows,
-)
 from example_insurance.workflow_attempt_dispatch import (
     AttemptHandler,
     AttemptObservationDispatcher,
@@ -166,9 +168,6 @@ def _draft_agent_factory() -> Callable[[AgentExecutionInput], RenewalDraftCandid
         ):
             raise ValueError("Persisted Agent task input is unsupported")
         premium = int(value.value("expiring_premium_cents")) / 100
-        context_note = ""
-        if execution.thread_context.messages:
-            context_note = " Prior Thread context: " + execution.thread_context.messages[-1].content
         revision_note = ""
         if value.value("revision_instruction"):
             revision_note = f" Requested revision: {value.value('revision_instruction')}"
@@ -178,7 +177,7 @@ def _draft_agent_factory() -> Callable[[AgentExecutionInput], RenewalDraftCandid
                 f"Hello {value.value('policyholder_name')}, your policy renews on "
                 f"{value.value('renewal_date')}. The expiring premium is CAD {premium:,.2f}. "
                 f"Please review this draft before any renewal email is sent."
-                f"{revision_note}{context_note}"
+                f"{revision_note}"
             ),
         )
 
@@ -233,7 +232,7 @@ class ExampleInsurance:
                 submit=self._handle_verification_submission,
             ),
         )
-        self._renewal_facts = RenewalFactSource(database_url=database_url)
+        self._renewal_facts = RenewalFactRecords(database_url=database_url)
         executors: dict[str, Executor] = {
             "example_insurance.renewal_facts.v1": DeterministicExecutor(self._renewal_facts.gather),
             "example_insurance.renewal_draft_agent.v1": FreshAgentExecutor(
@@ -316,16 +315,29 @@ class ExampleInsurance:
     def start_renewal_outreach(
         self, command: StartRenewalOutreach
     ) -> CommandReceipt[StartRenewalOutreachResult]:
-        return self._dispatcher.execute(
+        with psycopg.connect(self._database_url) as connection, connection.transaction():
+            return self.start_renewal_outreach_on(connection, command)
+
+    def start_renewal_outreach_on(
+        self,
+        connection: Connection[tuple[Any, ...]],
+        command: StartRenewalOutreach,
+        *,
+        prepare_first_execution: Callable[[Connection[tuple[Any, ...]]], None] | None = None,
+    ) -> CommandReceipt[StartRenewalOutreachResult]:
+        """Start a renewal in the caller-owned PostgreSQL transaction."""
+        return self._dispatcher.execute_on(
+            connection,
             command_type="renewal.start_outreach",
             schema_version=1,
             command=command,
+            prepare_first_execution=prepare_first_execution,
         )
 
     def provision_verification_authority(
         self, command: ProvisionVerificationAuthority
     ) -> CommandReceipt[ProvisionVerificationAuthorityResult]:
-        return self._dispatcher.execute(
+        return self._dispatcher.dispatch(
             command_type="verification.provision_authority",
             schema_version=1,
             command=command,
@@ -334,7 +346,7 @@ class ExampleInsurance:
     def request_protected_renewal_details(
         self, command: RequestProtectedRenewalDetails
     ) -> CommandReceipt[RequestProtectedRenewalDetailsResult]:
-        return self._dispatcher.execute(
+        return self._dispatcher.dispatch(
             command_type="renewal.read_approved_details",
             schema_version=1,
             command=command,
@@ -343,7 +355,7 @@ class ExampleInsurance:
     def revoke_verification_authority(
         self, command: RevokeVerificationAuthority
     ) -> CommandReceipt[RevokeVerificationAuthorityResult]:
-        return self._dispatcher.execute(
+        return self._dispatcher.dispatch(
             command_type="verification.revoke_authority",
             schema_version=1,
             command=command,
@@ -352,7 +364,7 @@ class ExampleInsurance:
     def submit_verification_code(
         self, command: SubmitVerificationCode
     ) -> CommandReceipt[SubmitVerificationCodeResult]:
-        return self._dispatcher.execute(
+        return self._dispatcher.dispatch(
             command_type="verification.submit_code",
             schema_version=1,
             command=command,
@@ -360,13 +372,13 @@ class ExampleInsurance:
 
     def renewal_approval_presentation(self, workflow_id: UUID) -> RenewalApprovalPresentation:
         with psycopg.connect(self._database_url) as connection, connection.transaction():
-            connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            set_repeatable_read_only(connection)
             return self._review_control.presentation(connection, workflow_id)
 
     def approve_renewal_draft(
         self, command: ApproveRenewalDraft
     ) -> CommandReceipt[ApproveRenewalDraftResult]:
-        return self._dispatcher.execute(
+        return self._dispatcher.dispatch(
             command_type="renewal.approve_draft",
             schema_version=1,
             command=command,
@@ -375,7 +387,7 @@ class ExampleInsurance:
     def request_renewal_revision(
         self, command: RequestRenewalRevision
     ) -> CommandReceipt[RequestRenewalRevisionResult]:
-        return self._dispatcher.execute(
+        return self._dispatcher.dispatch(
             command_type="renewal.request_revision",
             schema_version=1,
             command=command,
@@ -384,7 +396,7 @@ class ExampleInsurance:
     def revoke_renewal_authority(
         self, command: RevokeRenewalAuthority
     ) -> CommandReceipt[RevokeRenewalAuthorityResult]:
-        return self._dispatcher.execute(
+        return self._dispatcher.dispatch(
             command_type="renewal.revoke_approval_authority",
             schema_version=1,
             command=command,
@@ -393,7 +405,7 @@ class ExampleInsurance:
     def cancel_renewal_outreach(
         self, command: CancelRenewalOutreach
     ) -> CommandReceipt[CancelRenewalOutreachResult]:
-        return self._dispatcher.execute(
+        return self._dispatcher.dispatch(
             command_type="renewal.cancel_outreach",
             schema_version=1,
             command=command,
@@ -402,7 +414,7 @@ class ExampleInsurance:
     def authorize_email_dispatch(
         self, *, attempt: ClaimedAttempt, worker_id: str
     ) -> CommandReceipt[ExternalEffectPermit]:
-        return self._dispatcher.execute(
+        return self._dispatcher.dispatch(
             command_type="renewal.authorize_email_dispatch",
             schema_version=1,
             command=AuthorizeRenewalEmailDispatch(
@@ -417,7 +429,7 @@ class ExampleInsurance:
         self,
         command: AcceptRenewalEffectObservation,
     ) -> CommandReceipt[WorkflowAttemptResult]:
-        return self._dispatcher.execute(
+        return self._dispatcher.dispatch(
             command_type="renewal.accept_effect_observation",
             schema_version=1,
             command=command,
