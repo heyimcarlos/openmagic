@@ -31,7 +31,7 @@ ResultT_co = TypeVar("ResultT_co", covariant=True)
 class RaceRequest(Protocol[ResultT_co]):
     """One typed operation whose result decoder guards the process boundary."""
 
-    def execute(self, database_url: str) -> ResultT_co: ...
+    def perform(self, database_url: str) -> ResultT_co: ...
 
     def decode_result(self, value: object) -> ResultT_co: ...
 
@@ -75,7 +75,7 @@ class StartRenewalOutreachRace:
         if type(self.command) is not StartRenewalOutreach:
             raise RaceProtocolError("renewal race requires a StartRenewalOutreach command")
 
-    def execute(self, database_url: str) -> CommandReceipt[StartRenewalOutreachResult]:
+    def perform(self, database_url: str) -> CommandReceipt[StartRenewalOutreachResult]:
         self.validate()
         return ExampleInsurance(database_url=database_url).start_renewal_outreach(self.command)
 
@@ -94,7 +94,7 @@ class StepClaimRace:
         _require_worker(self.worker_id)
         _require_uuid(self.claim_request_id, "Step claim request ID")
 
-    def execute(self, database_url: str) -> ClaimedAttempt | None:
+    def perform(self, database_url: str) -> ClaimedAttempt | None:
         self.validate()
         return ExampleInsurance(database_url=database_url).claim_workflow_attempt(
             worker_id=self.worker_id,
@@ -116,7 +116,7 @@ class DeliveryClaimRace:
         _require_worker(self.worker_id)
         _require_uuid(self.claim_request_id, "Delivery claim request ID")
 
-    def execute(self, database_url: str) -> ClaimedDelivery | None:
+    def perform(self, database_url: str) -> ClaimedDelivery | None:
         self.validate()
         return ExampleInsurance(database_url=database_url).claim_delivery_attempt(
             worker_id=self.worker_id,
@@ -140,7 +140,7 @@ class VerificationSubmissionRace:
         if not isinstance(self.secret, bytes) or not self.secret:
             raise RaceProtocolError("verification race requires a non-empty secret")
 
-    def execute(self, database_url: str) -> CommandReceipt[SubmitVerificationCodeResult]:
+    def perform(self, database_url: str) -> CommandReceipt[SubmitVerificationCodeResult]:
         self.validate()
         return ExampleInsurance(
             database_url=database_url,
@@ -161,7 +161,7 @@ class AcceptSignalRace:
         if type(self.request) is not AcceptSignal:
             raise RaceProtocolError("Signal race requires an AcceptSignal request")
 
-    def execute(self, database_url: str) -> SignalReceipt:
+    def perform(self, database_url: str) -> SignalReceipt:
         self.validate()
         with psycopg.connect(database_url) as connection, connection.transaction():
             return KernelControl(connection).accept_signal(self.request)
@@ -184,7 +184,7 @@ class AttemptResultRace:
         _require_worker(self.worker_id)
         _require_observation(self.observation)
 
-    def execute(self, database_url: str) -> DispositionRequired:
+    def perform(self, database_url: str) -> DispositionRequired:
         self.validate()
         with psycopg.connect(database_url) as connection, connection.transaction():
             return KernelWork(connection).accept_result(
@@ -218,7 +218,7 @@ class RouteActivationRace:
         _require_worker(self.worker_id)
         _require_observation(self.observation)
 
-    def execute(self, database_url: str) -> RouteActivationRaceResult:
+    def perform(self, database_url: str) -> RouteActivationRaceResult:
         self.validate()
         with psycopg.connect(database_url) as connection, connection.transaction():
             required = KernelWork(connection).accept_result(

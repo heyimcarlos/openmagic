@@ -58,7 +58,7 @@ def _outcomes(snapshot: RenewalEvidenceSnapshot) -> dict[str, Any]:
         "attempt_states": [attempt.state for attempt in runtime.attempts],
         "agent_run_states": [run.state for run in runtime.agent_runs],
         "delivery_attempt_states": [
-            list(delivery.attempt_states) for delivery in snapshot.deliveries
+            [attempt.state for attempt in delivery.attempts] for delivery in snapshot.deliveries
         ],
         "approval_wait_id": str(approval_wait.wait_id) if approval_wait is not None else None,
         "approval_wait_state": approval_wait.state if approval_wait is not None else None,
@@ -136,15 +136,23 @@ class RenewalEvidenceProjector:
     def to_json(self, workflow_id: UUID) -> str:
         with psycopg.connect(self._database_url) as connection, connection.transaction():
             set_repeatable_read_only(connection)
-            snapshot = load_renewal_evidence_snapshot(connection, workflow_id)
-        return EvidenceRecord(
-            schema_version="openmagic.evidence.v1",
-            scenario="renewal_drafting",
-            correlations=_correlations(snapshot),
-            outcomes=_outcomes(snapshot),
-            invariant_violations=(),
-            redacted=True,
-        ).to_json()
+            return read_renewal_evidence(connection, workflow_id).to_json()
 
 
-__all__ = ["RenewalEvidenceProjector"]
+def read_renewal_evidence(
+    connection: psycopg.Connection[tuple[Any, ...]], workflow_id: UUID
+) -> EvidenceRecord:
+    """Project one renewal through a caller-owned evidence snapshot."""
+
+    snapshot = load_renewal_evidence_snapshot(connection, workflow_id)
+    return EvidenceRecord(
+        schema_version="openmagic.evidence.v1",
+        scenario="renewal_drafting",
+        correlations=_correlations(snapshot),
+        outcomes=_outcomes(snapshot),
+        invariant_violations=(),
+        redacted=True,
+    )
+
+
+__all__ = ["RenewalEvidenceProjector", "read_renewal_evidence"]

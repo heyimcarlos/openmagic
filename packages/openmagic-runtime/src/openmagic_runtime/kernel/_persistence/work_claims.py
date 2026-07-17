@@ -12,6 +12,14 @@ from psycopg import Connection
 from psycopg.rows import dict_row
 
 from openmagic_runtime._canonical import canonical_digest
+from openmagic_runtime._persistence.durable_values import (
+    mapping_value,
+    nonempty_string,
+    nonnegative_integer_value,
+    positive_integer_value,
+    uuid_text_value,
+    uuid_value,
+)
 from openmagic_runtime.kernel._persistence.trace import append_trace, read_trace_replay
 from openmagic_runtime.kernel._persistence.work_authority import step_template
 from openmagic_runtime.kernel._work_contracts import ClaimedAttempt, ClaimWork
@@ -19,30 +27,30 @@ from openmagic_runtime.kernel.definitions import StepTemplate
 
 
 @dataclass(frozen=True)
-class _ClaimCandidate:
+class ClaimCandidateRecord:
     step_id: UUID
     template_key: str
     input: dict[str, Any]
 
     @classmethod
-    def decode(cls, record: Mapping[str, Any]) -> _ClaimCandidate:
+    def decode(cls, record: Mapping[str, Any]) -> ClaimCandidateRecord:
         return cls(
-            step_id=UUID(str(record["step_id"])),
-            template_key=str(record["template_key"]),
-            input=dict(record["input"]),
+            step_id=uuid_value(record["step_id"]),
+            template_key=nonempty_string(record["template_key"]),
+            input=mapping_value(record["input"]),
         )
 
 
-def _decode_replay(value: Mapping[str, Any]) -> ClaimedAttempt:
+def decode_claimed_attempt_receipt(value: Mapping[str, Any]) -> ClaimedAttempt:
     return ClaimedAttempt(
-        instance_id=UUID(str(value["instance_id"])),
-        step_id=UUID(str(value["step_id"])),
-        attempt_id=UUID(str(value["attempt_id"])),
-        attempt_number=int(value["attempt_number"]),
-        template_key=str(value["template_key"]),
-        executor_key=str(value["executor_key"]),
-        lease_seconds=int(value["lease_seconds"]),
-        input=dict(value["input"]),
+        instance_id=uuid_text_value(value["instance_id"]),
+        step_id=uuid_text_value(value["step_id"]),
+        attempt_id=uuid_text_value(value["attempt_id"]),
+        attempt_number=positive_integer_value(value["attempt_number"]),
+        template_key=nonempty_string(value["template_key"]),
+        executor_key=nonempty_string(value["executor_key"]),
+        lease_seconds=positive_integer_value(value["lease_seconds"]),
+        input=mapping_value(value["input"]),
     )
 
 
@@ -63,7 +71,7 @@ class AttemptClaimRecords:
         if replay is not None:
             if replay.input_digest != canonical_digest(request):
                 raise ValueError("Attempt claim identity has conflicting input")
-            return _decode_replay(replay.receipt)
+            return decode_claimed_attempt_receipt(replay.receipt)
 
         instance_id = self._lock_claimable_instance(request.executor_keys)
         if instance_id is None:
@@ -148,11 +156,11 @@ class AttemptClaimRecords:
                 "ORDER BY i.created_at, i.instance_id FOR UPDATE OF i SKIP LOCKED LIMIT 1",
                 (list(executor_keys),),
             ).fetchone()
-        return None if record is None else UUID(str(record["instance_id"]))
+        return None if record is None else uuid_value(record["instance_id"])
 
     def _select_candidate(
         self, instance_id: UUID, executor_keys: tuple[str, ...]
-    ) -> tuple[_ClaimCandidate, StepTemplate] | None:
+    ) -> tuple[ClaimCandidateRecord, StepTemplate] | None:
         with self._connection.cursor(row_factory=dict_row) as cursor:
             records = cursor.execute(
                 "SELECT s.step_id, s.template_key, s.input FROM openmagic_runtime.steps AS s "
@@ -168,7 +176,7 @@ class AttemptClaimRecords:
                 (instance_id,),
             ).fetchall()
         for record in records:
-            candidate = _ClaimCandidate.decode(record)
+            candidate = ClaimCandidateRecord.decode(record)
             template = step_template(self._connection, instance_id, candidate.template_key)
             if template.executor_key in executor_keys:
                 return candidate, template
@@ -181,7 +189,7 @@ class AttemptClaimRecords:
                 "WHERE step_id = %s",
                 (step_id,),
             ).fetchone()
-        return 1 if record is None else int(record["attempt_count"]) + 1
+        return 1 if record is None else nonnegative_integer_value(record["attempt_count"]) + 1
 
 
 def claim_once_record(*, database_url: str, request: ClaimWork) -> ClaimedAttempt | None:
@@ -194,4 +202,9 @@ def claim_once_record(*, database_url: str, request: ClaimWork) -> ClaimedAttemp
         raise
 
 
-__all__ = ["AttemptClaimRecords", "claim_once_record"]
+__all__ = [
+    "AttemptClaimRecords",
+    "ClaimCandidateRecord",
+    "claim_once_record",
+    "decode_claimed_attempt_receipt",
+]

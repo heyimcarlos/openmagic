@@ -12,7 +12,7 @@ import pytest
 from example_insurance.migrations import apply_migrations
 from openmagic_evals.evidence.case_recording import record_case_observation
 from openmagic_evals.evidence.contracts import Correlations
-from openmagic_evals.evidence.race_transitions import _SIGNAL_RELEASE_DEFINITION
+from openmagic_evals.evidence.race_definitions import SIGNAL_RELEASE_DEFINITION
 from openmagic_evals.harness._postgres import postgres_container
 from openmagic_runtime.kernel.control import (
     AcceptSignal,
@@ -32,7 +32,7 @@ def test_competing_signals_have_one_winner_in_100_seeded_real_transaction_races(
     with postgres_container(database_name=f"openmagic_test_{uuid4().hex}") as postgres:
         database_url = postgres.get_connection_url(driver=None)
         apply_migrations(database_url)
-        DefinitionCatalog(database_url=database_url).register(_SIGNAL_RELEASE_DEFINITION)
+        DefinitionCatalog(database_url=database_url).register(SIGNAL_RELEASE_DEFINITION)
         instance_ids = []
         step_ids = []
         wait_ids = []
@@ -43,8 +43,8 @@ def test_competing_signals_have_one_winner_in_100_seeded_real_transaction_races(
                 database_url=database_url,
                 request=StartInstance(
                     command_id=uuid4(),
-                    definition_key=_SIGNAL_RELEASE_DEFINITION.identity.key,
-                    definition_version=_SIGNAL_RELEASE_DEFINITION.identity.version,
+                    definition_key=SIGNAL_RELEASE_DEFINITION.identity.key,
+                    definition_version=SIGNAL_RELEASE_DEFINITION.identity.version,
                     instance_input={"subject_id": str(subject_id)},
                     route_input={"subject_id": str(subject_id)},
                 ),
@@ -120,8 +120,8 @@ def test_competing_signals_have_one_winner_in_100_seeded_real_transaction_races(
                     "instance_definitions": tuple(
                         {
                             "instance_id": instance_id,
-                            "definition_key": _SIGNAL_RELEASE_DEFINITION.identity.key,
-                            "definition_version": _SIGNAL_RELEASE_DEFINITION.identity.version,
+                            "definition_key": SIGNAL_RELEASE_DEFINITION.identity.key,
+                            "definition_version": SIGNAL_RELEASE_DEFINITION.identity.version,
                         }
                         for instance_id in instance_ids
                     ),
@@ -142,14 +142,14 @@ def test_concurrent_exact_signal_and_closure_replays_return_one_receipt() -> Non
     with postgres_container(database_name=f"openmagic_test_{uuid4().hex}") as postgres:
         database_url = postgres.get_connection_url(driver=None)
         apply_migrations(database_url)
-        DefinitionCatalog(database_url=database_url).register(_SIGNAL_RELEASE_DEFINITION)
+        DefinitionCatalog(database_url=database_url).register(SIGNAL_RELEASE_DEFINITION)
         subject_id = uuid4()
         started = start_instance(
             database_url=database_url,
             request=StartInstance(
                 command_id=uuid4(),
-                definition_key=_SIGNAL_RELEASE_DEFINITION.identity.key,
-                definition_version=_SIGNAL_RELEASE_DEFINITION.identity.version,
+                definition_key=SIGNAL_RELEASE_DEFINITION.identity.key,
+                definition_version=SIGNAL_RELEASE_DEFINITION.identity.version,
                 instance_input={"subject_id": str(subject_id)},
                 route_input={"subject_id": str(subject_id)},
             ),

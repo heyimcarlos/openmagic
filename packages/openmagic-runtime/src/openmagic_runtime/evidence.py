@@ -10,15 +10,32 @@ from uuid import UUID
 from psycopg import Connection
 
 from openmagic_runtime._canonical import canonical_bytes, canonical_digest
+from openmagic_runtime._persistence.delivery_records import delivery_evidence
 from openmagic_runtime._persistence.health_records import read_database_health
-from openmagic_runtime.delivery import RuntimeDeliveryEvidence, deliveries_for_domain_event
+from openmagic_runtime.delivery import (
+    RuntimeDeliveryAttemptEvidence,
+    RuntimeDeliveryEvidence,
+    deliveries_for_domain_event,
+)
 from openmagic_runtime.kernel._persistence.evidence_records import (
     RuntimeAgentRunEvidence,
     RuntimeAttemptEvidence,
+    RuntimeAttemptLeaseEvidence,
     RuntimeInstanceEvidence,
     RuntimeStepEvidence,
     RuntimeWaitEvidence,
+    read_attempt_lease_evidence,
     read_instance_evidence,
+)
+
+POSTGRES_EVIDENCE_CONFIGURATION_KEYS = frozenset(
+    {
+        "default_transaction_isolation",
+        "max_connections",
+        "observer_transaction_isolation",
+        "synchronous_commit",
+        "timezone",
+    }
 )
 
 
@@ -74,15 +91,24 @@ class RuntimeEvidenceReader:
     def instance(self, instance_id: UUID) -> RuntimeInstanceEvidence:
         return read_instance_evidence(self._connection, instance_id)
 
+    def attempt_lease(self, attempt_id: UUID) -> RuntimeAttemptLeaseEvidence:
+        return read_attempt_lease_evidence(self._connection, attempt_id)
+
     def deliveries(self, domain_event_id: UUID) -> tuple[RuntimeDeliveryEvidence, ...]:
         return deliveries_for_domain_event(self._connection, domain_event_id)
 
+    def delivery(self, delivery_id: UUID) -> RuntimeDeliveryEvidence:
+        return delivery_evidence(self._connection, delivery_id)
+
 
 __all__ = [
+    "POSTGRES_EVIDENCE_CONFIGURATION_KEYS",
     "EvidenceRecord",
     "RuntimeAgentRunEvidence",
     "RuntimeAttemptEvidence",
+    "RuntimeAttemptLeaseEvidence",
     "RuntimeDatabaseHealth",
+    "RuntimeDeliveryAttemptEvidence",
     "RuntimeDeliveryEvidence",
     "RuntimeEvidenceReader",
     "RuntimeInstanceEvidence",

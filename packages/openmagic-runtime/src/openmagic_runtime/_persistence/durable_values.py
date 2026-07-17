@@ -24,6 +24,20 @@ def integer_value(value: object) -> int:
     return value
 
 
+def nonnegative_integer_value(value: object) -> int:
+    decoded = integer_value(value)
+    if decoded < 0:
+        raise invalid_durable_value()
+    return decoded
+
+
+def positive_integer_value(value: object) -> int:
+    decoded = integer_value(value)
+    if decoded <= 0:
+        raise invalid_durable_value()
+    return decoded
+
+
 def boolean_value(value: object) -> bool:
     if type(value) is not bool:
         raise invalid_durable_value()
@@ -39,6 +53,17 @@ def string_value(value: object) -> str:
 def nonempty_string(value: object) -> str:
     decoded = string_value(value)
     if not decoded:
+        raise invalid_durable_value()
+    return decoded
+
+
+def uuid_text_value(value: object) -> UUID:
+    decoded_text = string_value(value)
+    try:
+        decoded = UUID(decoded_text)
+    except ValueError as error:
+        raise invalid_durable_value() from error
+    if str(decoded) != decoded_text:
         raise invalid_durable_value()
     return decoded
 

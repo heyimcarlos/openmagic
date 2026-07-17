@@ -1,52 +1,28 @@
-"""Fresh-process contenders synchronized by a PostgreSQL-visible overlap gate."""
+"""PostgreSQL overlap coordination for fresh-process race contenders."""
 
 from __future__ import annotations
 
 import hashlib
-import os
-import time
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager, suppress
 from multiprocessing import get_context
 from multiprocessing.connection import Connection
-from multiprocessing.context import SpawnContext
 from typing import TypeVar
 
-import psycopg
 from openmagic_runtime.processes import OwnedProcess, owned_cleanup_scope
 
-from openmagic_evals.evidence._race_operations import (
-    AcceptSignalRace,
-    AttemptResultRace,
-    DeliveryClaimRace,
-    RaceProtocolError,
-    RaceRequest,
-    RouteActivationRace,
-    RouteActivationRaceResult,
-    StartRenewalOutreachRace,
-    StepClaimRace,
-    VerificationSubmissionRace,
-    validate_race_pair,
-    validate_race_request,
+from openmagic_evals.evidence._race_contender_process import (
+    reap_processes,
+    receive_ready,
+    receive_result,
 )
+from openmagic_evals.evidence._race_contender_process import (
+    start_contender as _start_contender,
+)
+from openmagic_evals.evidence._race_operations import RaceRequest, validate_race_pair
+from openmagic_evals.evidence._race_persistence import RaceCoordinatorBarrier
 from openmagic_evals.evidence._race_transport import (
-    ProcessRaceCompleted,
-    ProcessRaceFailed,
-    ProcessRaceFailure,
-    ProcessRaceFatal,
     ProcessRacePair,
-    ProcessRaceReady,
-    ProcessRaceResult,
-    ProcessRaceSessionReady,
-    ProcessRaceSucceeded,
     RaceBarrierStage,
     RaceControl,
-    RaceFailureKind,
-    RaceFailureReason,
-    decode_fatal,
-    decode_process_result,
-    decode_ready,
-    decode_session_ready,
 )
 
 ResultT = TypeVar("ResultT")
@@ -55,166 +31,6 @@ ResultT = TypeVar("ResultT")
 def _barrier_key(case_id: str, seed: int) -> int:
     digest = hashlib.sha256(f"{case_id}:{seed}".encode()).digest()
     return int.from_bytes(digest[:8], signed=True)
-
-
-def _contend(
-    database_url: str,
-    barrier_key: int,
-    jitter_microseconds: int,
-    request: RaceRequest[object],
-    control: Connection,
-) -> None:
-    process_id = os.getpid()
-    try:
-        os.setsid()
-        control.send(ProcessRaceSessionReady(process_id=process_id))
-        with psycopg.connect(database_url, autocommit=True) as barrier:
-            backend_id = barrier.info.backend_pid
-            control.send(
-                ProcessRaceReady(
-                    stage=RaceBarrierStage.WAITING,
-                    process_id=process_id,
-                    backend_id=backend_id,
-                )
-            )
-            barrier.execute("SELECT pg_advisory_lock_shared(%s)", (barrier_key,))
-            control.send(
-                ProcessRaceReady(
-                    stage=RaceBarrierStage.ACQUIRED,
-                    process_id=process_id,
-                    backend_id=backend_id,
-                )
-            )
-            if control.recv() is not RaceControl.PROCEED:
-                raise RuntimeError("race overlap gate received an invalid release")
-            time.sleep(jitter_microseconds / 1_000_000)
-            try:
-                validated = validate_race_request(request)
-                value = validated.execute(database_url)
-                control.send(
-                    ProcessRaceCompleted(
-                        process_id=process_id,
-                        outcome=ProcessRaceSucceeded(value),
-                    )
-                )
-            except BaseException as error:
-                control.send(
-                    ProcessRaceCompleted(
-                        process_id=process_id,
-                        outcome=ProcessRaceFailed(ProcessRaceFailure.capture(error)),
-                    )
-                )
-            finally:
-                barrier.execute("SELECT pg_advisory_unlock_shared(%s)", (barrier_key,))
-    except BaseException as error:
-        with suppress(BrokenPipeError, EOFError, OSError):
-            control.send(
-                ProcessRaceFatal(
-                    process_id=process_id,
-                    failure=ProcessRaceFailure.capture(error),
-                )
-            )
-    finally:
-        control.close()
-
-
-def _receive(connection: Connection, timeout: float = 15.0) -> object:
-    if not connection.poll(timeout):
-        raise TimeoutError("fresh race contender did not send its protocol message")
-    return connection.recv()
-
-
-def _receive_ready(connection: Connection, expected: RaceBarrierStage) -> ProcessRaceReady:
-    message = _receive(connection)
-    if type(message) is ProcessRaceFatal:
-        failure = decode_fatal(message).failure
-        raise RuntimeError(
-            "fresh race contender failed before "
-            f"{expected.value}: {failure.kind.value}/{failure.reason.value}"
-        )
-    return decode_ready(message, expected)
-
-
-def _receive_result(
-    connection: Connection, request: RaceRequest[ResultT]
-) -> ProcessRaceResult[ResultT]:
-    message = _receive(connection, timeout=30)
-    if type(message) is ProcessRaceFatal:
-        failure = decode_fatal(message).failure
-        raise RuntimeError(
-            "fresh race contender failed before completion: "
-            f"{failure.kind.value}/{failure.reason.value}"
-        )
-    return decode_process_result(request, message)
-
-
-def _reap_processes(processes: tuple[OwnedProcess, ...], *, timeout_seconds: float = 5.0) -> None:
-    """Reap every owned contender before reporting any cleanup failure."""
-
-    errors: list[BaseException] = []
-    for process in processes:
-        cleanup = process.reap(timeout_seconds=timeout_seconds)
-        errors.extend(cleanup.errors)
-    if errors:
-        raise BaseExceptionGroup("race contender cleanup failed", errors)
-
-
-@contextmanager
-def _race_process_scope(
-    cleanup: Callable[[], None],
-    *,
-    message: str = "race execution and cleanup failed",
-) -> Iterator[None]:
-    with owned_cleanup_scope(
-        cleanup,
-        message=message,
-    ):
-        yield
-
-
-def _start_contender(
-    *,
-    context: SpawnContext,
-    database_url: str,
-    barrier_key: int,
-    jitter_microseconds: int,
-    request: RaceRequest[ResultT],
-    name: str,
-) -> tuple[Connection, OwnedProcess]:
-    parent, child = context.Pipe(duplex=True)
-    process = context.Process(
-        target=_contend,
-        args=(database_url, barrier_key, jitter_microseconds, request, child),
-        name=name,
-    )
-    owner: OwnedProcess | None = None
-    try:
-        process.start()
-        process_id = process.pid
-        if not isinstance(process_id, int):
-            raise RaceProtocolError("started race contender has no process identity")
-        ready = decode_session_ready(_receive(parent))
-        if ready.process_id != process_id:
-            raise RaceProtocolError("race process-session identity does not match its child")
-        owner = OwnedProcess.multiprocessing(process, resources=(parent, child))
-        child.close()
-        return parent, owner
-    except BaseException as start_error:
-        cleanup = (
-            owner.reap(timeout_seconds=1)
-            if owner is not None
-            else OwnedProcess.cleanup_multiprocessing_start(
-                process,
-                resources=(parent, child),
-                timeout_seconds=1,
-            )
-        )
-        if cleanup.errors:
-            raise BaseExceptionGroup(
-                "race contender startup and cleanup failed",
-                [start_error, *cleanup.errors],
-            ) from start_error
-        raise
 
 
 def run_process_contenders(
@@ -232,23 +48,22 @@ def run_process_contenders(
     context = get_context("spawn")
     parents: list[Connection] = []
     processes: list[OwnedProcess] = []
-    with psycopg.connect(database_url, autocommit=True) as coordinator:
-        coordinator.execute("SELECT pg_advisory_lock(%s)", (key,))
+    with RaceCoordinatorBarrier(database_url, key) as coordinator:
 
         def cleanup() -> None:
             cleanup_errors: list[BaseException] = []
             try:
-                coordinator.execute("SELECT pg_advisory_unlock(%s)", (key,))
+                coordinator.release()
             except BaseException as error:
                 cleanup_errors.append(error)
             try:
-                _reap_processes(tuple(processes))
+                reap_processes(tuple(processes))
             except BaseException as error:
                 cleanup_errors.append(error)
             if cleanup_errors:
                 raise BaseExceptionGroup("race process cleanup failed", cleanup_errors)
 
-        with _race_process_scope(cleanup):
+        with owned_cleanup_scope(cleanup, message="race execution and cleanup failed"):
             for index in range(2):
                 parent, process = _start_contender(
                     context=context,
@@ -260,77 +75,24 @@ def run_process_contenders(
                 )
                 parents.append(parent)
                 processes.append(process)
-            waiting = tuple(_receive_ready(parent, RaceBarrierStage.WAITING) for parent in parents)
-            backend_ids = tuple(message.backend_id for message in waiting)
-            deadline = time.monotonic() + 10
-            while time.monotonic() < deadline:
-                row = coordinator.execute(
-                    "SELECT count(*) FROM pg_stat_activity "
-                    "WHERE pid = ANY(%s) AND wait_event_type = 'Lock' "
-                    "AND wait_event = 'advisory'",
-                    (list(backend_ids),),
-                ).fetchone()
-                if row == (2,):
-                    break
-                time.sleep(0.01)
-            else:
-                observed = coordinator.execute(
-                    "SELECT pid, state, wait_event_type, wait_event FROM pg_stat_activity "
-                    "WHERE pid = ANY(%s) ORDER BY pid",
-                    (list(backend_ids),),
-                ).fetchall()
-                raise TimeoutError(
-                    f"PostgreSQL did not observe both race contenders waiting: {observed!r}"
-                )
-            coordinator.execute("SELECT pg_advisory_unlock(%s)", (key,))
-            acquired = tuple(
-                _receive_ready(parent, RaceBarrierStage.ACQUIRED) for parent in parents
+            backend_ids = tuple(
+                receive_ready(parent, RaceBarrierStage.WAITING).backend_id for parent in parents
             )
-            acquired_backend_ids = tuple(message.backend_id for message in acquired)
-            row = coordinator.execute(
-                "SELECT count(*) FROM pg_locks WHERE pid = ANY(%s) "
-                "AND locktype = 'advisory' AND granted",
-                (list(acquired_backend_ids),),
-            ).fetchone()
-            overlap = row == (2,)
-            if not overlap:
-                raise AssertionError("PostgreSQL did not grant both shared overlap locks")
+            coordinator.await_waiters(backend_ids)
+            coordinator.release()
+            acquired_backend_ids = tuple(
+                receive_ready(parent, RaceBarrierStage.ACQUIRED).backend_id for parent in parents
+            )
+            coordinator.require_overlap(acquired_backend_ids)
             for parent in parents:
                 parent.send(RaceControl.PROCEED)
             results = (
-                _receive_result(parents[0], requests[0]),
-                _receive_result(parents[1], requests[1]),
+                receive_result(parents[0], requests[0]),
+                receive_result(parents[1], requests[1]),
             )
             if len({result.process_id for result in results}) != 2:
                 raise AssertionError("race contenders did not use distinct fresh interpreters")
-            return ProcessRacePair(
-                results=(results[0], results[1]),
-                overlap_barrier_observed=True,
-            )
+            return ProcessRacePair(results=results, overlap_barrier_observed=True)
 
 
-__all__ = [
-    "AcceptSignalRace",
-    "AttemptResultRace",
-    "DeliveryClaimRace",
-    "ProcessRaceCompleted",
-    "ProcessRaceFailed",
-    "ProcessRaceFailure",
-    "ProcessRacePair",
-    "ProcessRaceResult",
-    "ProcessRaceSessionReady",
-    "ProcessRaceSucceeded",
-    "RaceFailureKind",
-    "RaceFailureReason",
-    "RaceProtocolError",
-    "RouteActivationRace",
-    "RouteActivationRaceResult",
-    "StartRenewalOutreachRace",
-    "StepClaimRace",
-    "VerificationSubmissionRace",
-    "decode_process_result",
-    "decode_session_ready",
-    "run_process_contenders",
-    "validate_race_pair",
-    "validate_race_request",
-]
+__all__ = ["run_process_contenders"]

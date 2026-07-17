@@ -18,6 +18,7 @@ from example_insurance.renewals import (
     StartRenewalOutreachInput,
 )
 from openmagic_runtime.commands import Actor, Cause
+from openmagic_runtime.delivery import DeliveryAcknowledgement
 from openmagic_runtime.processes import finish_owned_cleanup
 from openmagic_runtime.threads import CreateThread, ThreadStore
 from testcontainers.postgres import PostgresContainer
@@ -45,6 +46,14 @@ class RenewalFixture:
     threads: ThreadStore
     renewal: StartRenewalOutreach
     actor: Actor
+    initial_delivery: DeliveryAcknowledgement
+    worker_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class RenewalApprovalPhase:
+    command_id: UUID
+    approval_grant_id: UUID
 
 
 @dataclass(frozen=True)
@@ -131,19 +140,23 @@ def create_renewal_fixture(
         )
     )
     application.start_renewal_outreach(renewal)
-    application.run_workflow_worker_once(worker_id=f"{scenario}-facts")
-    application.run_workflow_worker_once(worker_id=f"{scenario}-draft")
-    application.run_delivery_worker_once(worker_id=f"{scenario}-delivery")
-    return RenewalFixture(application, threads, renewal, actor)
+    worker_ids = (f"{scenario}-facts", f"{scenario}-draft", f"{scenario}-delivery")
+    application.run_workflow_worker_once(worker_id=worker_ids[0])
+    application.run_workflow_worker_once(worker_id=worker_ids[1])
+    initial_delivery = application.run_delivery_worker_once(worker_id=worker_ids[2])
+    if initial_delivery is None:
+        raise AssertionError("synthetic renewal did not deliver its initial draft")
+    return RenewalFixture(application, threads, renewal, actor, initial_delivery, worker_ids)
 
 
-def approve_renewal(fixture: RenewalFixture, scenario: str) -> UUID:
+def approve_renewal(fixture: RenewalFixture, scenario: str) -> RenewalApprovalPhase:
     presentation = fixture.application.renewal_approval_presentation(
         fixture.renewal.input.workflow_id
     )
+    command_id = scenario_id(scenario, "approval-command")
     receipt = fixture.application.approve_renewal_draft(
         ApproveRenewalDraft(
-            command_id=scenario_id(scenario, "approval-command"),
+            command_id=command_id,
             actor=fixture.actor,
             cause=Cause("message", str(scenario_id(scenario, "approval-cause"))),
             input=ApproveRenewalDraftInput(
@@ -161,7 +174,7 @@ def approve_renewal(fixture: RenewalFixture, scenario: str) -> UUID:
     approval_grant_id = receipt.result.approval_grant_id
     if approval_grant_id is None:
         raise AssertionError("synthetic renewal lacks approval authority")
-    return approval_grant_id
+    return RenewalApprovalPhase(command_id, approval_grant_id)
 
 
 def observe_safe_renewal(fixture: RenewalFixture) -> SafeRenewalPhase:

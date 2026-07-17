@@ -25,6 +25,8 @@ from openmagic_runtime._persistence.durable_values import (
     mapping_value,
     nonempty_mapping,
     nonempty_string,
+    nonnegative_integer_value,
+    positive_integer_value,
     string_items,
     timestamp_value,
     uuid_value,
@@ -72,7 +74,7 @@ class ExpiredDeliveryAttemptRecord:
     @classmethod
     def decode(cls, record: Mapping[str, Any]) -> ExpiredDeliveryAttemptRecord:
         return cls(
-            attempt_number=integer_value(record["attempt_number"]),
+            attempt_number=positive_integer_value(record["attempt_number"]),
         )
 
 
@@ -90,7 +92,7 @@ class ClaimableDeliveryRecord:
             delivery_id=uuid_value(record["delivery_id"]),
             thread_id=uuid_value(record["thread_id"]),
             content_descriptor=nonempty_mapping(record["content_descriptor"]),
-            context_through_sequence=integer_value(record["context_through_sequence"]),
+            context_through_sequence=nonnegative_integer_value(record["context_through_sequence"]),
             policy=retry_policy(record["retry_policy"]),
         )
 
@@ -107,10 +109,10 @@ class ClaimedDeliveryRecord:
     def decode(cls, record: Mapping[str, Any]) -> ClaimedDeliveryRecord:
         return cls(
             delivery_id=uuid_value(record["delivery_id"]),
-            attempt_number=integer_value(record["attempt_number"]),
+            attempt_number=positive_integer_value(record["attempt_number"]),
             thread_id=uuid_value(record["thread_id"]),
             content_descriptor=nonempty_mapping(record["content_descriptor"]),
-            context_through_sequence=integer_value(record["context_through_sequence"]),
+            context_through_sequence=nonnegative_integer_value(record["context_through_sequence"]),
         )
 
     def claim(self, delivery_attempt_id: UUID) -> ClaimedDelivery:
@@ -121,6 +123,19 @@ class ClaimedDeliveryRecord:
             thread_id=self.thread_id,
             content_descriptor=dict(self.content_descriptor),
             context_through_sequence=self.context_through_sequence,
+        )
+
+
+@dataclass(frozen=True)
+class DeliveryClaimReplayRecord:
+    delivery_attempt_id: UUID
+    worker_id: str
+
+    @classmethod
+    def decode(cls, record: Mapping[str, Any]) -> DeliveryClaimReplayRecord:
+        return cls(
+            delivery_attempt_id=uuid_value(record["delivery_attempt_id"]),
+            worker_id=nonempty_string(record["worker_id"]),
         )
 
 

@@ -5,11 +5,13 @@ import json
 import os
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Literal, cast
 
 import pytest
 from openmagic_evals.evidence.__main__ import _parser
 from openmagic_evals.evidence.claims import (
+    _validate_claim_sources,
     _validate_common_reproducibility,
     _validate_release_matrix,
 )
@@ -37,7 +39,11 @@ from openmagic_evals.evidence.contracts import (
     EnvironmentVariablePin,
     ExecutablePin,
     InstalledSurfaceEvidence,
+    PlaygroundArtifact,
+    PlaygroundSummary,
     PostgresDeploymentPin,
+    ProcessArtifact,
+    RaceArtifact,
     RaceCase,
     RaceTrialEvidence,
     RepositorySurfaceEvidence,
@@ -51,6 +57,8 @@ from openmagic_evals.evidence.contracts import (
     canonical_digest,
     deterministic_observation_digest,
     race_trial_digest,
+    summarize_agent_cases,
+    summarize_agent_configurations,
 )
 from openmagic_evals.evidence.matrix import DETERMINISTIC_RELEASE_MATRIX, cardinality_one_races
 from pydantic import JsonValue
@@ -113,9 +121,21 @@ def _pin(git_sha: str) -> ReproducibilityPin:
                 deployment_id="sha256:" + "a" * 64,
                 postgres_version="17.5",
                 postgres_image="postgres@sha256:" + "2" * 64,
-                postgres_configuration={"transaction_isolation": "read committed"},
+                postgres_configuration={
+                    "default_transaction_isolation": "read committed",
+                    "max_connections": "100",
+                    "observer_transaction_isolation": "repeatable read",
+                    "synchronous_commit": "on",
+                    "timezone": "UTC",
+                },
                 postgres_configuration_digest=canonical_digest(
-                    {"transaction_isolation": "read committed"}
+                    {
+                        "default_transaction_isolation": "read committed",
+                        "max_connections": "100",
+                        "observer_transaction_isolation": "repeatable read",
+                        "synchronous_commit": "on",
+                        "timezone": "UTC",
+                    }
                 ),
                 migration_heads={
                     "example_insurance": "0004",
@@ -303,6 +323,13 @@ def test_claim_report_rejects_artifacts_from_different_builds(tmp_path: Path) ->
     )
     with pytest.raises(ValueError, match="deterministic proof is incomplete"):
         _validate_release_matrix(incomplete)
+    development_agent_case = _case(agent=True)
+    held_out_agent_case = _case(agent=True).model_copy(
+        update={"case_id": "agent.held-out.test", "split": "held_out"}
+    )
+    assert isinstance(development_agent_case, AgentCaseEvidence)
+    assert isinstance(held_out_agent_case, AgentCaseEvidence)
+    agent_cases = (development_agent_case, held_out_agent_case)
     agent = AgentQualityArtifact(
         reproducibility=_pin("2" * 40),
         corpus=AgentCorpusPin(
@@ -328,12 +355,7 @@ def test_claim_report_rejects_artifacts_from_different_builds(tmp_path: Path) ->
                 temperature=0,
             ),
         ),
-        cases=(
-            _case(agent=True),
-            _case(agent=True).model_copy(
-                update={"case_id": "agent.held-out.test", "split": "held_out"}
-            ),
-        ),
+        cases=agent_cases,
         summary=AgentQualitySummary(
             development=AgentSplitSummary(
                 case_count=1,
@@ -377,6 +399,12 @@ def test_claim_report_rejects_artifacts_from_different_builds(tmp_path: Path) ->
                 ),
                 threshold_passed=True,
             ),
+            cases=summarize_agent_cases(agent_cases),
+            configurations=summarize_agent_configurations(
+                agent_cases,
+                ("test",),
+                summarize_agent_cases(agent_cases),
+            ),
             combined=AgentAggregate(
                 observed_trials=2,
                 passed_trials=2,
@@ -409,6 +437,13 @@ def test_claim_report_rejects_artifacts_from_different_builds(tmp_path: Path) ->
     assert agent.summary.development.aggregate.observed_trials == len(development_trials)
     assert agent.summary.held_out.aggregate == held_out_aggregate
     assert agent.summary.held_out.aggregate.observed_trials == len(held_out_trials)
+    assert tuple(item.case_id for item in agent.summary.cases) == tuple(
+        case.case_id for case in agent.cases
+    )
+    assert all(item.aggregate.observed_trials == 1 for item in agent.summary.cases)
+    assert agent.summary.configurations[0].configuration_key == "test"
+    assert agent.summary.configurations[0].case_ids == tuple(case.case_id for case in agent.cases)
+    assert agent.summary.configurations[0].aggregate == agent.summary.combined
     surface = SurfaceAuditArtifact(
         reproducibility=_pin("1" * 40),
         repository=RepositorySurfaceEvidence(
@@ -492,3 +527,102 @@ def test_claim_report_cli_rejects_an_incomplete_evidence_package(tmp_path: Path)
                 str(tmp_path / "claims.md"),
             ]
         )
+
+
+def test_claim_report_fails_closed_on_every_correctness_and_playground_source(
+    tmp_path: Path,
+) -> None:
+    passing = DeterministicSummary(
+        expected_cases=1,
+        observed_cases=1,
+        passed_cases=1,
+        failed_cases=0,
+        infrastructure_errors=0,
+        invariant_violations=0,
+        strict_pass=True,
+        runner_exit_code=0,
+    )
+    process = ProcessArtifact.model_construct(
+        summary=passing,
+        cases=(
+            SimpleNamespace(
+                case_id="process.loss-backpressure-recovery",
+                process_contract=SimpleNamespace(
+                    scenario_version="process.loss-backpressure-recovery.v1"
+                ),
+                verdict=SimpleNamespace(status="passed"),
+                expected_trials=1,
+                observed_trials=1,
+            ),
+        ),
+    )
+    races = RaceArtifact.model_construct(
+        summary=passing,
+        cases=tuple(_race_case(contract.case_id) for contract in cardinality_one_races()),
+    )
+    control_scenarios = (
+        SimpleNamespace(
+            scenario_id="safe-reset",
+            observation={
+                "controls": {"start": 3, "drain": 3, "reset": True, "restart": 3, "stop": True},
+                "reset_reproduced": True,
+                "effects_enabled_by_default": False,
+            },
+        ),
+        SimpleNamespace(scenario_id="repeated-run", observation={"reproduced": True}),
+        SimpleNamespace(
+            scenario_id="intentional-failure",
+            observation={
+                "scenario": "intentional-failure",
+                "external_effect_certainty": "not_applied",
+                "provider_connected": True,
+            },
+        ),
+        SimpleNamespace(
+            scenario_id="disconnected-provider",
+            observation={
+                "scenario": "disconnected-provider",
+                "external_effect_certainty": "uncertain",
+                "provider_connected": False,
+            },
+        ),
+    )
+    playground = PlaygroundArtifact.model_construct(
+        summary=PlaygroundSummary(
+            synthetic_data_only=True,
+            effects_enabled_by_default=False,
+            local_provider=True,
+            reset_verified=True,
+            repeated_run_verified=True,
+            intentional_failure_verified=True,
+            disconnected_provider_verified=True,
+            process_controls_verified=True,
+            contributes_to_correctness=False,
+        ),
+        cases=(
+            SimpleNamespace(
+                case_id="playground.synthetic-reset-and-process-control",
+                scenarios=control_scenarios,
+            ),
+        ),
+    )
+    related = (
+        ("processes", tmp_path / "processes.json", process),
+        ("races", tmp_path / "races.json", races),
+        ("playground", tmp_path / "playground.json", playground),
+    )
+    _validate_claim_sources(related)
+
+    failed_process = process.model_copy(
+        update={"summary": passing.model_copy(update={"strict_pass": False})}
+    )
+    with pytest.raises(ValueError, match="process-loss"):
+        _validate_claim_sources(((*related[0][:2], failed_process), *related[1:]))
+
+    unverified_playground = playground.model_copy(
+        update={
+            "summary": playground.summary.model_copy(update={"process_controls_verified": False})
+        }
+    )
+    with pytest.raises(ValueError, match="playground"):
+        _validate_claim_sources((*related[:2], (*related[2][:2], unverified_playground)))

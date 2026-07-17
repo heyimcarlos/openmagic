@@ -13,9 +13,11 @@ from openmagic_runtime._delivery_contracts import ClaimDelivery, ClaimedDelivery
 from openmagic_runtime._persistence.delivery_work_models import (
     ClaimableDeliveryRecord,
     ClaimedDeliveryRecord,
+    DeliveryClaimReplayRecord,
     ExpiredDeliveryAttemptRecord,
     ExpiredDeliveryContextRecord,
 )
+from openmagic_runtime._persistence.durable_values import nonnegative_integer_value
 
 
 class DeliveryClaimRecords:
@@ -23,9 +25,15 @@ class DeliveryClaimRecords:
         self._connection = connection
 
     def claim(self, request: ClaimDelivery) -> ClaimedDelivery | None:
-        replay_id = self._replay_attempt_id(request.claim_request_id)
-        if replay_id is not None:
-            return self.claimed_delivery(replay_id)
+        self._connection.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+            (str(request.claim_request_id),),
+        )
+        replay = self._replay(request.claim_request_id)
+        if replay is not None:
+            if replay.worker_id != request.worker_id:
+                raise ValueError("Delivery claim identity has conflicting input")
+            return self.claimed_delivery(replay.delivery_attempt_id)
         self._recover_one_expired()
         delivery = self._lock_claimable_delivery()
         if delivery is None:
@@ -72,14 +80,15 @@ class DeliveryClaimRecords:
             raise RuntimeError("Delivery Attempt not found")
         return ClaimedDeliveryRecord.decode(record).claim(delivery_attempt_id)
 
-    def _replay_attempt_id(self, claim_request_id: UUID) -> UUID | None:
+    def _replay(self, claim_request_id: UUID) -> DeliveryClaimReplayRecord | None:
         with self._connection.cursor(row_factory=dict_row) as cursor:
             record = cursor.execute(
-                "SELECT delivery_attempt_id FROM openmagic_runtime.delivery_attempts "
+                "SELECT delivery_attempt_id, worker_id "
+                "FROM openmagic_runtime.delivery_attempts "
                 "WHERE claim_request_id = %s",
                 (claim_request_id,),
             ).fetchone()
-        return None if record is None else UUID(str(record["delivery_attempt_id"]))
+        return None if record is None else DeliveryClaimReplayRecord.decode(record)
 
     def _recover_one_expired(self) -> None:
         with self._connection.cursor(row_factory=dict_row) as cursor:
@@ -143,7 +152,7 @@ class DeliveryClaimRecords:
                 "FROM openmagic_runtime.delivery_attempts WHERE delivery_id = %s",
                 (delivery_id,),
             ).fetchone()
-        return 1 if record is None else int(record["attempt_count"]) + 1
+        return 1 if record is None else nonnegative_integer_value(record["attempt_count"]) + 1
 
     def _mark_delivery_failed(self, delivery_id: UUID) -> None:
         self._connection.execute(

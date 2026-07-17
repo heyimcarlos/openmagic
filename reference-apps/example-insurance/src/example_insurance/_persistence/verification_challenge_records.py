@@ -410,6 +410,7 @@ def resolve_terminal_challenge(
 def establish_session(
     connection: Connection[tuple[Any, ...]],
     *,
+    submit_command_id: UUID,
     challenge: DurableChallenge,
     session_ttl_seconds: int,
 ) -> UUID:
@@ -421,11 +422,12 @@ def establish_session(
     )
     connection.execute(
         "INSERT INTO example_insurance.verification_sessions "
-        "(session_id, challenge_id, party_id, thread_id, identifier_id, "
-        "identifier_thread_id, expires_at) VALUES (%s, %s, %s, %s, %s, %s, "
+        "(session_id, submit_command_id, challenge_id, party_id, thread_id, identifier_id, "
+        "identifier_thread_id, expires_at) VALUES (%s, %s, %s, %s, %s, %s, %s, "
         "clock_timestamp() + (%s * interval '1 second'))",
         (
             session_id,
+            submit_command_id,
             challenge.challenge_id,
             challenge.party_id,
             challenge.thread_id,

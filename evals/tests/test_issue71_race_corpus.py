@@ -6,30 +6,32 @@ from typing import Never, cast
 from uuid import uuid4
 
 import pytest
-from openmagic_evals.evidence.contracts import has_correlations
-from openmagic_evals.evidence.race_processes import (
+from openmagic_evals.evidence._race_contender_process import start_contender
+from openmagic_evals.evidence._race_operations import (
     AcceptSignalRace,
+    RaceProtocolError,
+    StepClaimRace,
+    validate_race_pair,
+    validate_race_request,
+)
+from openmagic_evals.evidence._race_transport import (
     ProcessRaceCompleted,
     ProcessRaceFailure,
     ProcessRaceSessionReady,
     ProcessRaceSucceeded,
     RaceFailureKind,
     RaceFailureReason,
-    RaceProtocolError,
-    StepClaimRace,
-    _race_process_scope,
-    _start_contender,
     decode_process_result,
     decode_session_ready,
-    validate_race_pair,
-    validate_race_request,
 )
+from openmagic_evals.evidence.contracts import has_correlations
 from openmagic_evals.evidence.races import run_all_races
 from openmagic_runtime.kernel.control import (
     AcceptSignal,
     SignalConflict,
     SignalConflictReason,
 )
+from openmagic_runtime.processes import owned_cleanup_scope
 
 
 def test_signal_conflict_type_and_reason_survive_process_transport() -> None:
@@ -137,7 +139,7 @@ def test_race_start_failure_reaps_partial_process_acquisition() -> None:
     request = StepClaimRace(cast(str, _UnpicklableWorkerId("worker-1")), uuid4())
 
     with pytest.raises(TypeError, match="cannot pickle"):
-        _start_contender(
+        start_contender(
             context=get_context("spawn"),
             database_url="postgresql://unused",
             barrier_key=71,
@@ -161,7 +163,10 @@ def test_race_scope_preserves_experiment_and_cleanup_failures() -> None:
 
     with (
         pytest.raises(BaseExceptionGroup, match="race execution and cleanup") as raised,
-        _race_process_scope(_fail_race_cleanup),
+        owned_cleanup_scope(
+            _fail_race_cleanup,
+            message="race execution and cleanup failed",
+        ),
     ):
         raise experiment_error
 

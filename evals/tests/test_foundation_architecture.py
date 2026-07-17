@@ -223,6 +223,24 @@ def test_runtime_transaction_owners_do_not_import_public_control_facades() -> No
     assert not (runtime / "kernel/_persistence/work_records.py").exists()
 
 
+def test_race_scenarios_have_separate_canonical_owners() -> None:
+    evidence = ROOT / "evals/src/openmagic_evals/evidence"
+    expected = {
+        "race_attempt_result.py",
+        "race_command_receipt.py",
+        "race_definitions.py",
+        "race_delivery_claim.py",
+        "race_route_activation.py",
+        "race_signal.py",
+        "race_step_claim.py",
+        "race_verification_submission.py",
+    }
+
+    assert not (evidence / "race_transitions.py").exists()
+    assert not (evidence / "race_claims.py").exists()
+    assert {path.name for path in evidence.glob("race_*.py") if path.name in expected} == expected
+
+
 def test_runtime_persistence_uses_named_rows() -> None:
     runtime = ROOT / "packages/openmagic-runtime/src/openmagic_runtime"
     for owner in (runtime / "_persistence", runtime / "kernel/_persistence"):

@@ -288,7 +288,22 @@ class ProcessArtifact(EvidenceModel):
             (case.correlations for case in self.cases),
             self.reproducibility.definition_digests,
         )
+        validate_process_reference_case(self)
         return self
+
+
+def validate_process_reference_case(artifact: ProcessArtifact) -> None:
+    if len(artifact.cases) != 1:
+        raise ValueError("process evidence requires one canonical recovery scenario")
+    case = artifact.cases[0]
+    if (
+        case.case_id != "process.loss-backpressure-recovery"
+        or case.process_contract.scenario_version != "process.loss-backpressure-recovery.v1"
+        or case.verdict.status != "passed"
+        or case.expected_trials != 1
+        or case.observed_trials != 1
+    ):
+        raise ValueError("process evidence requires the canonical passing recovery scenario")
 
 
 __all__ = [
@@ -304,4 +319,5 @@ __all__ = [
     "ProcessObservation",
     "ProcessRole",
     "QueueDepth",
+    "validate_process_reference_case",
 ]

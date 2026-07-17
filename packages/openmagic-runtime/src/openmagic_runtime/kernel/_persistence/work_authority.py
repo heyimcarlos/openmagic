@@ -124,11 +124,7 @@ class AttemptAuthorityRecord:
             or not self.lease_valid
             or not self.deadline_valid
         ):
-            raise StaleAuthority(
-                "Attempt authority is stale",
-                checked_at=self.checked_at,
-                lease_expires_at=self.lease_expires_at,
-            )
+            raise StaleAuthority("Attempt authority is stale")
 
     def completed_observation(self) -> dict[str, Any]:
         if self.state != "completed" or self.observation is None:
@@ -153,14 +149,16 @@ def lock_attempt_authority(
         if locked_instance is None:
             raise StaleAuthority("Attempt authority does not exist")
         record = cursor.execute(
+            "WITH observed AS MATERIALIZED (SELECT clock_timestamp() AS checked_at) "
             "SELECT a.state, a.worker_id, "
-            "a.lease_expires_at > clock_timestamp() AS lease_valid, "
-            "a.hard_deadline > clock_timestamp() AS deadline_valid, "
+            "a.lease_expires_at > observed.checked_at AS lease_valid, "
+            "a.hard_deadline > observed.checked_at AS deadline_valid, "
             "a.observation, a.observation_digest, a.instance_id, a.step_id, "
             "a.attempt_number, s.template_key, s.input, a.lease_expires_at, "
-            "clock_timestamp() AS checked_at "
+            "observed.checked_at "
             "FROM openmagic_runtime.attempts AS a "
             "JOIN openmagic_runtime.steps AS s ON s.step_id = a.step_id "
+            "CROSS JOIN observed "
             "WHERE a.attempt_id = %s FOR UPDATE OF a, s",
             (attempt_id,),
         ).fetchone()

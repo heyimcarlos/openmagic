@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from typing import Literal
 from uuid import UUID
 
 import pytest
@@ -17,6 +18,12 @@ from openmagic_playground.responses import (
     RenewalDemonstrationResponse,
 )
 from openmagic_playground.synthetic_provider import SyntheticEmailProvider
+from openmagic_playground.verification_response import (
+    VerificationCommandChain,
+    VerificationDeliveryChain,
+    VerificationDurableChain,
+    VerificationInstanceChain,
+)
 from openmagic_runtime.processes import finish_owned_cleanup, owned_cleanup_scope
 from pydantic import ValidationError
 
@@ -176,6 +183,103 @@ def test_playground_correlations_reject_duplicate_or_conflicting_definition_mapp
                 mapping,
                 mapping.model_copy(update={"definition_version": 3}),
             ),
+        )
+
+
+def test_verification_durable_chain_derives_and_rejects_broken_links() -> None:
+    def identity(value: int) -> UUID:
+        return UUID(int=value)
+
+    commands = VerificationCommandChain(
+        renewal_start_id=identity(1),
+        approval_id=identity(2),
+        protected_request_id=identity(4),
+        verification_submission_id=identity(5),
+    )
+    renewal = VerificationInstanceChain(
+        workflow_id=identity(10),
+        instance_id=identity(11),
+        definition=PlaygroundInstanceDefinitionCorrelation(
+            instance_id=identity(11),
+            definition_key="example_insurance.renewal_outreach",
+            definition_version=2,
+        ),
+        step_ids=(identity(12),),
+        attempt_ids=(identity(13),),
+        trace_event_ids=(identity(14),),
+        worker_ids=("renewal-worker",),
+    )
+    verification = VerificationInstanceChain(
+        workflow_id=identity(20),
+        instance_id=identity(21),
+        definition=PlaygroundInstanceDefinitionCorrelation(
+            instance_id=identity(21),
+            definition_key="example_insurance.verification",
+            definition_version=1,
+        ),
+        step_ids=(identity(22),),
+        attempt_ids=(identity(23),),
+        trace_event_ids=(identity(24),),
+        worker_ids=("verification-worker",),
+    )
+    protected_thread = identity(30)
+    identifier_thread = identity(31)
+
+    def delivery(
+        offset: int,
+        source_kind: Literal["command", "attempt"],
+        source_id: UUID,
+        thread_id: UUID,
+    ) -> VerificationDeliveryChain:
+        return VerificationDeliveryChain(
+            source_kind=source_kind,
+            source_id=source_id,
+            domain_event_id=identity(offset),
+            delivery_id=identity(offset + 1),
+            delivery_attempt_id=identity(offset + 2),
+            thread_id=thread_id,
+            message_id=identity(offset + 3),
+            worker_id=f"delivery-{offset}",
+        )
+
+    initial = delivery(40, "attempt", renewal.attempt_ids[0], protected_thread)
+    challenge = delivery(50, "attempt", verification.attempt_ids[0], identifier_thread)
+    authorized = delivery(60, "command", commands.protected_request_id, protected_thread)
+    chain = VerificationDurableChain(
+        commands=commands,
+        renewal=renewal,
+        verification=verification,
+        protected_thread_id=protected_thread,
+        identifier_thread_id=identifier_thread,
+        approval_grant_id=identity(70),
+        challenge_id=identity(71),
+        session_id=identity(72),
+        initial_delivery=initial,
+        challenge_delivery=challenge,
+        authorized_delivery=authorized,
+    )
+
+    correlations = chain.correlations()
+    assert correlations.runtime.command_ids == commands.values
+    assert correlations.application.domain_event_ids == (
+        initial.domain_event_id,
+        challenge.domain_event_id,
+        authorized.domain_event_id,
+    )
+    assert correlations.runtime.trace_event_ids == (identity(14), identity(24))
+    with pytest.raises(ValidationError, match="causal sources"):
+        VerificationDurableChain(
+            commands=commands,
+            renewal=renewal,
+            verification=verification,
+            protected_thread_id=protected_thread,
+            identifier_thread_id=identifier_thread,
+            approval_grant_id=identity(70),
+            challenge_id=identity(71),
+            session_id=identity(72),
+            initial_delivery=initial,
+            challenge_delivery=challenge.model_copy(update={"source_id": renewal.attempt_ids[0]}),
+            authorized_delivery=authorized,
         )
 
 

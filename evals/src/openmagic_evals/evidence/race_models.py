@@ -17,6 +17,7 @@ from openmagic_evals.evidence.core_models import (
     merge_correlations,
     validate_correlated_definitions,
 )
+from openmagic_evals.evidence.matrix import cardinality_one_races
 from openmagic_evals.evidence.pins import ReproducibilityPin
 from openmagic_evals.evidence.release_models import (
     SCHEMA_VERSION,
@@ -149,7 +150,30 @@ class RaceArtifact(EvidenceModel):
             (case.correlations for case in self.cases),
             self.reproducibility.definition_digests,
         )
+        validate_standalone_race_matrix(self)
         return self
+
+
+def validate_standalone_race_matrix(artifact: RaceArtifact) -> None:
+    contracts = {item.case_id: item for item in cardinality_one_races()}
+    cases = {item.case_id: item for item in artifact.cases}
+    if len(cases) != len(artifact.cases) or set(cases) != set(contracts):
+        raise ValueError("standalone race evidence requires the complete cardinality-one matrix")
+    for case_id, contract in contracts.items():
+        case = cases[case_id]
+        if (
+            case.expected_trials != 100
+            or case.observed_trials != 100
+            or case.seeds != contract.seeds
+            or len(case.race_trials) != 100
+            or case.verdict.status != "passed"
+            or any(
+                tuple(sorted(trial.public_outcomes))
+                != tuple(sorted(contract.expected_public_outcomes))
+                for trial in case.race_trials
+            )
+        ):
+            raise ValueError(f"standalone race evidence is incomplete: {case_id}")
 
 
 @dataclass(frozen=True)
@@ -196,4 +220,5 @@ __all__ = [
     "jitter_pair",
     "race_observation",
     "race_trial_digest",
+    "validate_standalone_race_matrix",
 ]

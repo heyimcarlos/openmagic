@@ -4,6 +4,17 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 
+from openmagic_evals.evidence.agent_aggregation import (
+    AgentAggregate,
+    aggregate_agent_trials,
+    assess_agent_case,
+    summarize_agent_quality,
+)
+from openmagic_evals.evidence.agent_artifact import (
+    AgentConfigurationPin,
+    AgentCorpusPin,
+    AgentQualityArtifact,
+)
 from openmagic_evals.evidence.agent_cases import (
     BOUNDARY_AGENT_KEY,
     DEVELOPMENT_CASES,
@@ -16,41 +27,23 @@ from openmagic_evals.evidence.agent_experiment import (
     AgentTrialPhase,
     agent_scorer_contract,
 )
+from openmagic_evals.evidence.agent_trial_models import AgentCaseEvidence, AgentTrialEvidence
 from openmagic_evals.evidence.agent_trials import AgentTrial
-from openmagic_evals.evidence.contracts import (
-    AgentCaseEvidence,
-    AgentConfigurationPin,
-    AgentCorpusPin,
-    AgentQualityArtifact,
-    AgentQualitySummary,
-    AgentSplitSummary,
-    AgentTrialEvidence,
-    CaseVerdict,
-    DistributionSummary,
-    aggregate_agent_trials,
-    merge_correlations,
-)
-from openmagic_evals.evidence.core_models import canonical_digest
+from openmagic_evals.evidence.core_models import CaseVerdict, canonical_digest, merge_correlations
 from openmagic_evals.evidence.pins import ReproducibilityPin
 
 
 @dataclass(frozen=True)
-class AgentExperimentResult:
+class AgentExperimentAssessment:
     expected_trials: int
-    observed_trials: int
-    passed_trials: int
-    prohibited_actions: int
-    pass_rate: float
-    wilson_lower: float
-    wilson_upper: float
+    aggregate: AgentAggregate
     threshold_passed: bool
-    latency: DistributionSummary
 
 
 def evaluate_trials(
     cases: tuple[AgentCase, ...],
     trials: tuple[AgentTrial, ...],
-) -> AgentExperimentResult:
+) -> AgentExperimentAssessment:
     expected_trials = sum(case.predeclared_trials for case in cases)
     if len(trials) != expected_trials:
         raise ValueError("Agent experiment is missing trials from its denominator")
@@ -73,21 +66,17 @@ def evaluate_trials(
 
     aggregate = aggregate_agent_trials(trials)
     thresholds_pass = all(
-        sum(trial.outcome_passed for trial in trials if trial.case_id == case.case_id)
-        / case.predeclared_trials
-        >= case.pass_threshold
+        assess_agent_case(
+            tuple(trial for trial in trials if trial.case_id == case.case_id),
+            expected_trials=case.predeclared_trials,
+            pass_threshold=case.pass_threshold,
+        ).threshold_passed
         for case in cases
     )
-    return AgentExperimentResult(
+    return AgentExperimentAssessment(
         expected_trials=expected_trials,
-        observed_trials=aggregate.observed_trials,
-        passed_trials=aggregate.passed_trials,
-        prohibited_actions=aggregate.prohibited_actions,
-        pass_rate=aggregate.pass_rate,
-        wilson_lower=aggregate.wilson_lower,
-        wilson_upper=aggregate.wilson_upper,
+        aggregate=aggregate,
         threshold_passed=thresholds_pass and aggregate.prohibited_actions == 0,
-        latency=aggregate.latency_ms,
     )
 
 
@@ -95,22 +84,12 @@ def agent_corpus_digest(phases: tuple[AgentTrialPhase, AgentTrialPhase]) -> str:
     return canonical_digest([asdict(case) for phase in phases for case in phase.cases])
 
 
-def _split_summary(phase: AgentTrialPhase) -> AgentSplitSummary:
-    result = evaluate_trials(phase.cases, phase.trials)
-    return AgentSplitSummary(
-        case_count=len(phase.cases),
-        expected_trials=result.expected_trials,
-        aggregate=aggregate_agent_trials(phase.trials),
-        threshold_passed=result.threshold_passed,
-    )
-
-
 def _artifact_case(case: AgentCase, trials: tuple[AgentTrial, ...]) -> AgentCaseEvidence:
     case_trials = tuple(trial for trial in trials if trial.case_id == case.case_id)
-    passed_trials = sum(trial.outcome_passed for trial in case_trials)
-    prohibited_actions = sum(len(trial.prohibited_actions) for trial in case_trials)
-    threshold_passed = (
-        passed_trials / case.predeclared_trials >= case.pass_threshold and prohibited_actions == 0
+    assessment = assess_agent_case(
+        case_trials,
+        expected_trials=case.predeclared_trials,
+        pass_threshold=case.pass_threshold,
     )
     return AgentCaseEvidence(
         case_id=case.case_id,
@@ -139,12 +118,12 @@ def _artifact_case(case: AgentCase, trials: tuple[AgentTrial, ...]) -> AgentCase
             for trial in case_trials
         ),
         pass_threshold=case.pass_threshold,
-        passed_trials=passed_trials,
-        prohibited_actions=prohibited_actions,
+        passed_trials=assessment.aggregate.passed_trials,
+        prohibited_actions=assessment.aggregate.prohibited_actions,
         verdict=CaseVerdict(
-            status="passed" if threshold_passed else "failed",
+            status="passed" if assessment.threshold_passed else "failed",
             invariant_violations=()
-            if threshold_passed
+            if assessment.threshold_passed
             else ("Agent case missed its predeclared quality or safety threshold",),
         ),
     )
@@ -189,9 +168,12 @@ def project_agent_quality_artifact(
         raise ValueError("Agent projection phases do not match their declared corpora")
     cases = development.cases + held_out.cases
     trials = development.trials + held_out.trials
-    result = evaluate_trials(cases, trials)
-    development_summary = _split_summary(development)
-    held_out_summary = _split_summary(held_out)
+    projected_cases = tuple(_artifact_case(case, trials) for case in cases)
+    configurations = _configurations(configuration)
+    summary = summarize_agent_quality(
+        projected_cases,
+        tuple(item.agent_key for item in configurations),
+    )
     artifact = AgentQualityArtifact(
         reproducibility=reproducibility,
         corpus=AgentCorpusPin(
@@ -205,27 +187,22 @@ def project_agent_quality_artifact(
             execution_phases=("development", "held_out"),
             tuning_unchanged_after_seal=True,
         ),
-        agent_configurations=_configurations(configuration),
-        cases=tuple(_artifact_case(case, trials) for case in cases),
-        summary=AgentQualitySummary(
-            development=development_summary,
-            held_out=held_out_summary,
-            combined=aggregate_agent_trials(trials),
-            threshold_passed=result.threshold_passed,
-        ),
+        agent_configurations=configurations,
+        cases=projected_cases,
+        summary=summary,
         limitations=(
             "The report measures only the two explicitly pinned local configurations.",
             f"The sealed held-out corpus has {len(held_out.trials)} trials and does not imply "
             "model-agnostic quality.",
         ),
     )
-    if not result.threshold_passed:
+    if not summary.threshold_passed:
         raise RuntimeError("Agent quality experiment missed its predeclared threshold")
     return artifact
 
 
 __all__ = [
-    "AgentExperimentResult",
+    "AgentExperimentAssessment",
     "agent_corpus_digest",
     "evaluate_trials",
     "project_agent_quality_artifact",

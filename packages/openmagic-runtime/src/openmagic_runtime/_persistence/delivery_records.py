@@ -18,7 +18,6 @@ from openmagic_runtime._delivery_contracts import (
 )
 from openmagic_runtime._persistence.durable_values import (
     integer_value,
-    invalid_durable_value,
     nonempty_string,
     string_value,
     timestamp_value,
@@ -59,29 +58,68 @@ class DeliveryPresentation:
 
 
 @dataclass(frozen=True)
-class RuntimeDeliveryEvidence:
-    delivery_id: UUID
-    status: DeliveryStatus
-    delivered_message_id: UUID | None
-    attempt_states: tuple[DeliveryAttemptState, ...]
+class RuntimeDeliveryAttemptEvidence:
+    delivery_attempt_id: UUID
+    worker_id: str
+    state: DeliveryAttemptState
 
     @classmethod
-    def decode(cls, record: Mapping[str, Any]) -> RuntimeDeliveryEvidence:
-        delivered_message = record["delivered_message_id"]
+    def decode(cls, record: Mapping[str, Any]) -> RuntimeDeliveryAttemptEvidence:
         return cls(
-            delivery_id=uuid_value(record["delivery_id"]),
-            status=delivery_status(record["status"]),
-            delivered_message_id=(
-                uuid_value(delivered_message) if delivered_message is not None else None
-            ),
-            attempt_states=_attempt_states(record["attempt_states"]),
+            delivery_attempt_id=uuid_value(record["delivery_attempt_id"]),
+            worker_id=nonempty_string(record["worker_id"]),
+            state=delivery_attempt_state(record["state"]),
         )
 
 
-def _attempt_states(value: object) -> tuple[DeliveryAttemptState, ...]:
-    if not isinstance(value, list):
-        raise invalid_durable_value()
-    return tuple(delivery_attempt_state(item) for item in value)
+@dataclass(frozen=True)
+class RuntimeDeliveryEvidence:
+    delivery_id: UUID
+    domain_event_id: UUID
+    thread_id: UUID
+    status: DeliveryStatus
+    successful_attempt_id: UUID | None
+    delivered_message_id: UUID | None
+    attempts: tuple[RuntimeDeliveryAttemptEvidence, ...]
+
+    def __post_init__(self) -> None:
+        attempt_ids = tuple(item.delivery_attempt_id for item in self.attempts)
+        if len(attempt_ids) != len(set(attempt_ids)):
+            raise ValueError("Runtime Delivery evidence contains duplicate Attempt identities")
+        if self.successful_attempt_id is not None and self.successful_attempt_id not in attempt_ids:
+            raise ValueError("Runtime Delivery success references an unrelated Attempt")
+
+
+def _optional_uuid(value: object) -> UUID | None:
+    return None if value is None else uuid_value(value)
+
+
+def _decode_delivery(
+    record: Mapping[str, Any],
+    attempts: tuple[RuntimeDeliveryAttemptEvidence, ...],
+) -> RuntimeDeliveryEvidence:
+    return RuntimeDeliveryEvidence(
+        delivery_id=uuid_value(record["delivery_id"]),
+        domain_event_id=uuid_value(record["domain_event_id"]),
+        thread_id=uuid_value(record["thread_id"]),
+        status=delivery_status(record["status"]),
+        successful_attempt_id=_optional_uuid(record["successful_attempt_id"]),
+        delivered_message_id=_optional_uuid(record["delivered_message_id"]),
+        attempts=attempts,
+    )
+
+
+def _delivery_attempts(
+    connection: Connection[tuple[Any, ...]], delivery_id: UUID
+) -> tuple[RuntimeDeliveryAttemptEvidence, ...]:
+    with connection.cursor(row_factory=dict_row) as cursor:
+        records = cursor.execute(
+            "SELECT delivery_attempt_id, worker_id, state "
+            "FROM openmagic_runtime.delivery_attempts WHERE delivery_id = %s "
+            "ORDER BY created_at, delivery_attempt_id",
+            (delivery_id,),
+        ).fetchall()
+    return tuple(RuntimeDeliveryAttemptEvidence.decode(record) for record in records)
 
 
 def deliveries_for_domain_event(
@@ -89,16 +127,33 @@ def deliveries_for_domain_event(
 ) -> tuple[RuntimeDeliveryEvidence, ...]:
     with connection.cursor(row_factory=dict_row) as cursor:
         records = cursor.execute(
-            "SELECT d.delivery_id, d.status, d.delivered_message_id, "
-            "COALESCE(array_agg(a.state ORDER BY a.created_at, a.delivery_attempt_id) "
-            "FILTER (WHERE a.delivery_attempt_id IS NOT NULL), ARRAY[]::text[]) "
-            "AS attempt_states FROM openmagic_runtime.deliveries d "
-            "LEFT JOIN openmagic_runtime.delivery_attempts a "
-            "ON a.delivery_id = d.delivery_id WHERE d.domain_event_id = %s "
-            "GROUP BY d.delivery_id ORDER BY d.created_at, d.delivery_id",
+            "SELECT delivery_id, domain_event_id, thread_id, status, successful_attempt_id, "
+            "delivered_message_id FROM openmagic_runtime.deliveries "
+            "WHERE domain_event_id = %s ORDER BY created_at, delivery_id",
             (domain_event_id,),
         ).fetchall()
-    return tuple(RuntimeDeliveryEvidence.decode(record) for record in records)
+    return tuple(
+        _decode_delivery(
+            record,
+            _delivery_attempts(connection, uuid_value(record["delivery_id"])),
+        )
+        for record in records
+    )
+
+
+def delivery_evidence(
+    connection: Connection[tuple[Any, ...]],
+    delivery_id: UUID,
+) -> RuntimeDeliveryEvidence:
+    with connection.cursor(row_factory=dict_row) as cursor:
+        record = cursor.execute(
+            "SELECT delivery_id, domain_event_id, thread_id, status, successful_attempt_id, "
+            "delivered_message_id FROM openmagic_runtime.deliveries WHERE delivery_id = %s",
+            (delivery_id,),
+        ).fetchone()
+    if record is None:
+        raise KeyError(f"Runtime Delivery not found: {delivery_id}")
+    return _decode_delivery(record, _delivery_attempts(connection, delivery_id))
 
 
 def _delivery_presentation(

@@ -30,7 +30,7 @@ def _cases():
     return DEVELOPMENT_CASES + HELD_OUT_CASES
 
 
-def test_agent_corpus_pins_development_and_untouched_held_out_cases() -> None:
+def test_agent_corpus_is_pinned_but_not_certified_after_reference_baseline_changes() -> None:
     cases = _cases()
     assert {case.split for case in cases} == {"development", "held_out"}
     assert len({case.case_id for case in cases}) == len(cases)
@@ -43,7 +43,8 @@ def test_agent_corpus_pins_development_and_untouched_held_out_cases() -> None:
     assert all(case.required_body_fragments for case in renewal_cases)
     assert all(case.prohibited_actions for case in cases)
     assert canonical_digest([asdict(case) for case in HELD_OUT_CASES]) == HELD_OUT_CORPUS_DIGEST
-    assert load_sealed_held_out_cases(ROOT) == HELD_OUT_CASES
+    with pytest.raises(RuntimeError, match="freeze-before-exposure"):
+        load_sealed_held_out_cases(ROOT)
 
 
 def test_agent_corpus_seal_rejects_current_blob_mutation(tmp_path: Path) -> None:
@@ -85,21 +86,21 @@ def test_agent_evaluation_reports_complete_denominator_uncertainty_and_safety() 
 
     expected = sum(case.predeclared_trials for case in cases)
     assert result.expected_trials == expected
-    assert result.observed_trials == expected
-    assert result.passed_trials == expected
-    assert result.prohibited_actions == 0
-    assert result.pass_rate == 1.0
-    assert 0.92 < result.wilson_lower < 0.93
-    assert result.wilson_upper == 1.0
+    assert result.aggregate.observed_trials == expected
+    assert result.aggregate.passed_trials == expected
+    assert result.aggregate.prohibited_actions == 0
+    assert result.aggregate.pass_rate == 1.0
+    assert 0.92 < result.aggregate.wilson_lower < 0.93
+    assert result.aggregate.wilson_upper == 1.0
     assert result.threshold_passed
-    assert result.latency.count == expected
-    assert result.latency.minimum == 10
-    assert result.latency.maximum == 14
+    assert result.aggregate.latency_ms.count == expected
+    assert result.aggregate.latency_ms.minimum == 10
+    assert result.aggregate.latency_ms.maximum == 14
 
 
 def test_agent_artifact_reports_recomputable_split_aggregates() -> None:
     from openmagic_evals.evidence.agent_experiment import AgentTrialPhase
-    from openmagic_evals.evidence.agent_models import aggregate_agent_trials
+    from openmagic_evals.evidence.contracts import aggregate_agent_trials
 
     development_cases = DEVELOPMENT_CASES
     held_out_cases = HELD_OUT_CASES
@@ -188,8 +189,8 @@ def test_agent_safety_violation_cannot_be_hidden_by_quality_success() -> None:
 
     result = evaluate_trials(cases, trials)
 
-    assert result.pass_rate == 1.0
-    assert result.prohibited_actions == len(cases)
+    assert result.aggregate.pass_rate == 1.0
+    assert result.aggregate.prohibited_actions == len(cases)
     assert not result.threshold_passed
 
 

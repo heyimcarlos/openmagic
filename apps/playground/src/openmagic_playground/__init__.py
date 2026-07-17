@@ -31,6 +31,8 @@ from openmagic_playground.responses import (
     RenewalDemonstrationObservation,
     RenewalDemonstrationResponse,
     SafeRenewalBoundaryObservation,
+)
+from openmagic_playground.verification_response import (
     VerificationDemonstrationObservation,
     VerificationDemonstrationResponse,
 )

@@ -15,6 +15,13 @@ from openmagic_runtime.evidence import (
 from psycopg import Connection
 from psycopg.rows import dict_row
 
+from example_insurance._persistence.durable_values import (
+    boolean_value,
+    nonempty_string,
+    object_value,
+    positive_integer,
+    uuid_value,
+)
 from example_insurance._persistence.renewal_effect_records import (
     EffectEvidenceSource,
     effect_evidence_source,
@@ -46,10 +53,10 @@ class EvidenceWorkflow:
     @classmethod
     def decode(cls, record: Mapping[str, Any]) -> EvidenceWorkflow:
         return cls(
-            command_id=UUID(str(record["start_command_id"])),
-            workflow_id=UUID(str(record["workflow_id"])),
-            instance_id=UUID(str(record["instance_id"])),
-            thread_id=UUID(str(record["thread_id"])),
+            command_id=uuid_value(record["start_command_id"]),
+            workflow_id=uuid_value(record["workflow_id"]),
+            instance_id=uuid_value(record["instance_id"]),
+            thread_id=uuid_value(record["thread_id"]),
             lifecycle=workflow_lifecycle(record["lifecycle"]),
         )
 
@@ -64,10 +71,10 @@ class EvidenceDomainEvent:
     @classmethod
     def decode(cls, record: Mapping[str, Any]) -> EvidenceDomainEvent:
         return cls(
-            event_id=UUID(str(record["event_id"])),
-            event_type=str(record["event_type"]),
-            actor=dict(record["actor"]),
-            cause=dict(record["cause"]),
+            event_id=uuid_value(record["event_id"]),
+            event_type=nonempty_string(record["event_type"]),
+            actor=object_value(record["actor"]),
+            cause=object_value(record["cause"]),
         )
 
 
@@ -83,12 +90,12 @@ class EvidenceExternalEffect:
     @classmethod
     def decode(cls, record: Mapping[str, Any]) -> EvidenceExternalEffect:
         return cls(
-            logical_effect_id=UUID(str(record["logical_effect_id"])),
+            logical_effect_id=uuid_value(record["logical_effect_id"]),
             certainty=effect_certainty(record["certainty"]),
-            step_id=UUID(str(record["step_id"])),
-            approval_grant_id=UUID(str(record["approval_grant_id"])),
-            dispatch_attempt_id=UUID(str(record["dispatch_attempt_id"])),
-            effect_fingerprint=str(record["effect_fingerprint"]),
+            step_id=uuid_value(record["step_id"]),
+            approval_grant_id=uuid_value(record["approval_grant_id"]),
+            dispatch_attempt_id=uuid_value(record["dispatch_attempt_id"]),
+            effect_fingerprint=nonempty_string(record["effect_fingerprint"]),
         )
 
 
@@ -105,12 +112,12 @@ class EvidenceEffectObservation:
     def decode(cls, record: Mapping[str, Any]) -> EvidenceEffectObservation:
         request_id = record["provider_request_id"]
         return cls(
-            evidence_id=UUID(str(record["evidence_id"])),
+            evidence_id=uuid_value(record["evidence_id"]),
             classification=effect_observation(record["classification"]),
             source=effect_evidence_source(record["source"]),
-            logical_effect_id=UUID(str(record["logical_effect_id"])),
-            attempt_id=UUID(str(record["attempt_id"])),
-            provider_request_id=str(request_id) if request_id is not None else None,
+            logical_effect_id=uuid_value(record["logical_effect_id"]),
+            attempt_id=uuid_value(record["attempt_id"]),
+            provider_request_id=nonempty_string(request_id) if request_id is not None else None,
         )
 
 
@@ -129,14 +136,14 @@ class EvidenceDecision:
     @classmethod
     def decode(cls, record: Mapping[str, Any]) -> EvidenceDecision:
         return cls(
-            decision_id=UUID(str(record["decision_id"])),
-            command_id=UUID(str(record["command_id"])),
-            wait_id=UUID(str(record["wait_id"])),
-            draft_id=UUID(str(record["draft_id"])),
-            presented_message_id=UUID(str(record["presented_message_id"])),
-            thread_sequence=int(record["thread_sequence"]),
-            message_fingerprint=str(record["message_fingerprint"]),
-            signal_id=UUID(str(record["signal_id"])),
+            decision_id=uuid_value(record["decision_id"]),
+            command_id=uuid_value(record["command_id"]),
+            wait_id=uuid_value(record["wait_id"]),
+            draft_id=uuid_value(record["draft_id"]),
+            presented_message_id=uuid_value(record["presented_message_id"]),
+            thread_sequence=positive_integer(record["thread_sequence"]),
+            message_fingerprint=nonempty_string(record["message_fingerprint"]),
+            signal_id=uuid_value(record["signal_id"]),
             decision_kind=approval_decision_kind(record["decision_kind"]),
         )
 
@@ -153,12 +160,12 @@ class EvidenceApprovalGrant:
     @classmethod
     def decode(cls, record: Mapping[str, Any]) -> EvidenceApprovalGrant:
         return cls(
-            approval_grant_id=UUID(str(record["approval_grant_id"])),
-            decision_id=UUID(str(record["decision_id"])),
-            step_id=UUID(str(record["step_id"])),
-            effect_fingerprint=str(record["effect_fingerprint"]),
-            consumed=bool(record["consumed"]),
-            invalidated=bool(record["invalidated"]),
+            approval_grant_id=uuid_value(record["approval_grant_id"]),
+            decision_id=uuid_value(record["decision_id"]),
+            step_id=uuid_value(record["step_id"]),
+            effect_fingerprint=nonempty_string(record["effect_fingerprint"]),
+            consumed=boolean_value(record["consumed"]),
+            invalidated=boolean_value(record["invalidated"]),
         )
 
 
@@ -249,7 +256,7 @@ def load_renewal_evidence_snapshot(
         runtime=runtime,
         events=events,
         deliveries=deliveries,
-        draft_agent_run_ids=tuple(UUID(str(record["agent_run_id"])) for record in draft_records),
+        draft_agent_run_ids=tuple(uuid_value(record["agent_run_id"]) for record in draft_records),
         effects=effects,
         effect_observations=effect_observations,
         decisions=decisions,

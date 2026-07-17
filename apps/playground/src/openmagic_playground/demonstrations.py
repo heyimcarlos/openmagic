@@ -11,8 +11,8 @@ from openmagic_playground._verification_scenario import run_verification_scenari
 from openmagic_playground.responses import (
     ControlExerciseResponse,
     RenewalDemonstrationResponse,
-    VerificationDemonstrationResponse,
 )
+from openmagic_playground.verification_response import VerificationDemonstrationResponse
 
 
 def run_renewal_demonstration(

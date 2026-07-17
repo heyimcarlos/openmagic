@@ -29,6 +29,9 @@ from openmagic_evals.evidence.matrix import (
     cardinality_one_races,
     select_pytest_results,
 )
+from openmagic_evals.evidence.playground_models import validate_playground_control_artifact
+from openmagic_evals.evidence.process_models import validate_process_reference_case
+from openmagic_evals.evidence.race_models import validate_standalone_race_matrix
 
 _SUPPORTED_CLAIMS = (
     "The tested single-PostgreSQL kernel preserved the pinned Definition, transaction, replay, race, lease, recovery, and retry contracts.",
@@ -184,6 +187,33 @@ def _validate_common_reproducibility(
         raise ValueError("claim report requires every evidence product from clean wheel installs")
 
 
+def _validate_claim_sources(related: tuple[tuple[str, Path, Artifact], ...]) -> None:
+    artifacts = {name: artifact for name, _path, artifact in related}
+    process = artifacts["processes"]
+    races = artifacts["races"]
+    playground = artifacts["playground"]
+    if not isinstance(process, ProcessArtifact) or not process.summary.strict_pass:
+        raise ValueError("claim report requires passing process-loss evidence")
+    validate_process_reference_case(process)
+    if not isinstance(races, RaceArtifact) or not races.summary.strict_pass:
+        raise ValueError("claim report requires a passing standalone race corpus")
+    validate_standalone_race_matrix(races)
+    if not isinstance(playground, PlaygroundArtifact):
+        raise TypeError("claim report requires a typed playground artifact")
+    validate_playground_control_artifact(playground)
+    controls = playground.summary
+    if not all(
+        (
+            controls.reset_verified,
+            controls.repeated_run_verified,
+            controls.intentional_failure_verified,
+            controls.disconnected_provider_verified,
+            controls.process_controls_verified,
+        )
+    ):
+        raise ValueError("claim report requires every safe playground control to be verified")
+
+
 def write_claim_report(*, package: EvidencePackagePaths, output: Path) -> None:
     related = _load_required_artifacts(package)
     deterministic = related[0][2]
@@ -195,6 +225,7 @@ def write_claim_report(*, package: EvidencePackagePaths, output: Path) -> None:
     surface = related[1][2]
     if not isinstance(surface, SurfaceAuditArtifact) or not surface.summary.strict_pass:
         raise TypeError("claim report requires a passing surface and cold-schema artifact")
+    _validate_claim_sources(related)
     _validate_common_reproducibility(related)
 
     lines = [

@@ -133,6 +133,7 @@ class VerificationSubmissionControl:
             )
         session_id = establish_session(
             connection,
+            submit_command_id=command.command_id,
             challenge=challenge,
             session_ttl_seconds=self._session_ttl_seconds,
         )

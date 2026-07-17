@@ -9,6 +9,7 @@ from openmagic_playground import (
     RenewalDemonstrationResponse,
     VerificationDemonstrationResponse,
 )
+from openmagic_playground.verification_response import VerificationDurableChain
 
 from openmagic_evals.evidence.artifact_io import write_artifact
 from openmagic_evals.evidence.contracts import (
@@ -42,6 +43,7 @@ def _demo_artifact(
     observation: dict[str, object],
     postgres_deployments: tuple[PostgresDeploymentPin, ...],
     timeout_seconds: int,
+    verification_chains: tuple[VerificationDurableChain, ...] = (),
 ) -> PlaygroundArtifact:
     finished_at = datetime.now(UTC)
     scenarios = (
@@ -87,6 +89,7 @@ def _demo_artifact(
             process_controls_verified=False,
             contributes_to_correctness=False,
         ),
+        verification_chains=verification_chains,
         limitations=(
             "This is a synthetic demonstration and not correctness evidence.",
             "The result applies only to the pinned local provider and build.",
@@ -178,6 +181,7 @@ def run_verification_demo(
             for value in result.postgres_deployments
         ),
         timeout_seconds=timeout_seconds,
+        verification_chains=(result.durable_chain,),
     )
 
 

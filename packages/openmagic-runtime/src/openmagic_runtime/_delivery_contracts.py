@@ -89,6 +89,12 @@ class ClaimDelivery:
     claim_request_id: UUID
     worker_id: str
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.claim_request_id, UUID):
+            raise ValueError("Delivery Claim Request identity must be a UUID")
+        if not isinstance(self.worker_id, str) or not self.worker_id.strip():
+            raise ValueError("Delivery claim worker must be non-empty")
+
 
 @dataclass(frozen=True)
 class ClaimedDelivery:
@@ -98,6 +104,21 @@ class ClaimedDelivery:
     thread_id: UUID
     content_descriptor: dict[str, Any]
     context_through_sequence: int
+
+    def __post_init__(self) -> None:
+        identities = (self.delivery_attempt_id, self.delivery_id, self.thread_id)
+        if any(not isinstance(value, UUID) for value in identities):
+            raise ValueError("Claimed Delivery identities must be UUIDs")
+        if type(self.attempt_number) is not int or self.attempt_number <= 0:
+            raise ValueError("Claimed Delivery attempt number must be positive")
+        if type(self.context_through_sequence) is not int or self.context_through_sequence < 0:
+            raise ValueError("Claimed Delivery context sequence cannot be negative")
+        if (
+            not isinstance(self.content_descriptor, dict)
+            or not self.content_descriptor
+            or any(not isinstance(key, str) for key in self.content_descriptor)
+        ):
+            raise ValueError("Claimed Delivery descriptor must be a non-empty string-keyed mapping")
 
 
 @dataclass(frozen=True)

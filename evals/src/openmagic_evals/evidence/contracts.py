@@ -7,17 +7,21 @@ from typing import Annotated
 
 from pydantic import Field, TypeAdapter
 
-from openmagic_evals.evidence.agent_models import (
+from openmagic_evals.evidence.agent_aggregation import (
     AgentAggregate,
-    AgentCaseEvidence,
+    AgentCaseSummary,
+    AgentConfigurationSummary,
+    AgentQualitySummary,
+    AgentSplitSummary,
+    aggregate_agent_trials,
+    summarize_agent_cases,
+    summarize_agent_configurations,
+    summarize_agent_quality,
+)
+from openmagic_evals.evidence.agent_artifact import (
     AgentConfigurationPin,
     AgentCorpusPin,
     AgentQualityArtifact,
-    AgentQualitySummary,
-    AgentSplitSummary,
-    AgentTrialEvidence,
-    SanitizedAgentEvent,
-    aggregate_agent_trials,
 )
 from openmagic_evals.evidence.agent_scoring import (
     AgentCandidateObservation,
@@ -27,6 +31,11 @@ from openmagic_evals.evidence.agent_scoring import (
     RenewalAgentCandidateObservation,
     RenewalAgentScorerContract,
     agent_rubric_scores,
+)
+from openmagic_evals.evidence.agent_trial_models import (
+    AgentCaseEvidence,
+    AgentTrialEvidence,
+    SanitizedAgentEvent,
 )
 from openmagic_evals.evidence.availability_models import (
     AvailabilitySummary,
@@ -125,7 +134,9 @@ __all__ = [
     "AgentAggregate",
     "AgentCandidateObservation",
     "AgentCaseEvidence",
+    "AgentCaseSummary",
     "AgentConfigurationPin",
+    "AgentConfigurationSummary",
     "AgentCorpusPin",
     "AgentCorrelations",
     "AgentQualityArtifact",
@@ -191,5 +202,8 @@ __all__ = [
     "merge_correlations",
     "parse_artifact",
     "race_trial_digest",
+    "summarize_agent_cases",
+    "summarize_agent_configurations",
+    "summarize_agent_quality",
     "validate_correlated_definitions",
 ]

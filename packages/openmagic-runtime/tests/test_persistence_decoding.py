@@ -4,16 +4,23 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
+from openmagic_runtime._delivery_contracts import ClaimDelivery, ClaimedDelivery
 from openmagic_runtime._persistence.delivery_records import (
     DeliveredMessage,
-    RuntimeDeliveryEvidence,
+    RuntimeDeliveryAttemptEvidence,
 )
 from openmagic_runtime._persistence.delivery_work_models import (
+    ClaimedDeliveryRecord,
     DeliveryAttemptAuthorityRecord,
     DeliveryRecord,
     retry_policy,
 )
 from openmagic_runtime.kernel._persistence.work_authority import AttemptAuthorityRecord
+from openmagic_runtime.kernel._persistence.work_claims import (
+    ClaimCandidateRecord,
+    decode_claimed_attempt_receipt,
+)
+from openmagic_runtime.kernel._work_contracts import ClaimedAttempt, ClaimWork
 
 
 def test_delivery_retry_policy_rejects_coerced_durable_values() -> None:
@@ -114,11 +121,54 @@ def test_delivery_read_records_reject_scalar_coercion() -> None:
         )
 
     with pytest.raises(RuntimeError, match="invalid durable representation"):
-        RuntimeDeliveryEvidence.decode(
+        RuntimeDeliveryAttemptEvidence.decode(
+            {
+                "delivery_attempt_id": uuid4(),
+                "worker_id": 1,
+                "state": "running",
+            }
+        )
+
+
+def test_public_claim_contracts_reject_invalid_authority_shapes() -> None:
+    with pytest.raises(ValueError, match="worker"):
+        ClaimWork(uuid4(), "", ("executor",))
+    with pytest.raises(ValueError, match="executor"):
+        ClaimWork(uuid4(), "worker", ())
+    with pytest.raises(ValueError, match="worker"):
+        ClaimDelivery(uuid4(), "")
+    with pytest.raises(ValueError, match="positive"):
+        ClaimedAttempt(uuid4(), uuid4(), uuid4(), 0, "step", "executor", 1, {})
+    with pytest.raises(ValueError, match="positive"):
+        ClaimedDelivery(uuid4(), uuid4(), 0, uuid4(), {"kind": "draft"}, 0)
+
+
+def test_attempt_claim_records_reject_coerced_database_and_replay_values() -> None:
+    with pytest.raises(RuntimeError, match="invalid durable representation"):
+        ClaimCandidateRecord.decode({"step_id": str(uuid4()), "template_key": "draft", "input": {}})
+    with pytest.raises(RuntimeError, match="invalid durable representation"):
+        decode_claimed_attempt_receipt(
+            {
+                "instance_id": str(uuid4()).upper(),
+                "step_id": str(uuid4()),
+                "attempt_id": str(uuid4()),
+                "attempt_number": True,
+                "template_key": "draft",
+                "executor_key": "agent",
+                "lease_seconds": 30,
+                "input": {},
+            }
+        )
+
+
+def test_delivery_claim_record_rejects_boolean_attempt_number() -> None:
+    with pytest.raises(RuntimeError, match="invalid durable representation"):
+        ClaimedDeliveryRecord.decode(
             {
                 "delivery_id": uuid4(),
-                "status": "pending",
-                "delivered_message_id": None,
-                "attempt_states": ("running",),
+                "attempt_number": True,
+                "thread_id": uuid4(),
+                "content_descriptor": {"kind": "renewal"},
+                "context_through_sequence": 0,
             }
         )

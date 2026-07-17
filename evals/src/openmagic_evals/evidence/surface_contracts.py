@@ -43,6 +43,7 @@ RUNTIME_PUBLIC_EXPORTS = {
         "DeliveryRetryPolicy",
         "DeliveryStatus",
         "DeliveryWork",
+        "RuntimeDeliveryAttemptEvidence",
         "RuntimeDeliveryEvidence",
         "StaleDeliveryAuthority",
         "acknowledge_delivery",
@@ -55,9 +56,12 @@ RUNTIME_PUBLIC_EXPORTS = {
     ),
     "evidence.py": (
         "EvidenceRecord",
+        "POSTGRES_EVIDENCE_CONFIGURATION_KEYS",
         "RuntimeAgentRunEvidence",
         "RuntimeAttemptEvidence",
+        "RuntimeAttemptLeaseEvidence",
         "RuntimeDatabaseHealth",
+        "RuntimeDeliveryAttemptEvidence",
         "RuntimeDeliveryEvidence",
         "RuntimeEvidenceReader",
         "RuntimeInstanceEvidence",
@@ -273,7 +277,7 @@ APPLICATION_PUBLIC_EXPORTS = {
         "EmailReconciliationExecutor",
         "committed_permit_execution_input",
     ),
-    "renewal_evidence.py": ("RenewalEvidenceProjector",),
+    "renewal_evidence.py": ("RenewalEvidenceProjector", "read_renewal_evidence"),
     "renewal_facts.py": ("RenewalFacts", "StaleRenewalFacts"),
     "renewal_lifecycle.py": ("RenewalLifecycleControl",),
     "renewal_lifecycle_policy.py": (
@@ -377,6 +381,11 @@ APPLICATION_PUBLIC_EXPORTS = {
     ),
     "verification_control.py": ("VerificationControl",),
     "verification_definition.py": ("VERIFICATION_DEFINITION",),
+    "verification_evidence.py": (
+        "ApplicationEventEvidence",
+        "VerificationApplicationEvidence",
+        "VerificationEvidenceReader",
+    ),
     "verification_policy.py": (
         "MAX_FAILED_CODE_ATTEMPTS",
         "VERIFICATION_ATTEMPT_RETRY_POLICY",
@@ -419,11 +428,11 @@ EXPECTED_PRODUCTION_EDGES = (
     "openmagic-api -> openmagic-runtime",
 )
 PUBLIC_SURFACE_DIGESTS = {
-    "example-insurance": "sha256:d9bb55a4f39f49f8d85a1f46535ac78c86b014d1e063678f82afaa75f8339a4c",
+    "example-insurance": "sha256:326f423bae9b19ebfe59f7a78af5b714f0936a2eb375b6e705c90288524de0dc",
     "openmagic-api": "sha256:b47b899d81cf0831f3fa31e984c8e342e9fa8a32adbec983739a29929d131ed3",
-    "openmagic-evals": "sha256:bfeb4918ed2657f62c7f1522c41d6194122b72cc6dfa340b430dadb59eba688f",
-    "openmagic-playground": "sha256:6cc3a703f683d32707222b87865d3261bcc7759c865a572e40b342a31e54ec09",
-    "openmagic-runtime": "sha256:9c9c7890845c465d87a3c7bf6d7f5882003365072ecf7f611e84b69ca901d7db",
+    "openmagic-evals": "sha256:82396f1ab9f3f7ee7da63d00e795e8529f262e35ca3539daa6fa3dc6f51561bb",
+    "openmagic-playground": "sha256:71f6f0bf09acca43f8e7f2dfe0003a317398e4d2e2a31722faa3fae3f7d4c5e1",
+    "openmagic-runtime": "sha256:6a739002d61ec5b380d6b547ff076261e4b6fb2bbc1e13be31ed474c59b39240",
 }
 
 __all__ = [

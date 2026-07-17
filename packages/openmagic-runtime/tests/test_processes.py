@@ -6,11 +6,20 @@ import signal
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from multiprocessing import get_context
 from pathlib import Path
 
 import pytest
 from openmagic_runtime.processes import OwnedProcess, owned_cleanup_scope
+
+
+class _CountingResource:
+    def __init__(self) -> None:
+        self.close_count = 0
+
+    def close(self) -> None:
+        self.close_count += 1
 
 
 def _ignore_terminate_without_session() -> None:
@@ -213,3 +222,43 @@ def test_owned_subprocess_launch_failure_closes_caller_resources(tmp_path: Path)
         )
 
     assert output.closed
+
+
+def test_owned_process_cleanup_effects_are_one_shot() -> None:
+    signals: list[signal.Signals] = []
+    waits: list[float] = []
+    resource = _CountingResource()
+    owner = OwnedProcess(
+        process_id=2_000_000_000,
+        wait_for_exit=lambda timeout: waits.append(timeout) is None,
+        signal_process=signals.append,
+        resources=(resource,),
+        group_member_enumerator=lambda _process_group_id: (),
+    )
+
+    first = owner.reap(timeout_seconds=0.1)
+    second = owner.reap(timeout_seconds=0.1)
+
+    assert second is first
+    assert signals == [signal.SIGTERM]
+    assert waits == [0.1]
+    assert resource.close_count == 1
+
+
+def test_concurrent_owned_process_cleanup_shares_one_terminal_result() -> None:
+    signals: list[signal.Signals] = []
+    resource = _CountingResource()
+    owner = OwnedProcess(
+        process_id=2_000_000_000,
+        wait_for_exit=lambda _timeout: True,
+        signal_process=signals.append,
+        resources=(resource,),
+        group_member_enumerator=lambda _process_group_id: (),
+    )
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        results = tuple(executor.map(lambda _: owner.reap(timeout_seconds=0.1), range(4)))
+
+    assert all(result is results[0] for result in results)
+    assert signals == [signal.SIGTERM]
+    assert resource.close_count == 1

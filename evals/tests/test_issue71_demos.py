@@ -52,6 +52,27 @@ def test_public_demonstrations_reproduce_from_reused_working_directory(tmp_path:
     assert second.cases[0].verdict.status == "passed"
     assert verification.cases[0].verdict.status == "passed"
     assert verification.cases[0].case_id == _VERIFICATION_DEMONSTRATION_CASE_ID
+    verification_correlations = verification.cases[0].correlations
+    assert len(verification_correlations.runtime.workflow_ids) == 2
+    assert len(verification_correlations.runtime.instance_ids) == 2
+    assert {
+        item.definition_key for item in verification_correlations.runtime.instance_definitions
+    } == {
+        "example_insurance.renewal_outreach",
+        "example_insurance.verification_delivery",
+    }
+    assert verification_correlations.runtime.step_ids
+    assert verification_correlations.runtime.attempt_ids
+    assert verification_correlations.runtime.trace_event_ids
+    assert len(verification_correlations.runtime.command_ids) >= 5
+    assert len(verification_correlations.application.message_ids) >= 3
+    assert len(verification_correlations.application.domain_event_ids) >= 3
+    assert len(verification_correlations.application.delivery_ids) >= 3
+    assert len(verification_correlations.application.delivery_attempt_ids) >= 3
+    assert verification_correlations.application.approval_grant_ids
+    assert verification_correlations.application.verification_challenge_ids
+    assert verification_correlations.application.verification_session_ids
+    assert verification_correlations.process.worker_ids
 
 
 def test_renewal_demo_cli_records_its_explicit_timeout(tmp_path: Path) -> None:

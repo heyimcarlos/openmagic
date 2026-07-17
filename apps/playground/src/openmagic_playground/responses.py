@@ -6,7 +6,7 @@ from collections.abc import Iterable
 from typing import Literal, TypeVar
 from uuid import UUID
 
-from openmagic_runtime.evidence import content_fingerprint
+from openmagic_runtime.evidence import POSTGRES_EVIDENCE_CONFIGURATION_KEYS, content_fingerprint
 from pydantic import BaseModel, ConfigDict, Field, PositiveInt, model_validator
 
 CorrelationValue = TypeVar("CorrelationValue")
@@ -160,6 +160,8 @@ class PostgresDeploymentObservation(_ResponseModel):
 
     @model_validator(mode="after")
     def validate_postgres(self) -> PostgresDeploymentObservation:
+        if set(self.postgres_configuration) != POSTGRES_EVIDENCE_CONFIGURATION_KEYS:
+            raise ValueError("playground PostgreSQL provenance requires every configuration key")
         if self.postgres_configuration_digest != "sha256:" + content_fingerprint(
             self.postgres_configuration
         ):
@@ -206,27 +208,12 @@ class PlaygroundScenarioCoverage(_ResponseModel):
     disconnected_provider: FailureScenarioObservation
 
 
-class VerificationDemonstrationObservation(_ResponseModel):
-    verification_outcome: Literal["verified"]
-    protected_outcome: Literal["authorized"]
-    session_count: Literal[1]
-
-
 class RenewalDemonstrationResponse(_ResponseModel):
     response_schema_version: Literal[1] = 1
     response_type: Literal["demonstration"] = "demonstration"
     demonstration: Literal["renewal"] = "renewal"
     correlations: PlaygroundCorrelations
     observation: RenewalDemonstrationObservation
-    postgres_deployments: tuple[PostgresDeploymentObservation, ...] = Field(min_length=1)
-
-
-class VerificationDemonstrationResponse(_ResponseModel):
-    response_schema_version: Literal[1] = 1
-    response_type: Literal["demonstration"] = "demonstration"
-    demonstration: Literal["verification"] = "verification"
-    correlations: PlaygroundCorrelations
-    observation: VerificationDemonstrationObservation
     postgres_deployments: tuple[PostgresDeploymentObservation, ...] = Field(min_length=1)
 
 
@@ -266,6 +253,4 @@ __all__ = [
     "RenewalDemonstrationObservation",
     "RenewalDemonstrationResponse",
     "SafeRenewalBoundaryObservation",
-    "VerificationDemonstrationObservation",
-    "VerificationDemonstrationResponse",
 ]

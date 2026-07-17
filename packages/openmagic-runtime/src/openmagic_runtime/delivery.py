@@ -29,6 +29,7 @@ from openmagic_runtime._persistence.delivery_intents import DeliveryIntentRecord
 from openmagic_runtime._persistence.delivery_records import (
     DeliveredMessage,
     DeliveryPresentation,
+    RuntimeDeliveryAttemptEvidence,
     RuntimeDeliveryEvidence,
     deliveries_for_domain_event,
     lock_delivery_presentation,
@@ -137,6 +138,7 @@ __all__ = [
     "DeliveryRetryPolicy",
     "DeliveryStatus",
     "DeliveryWork",
+    "RuntimeDeliveryAttemptEvidence",
     "RuntimeDeliveryEvidence",
     "StaleDeliveryAuthority",
     "acknowledge_delivery",

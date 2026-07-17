@@ -53,6 +53,8 @@ from openmagic_evals.evidence.contracts import (
     deterministic_observation_digest,
     parse_artifact,
     race_trial_digest,
+    summarize_agent_cases,
+    summarize_agent_configurations,
 )
 from openmagic_evals.evidence.redaction import RedactionViolation, audit_redaction
 from openmagic_evals.evidence.reproducibility import (
@@ -151,13 +153,19 @@ def _pin() -> ReproducibilityPin:
                 postgres_version="17.5",
                 postgres_image="postgres@sha256:" + "1" * 64,
                 postgres_configuration={
+                    "default_transaction_isolation": "read committed",
+                    "max_connections": "100",
+                    "observer_transaction_isolation": "repeatable read",
                     "synchronous_commit": "on",
-                    "transaction_isolation": "read committed",
+                    "timezone": "UTC",
                 },
                 postgres_configuration_digest=canonical_digest(
                     {
+                        "default_transaction_isolation": "read committed",
+                        "max_connections": "100",
+                        "observer_transaction_isolation": "repeatable read",
                         "synchronous_commit": "on",
-                        "transaction_isolation": "read committed",
+                        "timezone": "UTC",
                     }
                 ),
                 migration_heads={
@@ -585,12 +593,13 @@ def test_race_trial_requires_cardinality_one_and_durable_correlations() -> None:
             overlap_barrier_observed=True,
         )
 
+    agent_case = _agent_case()
     with pytest.raises(ValueError, match="Agent quality cannot determine"):
         AgentQualityArtifact(
             reproducibility=_pin(),
             corpus=_agent_corpus(),
             agent_configurations=(_agent_configuration(),),
-            cases=(_agent_case(),),
+            cases=(agent_case,),
             summary=AgentQualitySummary(
                 development=AgentSplitSummary(
                     case_count=1,
@@ -633,6 +642,12 @@ def test_race_trial_requires_cardinality_one_and_durable_correlations() -> None:
                         ),
                     ),
                     threshold_passed=True,
+                ),
+                cases=summarize_agent_cases((agent_case,)),
+                configurations=summarize_agent_configurations(
+                    (agent_case,),
+                    ("renewal_outreach",),
+                    summarize_agent_cases((agent_case,)),
                 ),
                 combined=AgentAggregate(
                     observed_trials=2,

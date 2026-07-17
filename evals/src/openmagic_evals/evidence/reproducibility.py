@@ -36,9 +36,9 @@ from openmagic_evals.evidence.pins import (
     ExecutablePin,
     PostgresDeploymentPin,
 )
-from openmagic_evals.evidence.race_transitions import (
-    _SIGNAL_RELEASE_DEFINITION,
-    transition_race_definitions,
+from openmagic_evals.evidence.race_definitions import (
+    SIGNAL_RELEASE_DEFINITION,
+    evidence_race_definitions,
 )
 from openmagic_evals.harness._postgres import POSTGRES_IMAGE
 
@@ -290,8 +290,8 @@ def _pinned_definition_digests() -> dict[str, str]:
         for definition in (
             RENEWAL_DEFINITION,
             VERIFICATION_DEFINITION,
-            _SIGNAL_RELEASE_DEFINITION,
-            *transition_race_definitions(),
+            SIGNAL_RELEASE_DEFINITION,
+            *evidence_race_definitions(),
         )
     }
 

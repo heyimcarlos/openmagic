@@ -13,7 +13,7 @@ from openmagic_evals.evidence.agent_experiment import (
     execute_agent_phase,
 )
 from openmagic_evals.evidence.agent_projection import (
-    AgentExperimentResult,
+    AgentExperimentAssessment,
     agent_corpus_digest,
     evaluate_trials,
     project_agent_quality_artifact,
@@ -84,7 +84,7 @@ def run_local_agent_quality(
 
 __all__ = [
     "AgentCase",
-    "AgentExperimentResult",
+    "AgentExperimentAssessment",
     "AgentTrial",
     "evaluate_trials",
     "load_sealed_held_out_cases",

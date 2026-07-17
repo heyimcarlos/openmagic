@@ -11,17 +11,6 @@ from uuid import UUID
 class StaleAuthority(RuntimeError):
     """Raised when a Worker submits a result after its lease authority ended."""
 
-    def __init__(
-        self,
-        message: str,
-        *,
-        checked_at: datetime | None = None,
-        lease_expires_at: datetime | None = None,
-    ) -> None:
-        super().__init__(message)
-        self.checked_at = checked_at
-        self.lease_expires_at = lease_expires_at
-
 
 class AttemptResultConflict(RuntimeError):
     """Raised when an Attempt identity is reused with a different observation."""
@@ -32,6 +21,19 @@ class ClaimWork:
     claim_request_id: UUID
     worker_id: str
     executor_keys: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.claim_request_id, UUID):
+            raise ValueError("Claim Request identity must be a UUID")
+        if not isinstance(self.worker_id, str) or not self.worker_id.strip():
+            raise ValueError("Attempt claim worker must be non-empty")
+        if (
+            type(self.executor_keys) is not tuple
+            or not self.executor_keys
+            or any(not isinstance(key, str) or not key.strip() for key in self.executor_keys)
+            or len(set(self.executor_keys)) != len(self.executor_keys)
+        ):
+            raise ValueError("Attempt claim executor keys must be unique and non-empty")
 
 
 @dataclass(frozen=True)
@@ -44,6 +46,22 @@ class ClaimedAttempt:
     executor_key: str
     lease_seconds: int
     input: dict[str, Any]
+
+    def __post_init__(self) -> None:
+        identities = (self.instance_id, self.step_id, self.attempt_id)
+        if any(not isinstance(value, UUID) for value in identities):
+            raise ValueError("Claimed Attempt identities must be UUIDs")
+        if type(self.attempt_number) is not int or self.attempt_number <= 0:
+            raise ValueError("Claimed Attempt number must be positive")
+        if type(self.lease_seconds) is not int or self.lease_seconds <= 0:
+            raise ValueError("Claimed Attempt lease must be positive")
+        if any(
+            not isinstance(value, str) or not value.strip()
+            for value in (self.template_key, self.executor_key)
+        ):
+            raise ValueError("Claimed Attempt keys must be non-empty")
+        if not isinstance(self.input, dict) or any(not isinstance(key, str) for key in self.input):
+            raise ValueError("Claimed Attempt input must be a string-keyed mapping")
 
 
 @dataclass(frozen=True)
@@ -58,6 +76,11 @@ class AttemptExecutionAuthority:
     claim: ClaimedAttempt
     directive: Literal["execute", "replay"]
     accepted_observation: dict[str, Any] | None
+
+    def __post_init__(self) -> None:
+        replay = self.directive == "replay"
+        if replay != (self.accepted_observation is not None):
+            raise ValueError("Attempt execution authority has an inconsistent directive")
 
 
 @dataclass

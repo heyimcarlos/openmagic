@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
+from openmagic_runtime.evidence import POSTGRES_EVIDENCE_CONFIGURATION_KEYS
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from openmagic_evals.evidence._execution_config import (
@@ -120,6 +121,8 @@ class PostgresDeploymentPin(_PinModel):
         _require_digest(self.deployment_id, "deployment_id")
         if "@sha256:" not in self.postgres_image or not self.postgres_configuration:
             raise ValueError("PostgreSQL image and observed configuration must be pinned")
+        if set(self.postgres_configuration) != POSTGRES_EVIDENCE_CONFIGURATION_KEYS:
+            raise ValueError("PostgreSQL provenance requires every named configuration value")
         _require_digest(self.postgres_configuration_digest, "postgres_configuration_digest")
         if self.postgres_configuration_digest != canonical_digest(self.postgres_configuration):
             raise ValueError("PostgreSQL configuration digest does not match its document")

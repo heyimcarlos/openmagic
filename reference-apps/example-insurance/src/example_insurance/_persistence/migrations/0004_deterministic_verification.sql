@@ -192,6 +192,7 @@ ALTER TABLE example_insurance.verification_workflows
 
 CREATE TABLE example_insurance.verification_sessions (
     session_id uuid PRIMARY KEY,
+    submit_command_id uuid NOT NULL UNIQUE,
     challenge_id uuid NOT NULL UNIQUE
         REFERENCES example_insurance.verification_challenges(challenge_id),
     party_id uuid NOT NULL REFERENCES example_insurance.parties(party_id),
